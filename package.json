@@ -1,0 +1,32 @@
+{
+  "name": "termlink",
+  "version": "1.0.0",
+  "description": "Shared web-based terminal — access your local PTY session from any browser over WebSocket",
+  "main": "server.js",
+  "bin": {
+    "termlink": "server.js"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": [
+    "terminal",
+    "pty",
+    "websocket",
+    "remote",
+    "shell",
+    "tty",
+    "xterm",
+    "cli"
+  ],
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "private": true,
+  "license": "MIT",
+  "dependencies": {
+    "@lydell/node-pty": "^1.0.1",
+    "express": "^4.21.2",
+    "ws": "^8.18.0"
+  }
+}
