@@ -231,6 +231,59 @@ function verifyPassword(password, stored) {
 const args = process.argv.slice(2);
 const command = args[0];
 
+// ---------------------------------------------------------------------------
+// QR code display (using qrcode-terminal)
+// ---------------------------------------------------------------------------
+let qrcodeTerminal;
+try { qrcodeTerminal = require("qrcode-terminal"); } catch {}
+
+// ---------------------------------------------------------------------------
+// CLI subcommands
+// ---------------------------------------------------------------------------
+const PKG_VERSION = require(path.join(__dirname, "package.json")).version;
+
+if (command === "help" || command === "--help" || command === "-h") {
+  console.log(`
+  TermLink v${PKG_VERSION} — Access your terminal from any device
+
+  Usage:
+    termlink                        Start server (default)
+    termlink run <command...>       Start server & auto-run a command
+    termlink set <key> <value>      Set a config value
+    termlink get <key>              Get a config value
+    termlink update                 Update to latest version
+    termlink help                   Show this help
+
+  Run examples:
+    termlink run claude --model opus --dangerously-skip-permissions
+    termlink run vertex --model gemini-2.5-pro
+    termlink run ssh user@server
+    termlink run python3
+
+  Flags:
+    --port <n>          Port number (default: 7681)
+    --host <addr>       Bind address (default: 127.0.0.1)
+    --shell <shell>     Shell command (default: cmd.exe / bash)
+    --token <tok>       Custom auth token
+    --sessions <n>      Initial sessions (default: 1)
+    --max-sessions <n>  Max sessions (default: 10)
+    --open              Open browser on startup
+    --qr                Show QR code (default: on)
+    --no-qr             Hide QR code
+    --name <name>       Session name (used with 'run')
+
+  Config:
+    termlink set auth.username admin
+    termlink set auth.password s3cret
+`);
+  process.exit(0);
+}
+
+if (command === "version" || command === "--version" || command === "-v") {
+  console.log(`termlink v${PKG_VERSION}`);
+  process.exit(0);
+}
+
 if (command === "set") {
   const key = args[1]; const value = args.slice(2).join(" ");
   if (!key || !value) { console.error("Usage: termlink set <key> <value>\n\nExamples:\n  termlink set auth.username admin\n  termlink set auth.password s3cret"); process.exit(1); }
@@ -247,17 +300,40 @@ if (command === "get") {
   process.exit(0);
 }
 if (command === "update") {
-  const pkg = require(path.join(__dirname, "package.json"));
-  console.log(`[termlink] Current version: ${pkg.version}\n[termlink] Checking for updates...`);
+  console.log(`[termlink] Current version: ${PKG_VERSION}\n[termlink] Checking for updates...`);
   try { execSync("npm install -g termlink@latest", { stdio: "inherit" }); console.log("[termlink] Update complete."); }
   catch { console.error("[termlink] Update failed. Try manually: npm install -g termlink@latest"); process.exit(1); }
   process.exit(0);
+}
+
+// "run" subcommand — collect everything after "run" as the command (excluding flags)
+let RUN_COMMAND = "";
+let RUN_NAME = "";
+if (command === "run") {
+  // Collect command parts: everything after "run" that isn't a --flag or its value
+  const runArgs = args.slice(1);
+  const cmdParts = [];
+  let skipNext = false;
+  const flagsWithValue = new Set(["--port", "--host", "--shell", "--token", "--sessions", "--max-sessions", "--name"]);
+  const flagsNoValue = new Set(["--open", "--qr", "--no-qr"]);
+  for (let i = 0; i < runArgs.length; i++) {
+    if (skipNext) { skipNext = false; continue; }
+    if (flagsWithValue.has(runArgs[i])) { skipNext = true; continue; }
+    if (flagsNoValue.has(runArgs[i])) continue;
+    cmdParts.push(runArgs[i]);
+  }
+  RUN_COMMAND = cmdParts.join(" ");
+  if (!RUN_COMMAND) {
+    console.error("Usage: termlink run <command...>\n\nExamples:\n  termlink run claude --model opus\n  termlink run vertex --model gemini-2.5-pro\n  termlink run ssh user@server");
+    process.exit(1);
+  }
 }
 
 // ---------------------------------------------------------------------------
 // Server mode — parse flags
 // ---------------------------------------------------------------------------
 function flag(name, fallback) { const i = args.indexOf(name); return (i === -1 || i + 1 >= args.length) ? fallback : args[i + 1]; }
+function hasFlag(name) { return args.includes(name); }
 
 const PORT = parseInt(flag("--port", "7681"), 10);
 const HOST = flag("--host", "127.0.0.1");
@@ -267,6 +343,9 @@ const SHELL = flag("--shell", defaultShell);
 const TOKEN = flag("--token", crypto.randomBytes(16).toString("hex"));
 const INITIAL_SESSIONS = Math.max(1, parseInt(flag("--sessions", "1"), 10));
 const MAX_SESSIONS = Math.max(1, parseInt(flag("--max-sessions", "10"), 10));
+const AUTO_OPEN = hasFlag("--open");
+const SHOW_QR = !hasFlag("--no-qr");
+RUN_NAME = flag("--name", RUN_NAME);
 
 // ---------------------------------------------------------------------------
 // Authentication
@@ -397,9 +476,15 @@ function broadcastEvent(event) {
   }
 }
 
-// Spawn sessions — restore previous state
+// Spawn sessions — restore previous state OR create from run command
 const savedState = loadState();
-if (savedState && savedState.sessions && savedState.sessions.length > 0) {
+if (RUN_COMMAND) {
+  // "termlink run <cmd>" — start fresh with a single session running the command
+  const runName = RUN_NAME || RUN_COMMAND.split(/\s+/)[0];
+  spawnSession(nextSessionId++, {
+    cwd: process.cwd(), name: runName, runCommand: RUN_COMMAND, restoreScrollback: false,
+  });
+} else if (savedState && savedState.sessions && savedState.sessions.length > 0) {
   for (const s of savedState.sessions) {
     const cwdOk = s.cwd && fs.existsSync(s.cwd);
     const id = s.id != null ? s.id : nextSessionId;
@@ -411,15 +496,61 @@ if (savedState && savedState.sessions && savedState.sessions.length > 0) {
       created: s.created, lastActivity: s.lastActivity, restoreScrollback: true,
     });
   }
-  console.log(`[termlink] Restored ${savedState.sessions.length} session(s): ${SHELL} (${cols}x${rows})`);
 } else {
   for (let i = 0; i < INITIAL_SESSIONS; i++) spawnSession(nextSessionId++, { restoreScrollback: false });
-  console.log(`[termlink] ${INITIAL_SESSIONS} session(s) spawned: ${SHELL} (${cols}x${rows})`);
 }
 saveState();
-console.log(useCredentials ? `[termlink] Access URL: http://${HOST}:${PORT}/` : `[termlink] Access URL: http://${HOST}:${PORT}/?token=${TOKEN}`);
-console.log(`[termlink] Tip: run  ngrok http ${PORT}  to share from your phone`);
-console.log("[termlink] Press Ctrl+C twice quickly to exit.\n");
+
+// ---------------------------------------------------------------------------
+// Startup banner
+// ---------------------------------------------------------------------------
+const ACCESS_URL = useCredentials ? `http://${HOST}:${PORT}/` : `http://${HOST}:${PORT}/?token=${TOKEN}`;
+
+function printBanner() {
+  // Compute width based on longest content line
+  const urlLine = `URL:      ${ACCESS_URL}`;
+  const cmdLine = RUN_COMMAND ? `Command:  ${RUN_COMMAND}` : "";
+  const contentWidth = Math.max(urlLine.length, cmdLine.length, 40) + 4;
+  const w = Math.min(Math.max(contentWidth, process.stdout.columns || 60), 100);
+  const line = "─".repeat(w);
+  const pad = (s) => { const p = w - 2 - s.length; return "│ " + s + " ".repeat(Math.max(0, p)) + "│"; };
+
+  console.log("");
+  console.log(`┌${line}┐`);
+  console.log(pad(`TermLink v${PKG_VERSION}`));
+  console.log(`├${line}┤`);
+  if (RUN_COMMAND) {
+    console.log(pad(`Command:  ${RUN_COMMAND}`));
+    console.log(pad(`Folder:   ${process.cwd()}`));
+  } else {
+    const ct = sessions.size;
+    console.log(pad(`Sessions: ${ct} (${savedState && savedState.sessions ? "restored" : "new"})`));
+    console.log(pad(`Shell:    ${SHELL}`));
+  }
+  console.log(pad(`URL:      ${ACCESS_URL}`));
+  console.log(pad(""));
+  console.log(pad("Scan QR or open URL on any device."));
+  console.log(pad("Tip: run  ngrok http " + PORT + "  to expose publicly."));
+  console.log(pad("Press Ctrl+C twice to exit."));
+  console.log(`└${line}┘`);
+
+  // QR code
+  if (SHOW_QR && qrcodeTerminal) {
+    console.log("");
+    qrcodeTerminal.generate(ACCESS_URL, { small: true }, (qr) => {
+      if (qr) console.log(qr);
+    });
+  }
+}
+printBanner();
+
+// Auto-open browser
+if (AUTO_OPEN) {
+  try {
+    const openCmd = isWindows ? `start ""  "${ACCESS_URL}"` : (os.platform() === "darwin" ? `open "${ACCESS_URL}"` : `xdg-open "${ACCESS_URL}"`);
+    execSync(openCmd, { stdio: "ignore", timeout: 5000 });
+  } catch {}
+}
 
 // Periodic save (every 30 seconds)
 const periodicSaveInterval = setInterval(() => { saveState(); saveAllScrollback(); }, 30000);
