@@ -1,10 +1,10 @@
 {
   "name": "@adibenmatdev/agenv",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "description": "The agent development environment — build, run, and monitor AI agents from a full web IDE with split terminals, file editing, and session management",
   "main": "electron.js",
   "bin": {
-    "agenv": "server.js"
+    "agenv": "cli.js"
   },
   "scripts": {
     "start": "node server.js",
@@ -46,6 +46,7 @@
     "node": ">=16.0.0"
   },
   "files": [
+    "cli.js",
     "server.js",
     "electron.js",
     "preload.js",

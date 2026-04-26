@@ -26,26 +26,20 @@ npx @adibenmatdev/agenv
 ## Quick start
 
 ```bash
-# Start the environment
+# Launch the desktop app (default)
 agenv
 
-# Start on a custom port
-agenv --port 8080
-
-# Open the web UI automatically
+# Start in web mode (accessible from any browser)
 agenv --web
 
-# Start with multiple sessions
-agenv --sessions 4
+# Web mode with custom port
+agenv --web --port 8080
+
+# Web mode with multiple sessions
+agenv --web --sessions 4
 ```
 
-On startup, Agenv prints your access URL:
-
-```
-[agenv] Access URL: http://127.0.0.1:7681/?token=3f8a2c...
-```
-
-Open it in any browser — desktop, tablet, or phone.
+By default, `agenv` launches the Electron desktop app — no open port, no token needed. Use `--web` to start the web server for browser access from any device.
 
 ## What you get
 
@@ -64,26 +58,28 @@ Sessions persist across browser reconnects. Create, rename, group, archive, and 
 ### Agent cost tracking
 Monitor token usage and cost per session in real time. See running/waiting/error status at a glance on each tab.
 
-### Works everywhere
-Access from any device on your network. Responsive layout works on desktop, tablet, and mobile. Optional ngrok integration for remote access.
+### Desktop app (default)
+Launches as a native Electron app with OS-level keyboard shortcuts and window management. No open port, no token — just launch and go.
 
-### Desktop app
-Run as a native Electron app with OS-level keyboard shortcuts and window management.
+### Web mode
+Start with `agenv --web` to access from any device on your network. Responsive layout works on desktop, tablet, and mobile. Optional ngrok integration for remote access (web mode only).
 
-## Configuration
+## Configuration (web mode)
+
+These flags apply when running in web mode (`agenv --web`):
 
 ```bash
 # Custom port
-agenv --port 8080
+agenv --web --port 8080
 
 # Expose on LAN (default is localhost-only)
-agenv --host 0.0.0.0
+agenv --web --host 0.0.0.0
 
 # Fixed token instead of random
-agenv --token mysecrettoken
+agenv --web --token mysecrettoken
 
 # Start with multiple sessions
-agenv --sessions 4
+agenv --web --sessions 4
 ```
 
 ## Authentication
@@ -143,7 +139,21 @@ agenv update
 
 ## CLI reference
 
-### Server flags
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `agenv` | Launch desktop app (default) |
+| `agenv --web` | Start web server mode |
+| `agenv run <command...>` | Start with a command running |
+| `agenv stop` | Stop running server |
+| `agenv kill` | Force-kill running server |
+| `agenv set <key> <value>` | Set a config value |
+| `agenv get <key>` | Read a config value |
+| `agenv update` | Update to latest version |
+| `agenv help` | Show help |
+
+### Web mode flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -154,19 +164,6 @@ agenv update
 | `--sessions <number>` | `1` | Initial number of sessions |
 | `--no-qr` | | Suppress QR code on startup |
 
-### Commands
-
-| Command | Description |
-|---------|-------------|
-| `agenv` | Start the environment |
-| `agenv run <command...>` | Start with a command running |
-| `agenv stop` | Stop running server |
-| `agenv kill` | Force-kill running server |
-| `agenv set <key> <value>` | Set a config value |
-| `agenv get <key>` | Read a config value |
-| `agenv update` | Update to latest version |
-| `agenv help` | Show help |
-
 ## Architecture
 
 - **Server**: Node.js + Express + WebSocket, manages PTY sessions via node-pty
@@ -176,4 +173,4 @@ agenv update
 
 ## License
 
-MIT
+Apache-2.0

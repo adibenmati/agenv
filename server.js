@@ -246,11 +246,12 @@ const PKG_VERSION = require(path.join(__dirname, "package.json")).version;
 
 if (command === "help" || command === "--help" || command === "-h") {
   console.log(`
-  Agenv v${PKG_VERSION} — Access your terminal from any device
+  Agenv v${PKG_VERSION} — The agent development environment
 
   Usage:
-    agenv                        Start server (default)
-    agenv run <command...>       Start server & auto-run a command
+    agenv                        Launch desktop app (default)
+    agenv --web                  Start web server mode
+    agenv run <command...>       Start & auto-run a command
     agenv stop                   Stop running server
     agenv kill                   Force-kill running server
     agenv set <key> <value>      Set a config value
@@ -264,7 +265,7 @@ if (command === "help" || command === "--help" || command === "-h") {
     agenv run ssh user@server
     agenv run python3
 
-  Flags:
+  Web mode flags (use with --web):
     --port <n>          Port number (default: 7681)
     --host <addr>       Bind address (default: 127.0.0.1)
     --shell <shell>     Shell command (default: cmd.exe / bash)
@@ -305,8 +306,8 @@ if (command === "get") {
 }
 if (command === "update") {
   console.log(`[agenv] Current version: ${PKG_VERSION}\n[agenv] Checking for updates...`);
-  try { execSync("npm install -g agenv@latest", { stdio: "inherit" }); console.log("[agenv] Update complete."); }
-  catch { console.error("[agenv] Update failed. Try manually: npm install -g agenv@latest"); process.exit(1); }
+  try { execSync("npm install -g @adibenmatdev/agenv@latest", { stdio: "inherit" }); console.log("[agenv] Update complete."); }
+  catch { console.error("[agenv] Update failed. Try manually: npm install -g @adibenmatdev/agenv@latest"); process.exit(1); }
   process.exit(0);
 }
 
@@ -811,7 +812,7 @@ function printBanner() {
   console.log(pad(`URL:      ${ACCESS_URL}`));
   console.log(pad(""));
   console.log(pad("Scan QR or open URL on any device."));
-  console.log(pad("Tip: run  ngrok http " + PORT + "  to expose publicly."));
+  console.log(pad("Tip: ngrok tunneling is supported in web mode (--web)."));
   console.log(pad("Press Ctrl+C twice to exit."));
   console.log(`└${line}┘`);
 
