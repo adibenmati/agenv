@@ -4,7 +4,7 @@ The agent development environment. Build, run, and monitor AI agents from a full
 
 <div align="center">
 
-![Agenv Demo](demo.mp4)
+[<img src="https://img.shields.io/badge/▶_Watch_Demo-blue?style=for-the-badge&logo=youtube&logoColor=white" alt="Watch Demo">](https://github.com/adibenmati/agenv/releases/download/v1.0.0/Video.Project.mp4)
 
 </div>
 
