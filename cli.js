@@ -15,7 +15,6 @@ const isWeb = args.includes("--web");
 
 // If it's a subcommand or --web, delegate directly to server.js
 if (subcommands.has(command) || isWeb) {
-  // Strip --web from args before passing to server.js
   const serverArgs = args.filter(a => a !== "--web");
   const child = spawn(process.execPath, [path.join(__dirname, "server.js"), ...serverArgs], {
     stdio: "inherit",
@@ -28,27 +27,35 @@ if (subcommands.has(command) || isWeb) {
 
 // Default mode: launch Electron (desktop app, no open port)
 function tryElectron() {
-  // Check if electron is available
-  let electronPath;
+  let electronBinary;
+
+  // Method 1: require("electron") returns the path to the actual binary
   try {
-    // Try to find electron in node_modules (devDependency)
-    electronPath = require.resolve("electron/cli.js");
-  } catch {
-    try {
-      // Try global electron
-      const which = process.platform === "win32" ? "where electron" : "which electron";
-      electronPath = execSync(which, { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }).trim().split(/\r?\n/)[0];
-    } catch {
-      return false;
+    electronBinary = require("electron");
+    if (typeof electronBinary === "string" && electronBinary) {
+      return launchElectron(electronBinary, false);
     }
-  }
+  } catch {}
 
-  if (!electronPath) return false;
+  // Method 2: find electron in PATH (on Windows this is electron.cmd, needs shell)
+  try {
+    const which = process.platform === "win32" ? "where electron" : "which electron";
+    const found = execSync(which, { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }).trim().split(/\r?\n/)[0];
+    if (found) {
+      return launchElectron(found, true);
+    }
+  } catch {}
 
-  const child = spawn(electronPath, [path.join(__dirname, "electron.js"), ...args], {
+  return false;
+}
+
+function launchElectron(bin, useShell) {
+  const electronArgs = [path.join(__dirname, "electron.js"), ...args];
+  const child = spawn(bin, electronArgs, {
     stdio: "inherit",
     env: process.env,
     windowsHide: false,
+    shell: useShell,
   });
   child.on("exit", (code) => process.exit(code || 0));
   child.on("error", () => {
