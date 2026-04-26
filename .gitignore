@@ -7,3 +7,4 @@ Thumbs.db
 .agenv.pid
 .agenv.log
 test/tmp/
+dist/

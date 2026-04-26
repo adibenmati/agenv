@@ -113,6 +113,7 @@ function createWindow() {
     minWidth: 600,
     minHeight: 400,
     title: "Agenv",
+    icon: path.join(__dirname, "assets", "icon.svg"),
     backgroundColor: "#0d1117",
     webPreferences: {
       nodeIntegration: false,
