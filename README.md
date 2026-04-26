@@ -23,23 +23,33 @@ Or run without installing:
 npx @adibenmatdev/agenv
 ```
 
+For the desktop app experience, also install Electron (optional):
+
+```bash
+npm install -g electron
+```
+
 ## Quick start
 
 ```bash
-# Launch the desktop app (default)
+# Launch the environment (desktop app if Electron is installed, web mode otherwise)
 agenv
 
-# Start in web mode (accessible from any browser)
+# Force web mode (opens in browser, accessible from any device)
 agenv --web
 
-# Web mode with custom port
+# Web mode on a custom port
 agenv --web --port 8080
 
-# Web mode with multiple sessions
-agenv --web --sessions 4
+# Launch directly into an agent
+agenv run claude --model opus --dangerously-skip-permissions
+
+# Run any command as a managed session
+agenv run python3 train.py
+agenv run ssh user@gpu-server
 ```
 
-By default, `agenv` launches the Electron desktop app — no open port, no token needed. Use `--web` to start the web server for browser access from any device.
+When Electron is installed, `agenv` opens a native desktop window — no open port, no token, just launch and go. Without Electron, it automatically falls back to web mode and prints your access URL.
 
 ## What you get
 
@@ -58,13 +68,15 @@ Sessions persist across browser reconnects. Create, rename, group, archive, and 
 ### Agent cost tracking
 Monitor token usage and cost per session in real time. See running/waiting/error status at a glance on each tab.
 
-### Desktop app (default)
-Launches as a native Electron app with OS-level keyboard shortcuts and window management. No open port, no token — just launch and go.
+### Desktop app
+When Electron is installed globally (`npm i -g electron`), `agenv` launches as a native desktop app with OS-level keyboard shortcuts and window management. The server runs internally on localhost — no exposed port.
 
 ### Web mode
-Start with `agenv --web` to access from any device on your network. Responsive layout works on desktop, tablet, and mobile. Optional ngrok integration for remote access (web mode only).
+Use `agenv --web` to start a web server accessible from any device on your network. Responsive layout works on desktop, tablet, and mobile. Optional ngrok integration for remote access (web mode only).
 
-## Configuration (web mode)
+## Configuration
+
+### Web mode flags
 
 These flags apply when running in web mode (`agenv --web`):
 
@@ -82,13 +94,13 @@ agenv --web --token mysecrettoken
 agenv --web --sessions 4
 ```
 
-## Authentication
+### Authentication
 
-### Token auth (default)
+#### Token auth (default in web mode)
 
 Every launch generates a random 128-bit token. Pass it as `?token=<value>` in the URL.
 
-### Username / password auth
+#### Username / password auth
 
 Set credentials once (stored in `~/.agenvrc.json`, password is hashed):
 
@@ -130,7 +142,8 @@ agenv update
 ## Security
 
 - Binds to `127.0.0.1` by default (localhost-only)
-- 128-bit random token auth on every session
+- Desktop mode: no exposed port — server runs internally
+- 128-bit random token auth on every web session
 - Scrypt-hashed passwords with timing-safe comparison
 - WebSocket auth enforced on connection
 - Input rate-limited (200 msg/sec) and size-capped (4 KB per message)
@@ -143,9 +156,9 @@ agenv update
 
 | Command | Description |
 |---------|-------------|
-| `agenv` | Launch desktop app (default) |
-| `agenv --web` | Start web server mode |
-| `agenv run <command...>` | Start with a command running |
+| `agenv` | Launch environment (desktop if Electron installed, web otherwise) |
+| `agenv --web` | Force web server mode |
+| `agenv run <command...>` | Start with a command running in a session |
 | `agenv stop` | Stop running server |
 | `agenv kill` | Force-kill running server |
 | `agenv set <key> <value>` | Set a config value |
@@ -157,6 +170,7 @@ agenv update
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--web` | | Start in web server mode |
 | `--port <number>` | `7681` | HTTP/WebSocket port |
 | `--host <address>` | `127.0.0.1` | Bind address (`0.0.0.0` for LAN) |
 | `--shell <command>` | `cmd.exe` / `$SHELL` | Default shell for new sessions |
@@ -168,7 +182,7 @@ agenv update
 
 - **Server**: Node.js + Express + WebSocket, manages PTY sessions via node-pty
 - **Frontend**: Vanilla JS modules, xterm.js terminals, highlight.js code rendering
-- **Desktop**: Electron wrapper with sandboxed renderer
+- **Desktop**: Electron wrapper with sandboxed renderer (optional, install via `npm i -g electron`)
 - **Persistence**: Encrypted session state, command history, and scrollback stored in `~/.agenv-*`
 
 ## License
