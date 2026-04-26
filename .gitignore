@@ -4,3 +4,6 @@ npm-debug.log*
 .env
 .DS_Store
 Thumbs.db
+.agenv.pid
+.agenv.log
+test/tmp/

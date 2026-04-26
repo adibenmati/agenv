@@ -1,13 +1,22 @@
 {
-  "name": "termlink",
+  "name": "agenv",
   "version": "1.0.0",
-  "description": "Shared web-based terminal — access your local PTY session from any browser over WebSocket",
-  "main": "server.js",
+  "description": "The agent development environment — build, run, and monitor AI agents from a full web IDE with split terminals, file editing, and session management",
+  "main": "electron.js",
   "bin": {
-    "termlink": "server.js"
+    "agenv": "server.js"
   },
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "stop": "node scripts/manage.js stop",
+    "restart": "node scripts/manage.js stop && node server.js",
+    "destroy": "node scripts/manage.js destroy",
+    "status": "node scripts/manage.js status",
+    "test": "node --test test/api.test.js",
+    "watch": "nodemon --watch server.js --watch public/ --ext js,html,css --delay 500ms -- server.js",
+    "electron": "electron .",
+    "electron:dev": "nodemon --watch electron.js --watch server.js --watch public/ --ext js,html,css --delay 500ms --exec \"electron .\"",
+    "rebuild": "electron-rebuild -f -w @lydell/node-pty"
   },
   "keywords": [
     "terminal",
@@ -23,11 +32,15 @@
     "node": ">=16.0.0"
   },
   "private": true,
-  "license": "MIT",
+  "license": "Apache-2.0",
   "dependencies": {
     "@lydell/node-pty": "^1.0.1",
     "express": "^4.21.2",
     "qrcode-terminal": "^0.12.0",
     "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^3.7.2",
+    "electron": "^41.2.1"
   }
 }

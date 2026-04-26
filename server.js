@@ -6,15 +6,15 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const http = require("http");
-const { execSync } = require("child_process");
+const { execSync, spawn } = require("child_process");
 const express = require("express");
 const { WebSocketServer } = require("ws");
 const pty = require("@lydell/node-pty");
 
 // ---------------------------------------------------------------------------
-// Config file (~/.termlinkrc.json)
+// Config file (~/.agenvrc.json)
 // ---------------------------------------------------------------------------
-const CONFIG_PATH = path.join(os.homedir(), ".termlinkrc.json");
+const CONFIG_PATH = path.join(os.homedir(), ".agenvrc.json");
 
 function loadConfig() {
   try { return JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8")); } catch { return {}; }
@@ -43,7 +43,7 @@ function setConfigValue(key, value) {
 // ---------------------------------------------------------------------------
 // Encryption (AES-256-GCM)
 // ---------------------------------------------------------------------------
-const ENCRYPTION_KEY_PATH = path.join(os.homedir(), ".termlink.key");
+const ENCRYPTION_KEY_PATH = path.join(os.homedir(), ".agenv.key");
 
 function getEncryptionKey() {
   try {
@@ -78,10 +78,10 @@ function decryptJSON(raw) {
 }
 
 // ---------------------------------------------------------------------------
-// Command history (~/.termlink-history.enc)
+// Command history (~/.agenv-history.enc)
 // ---------------------------------------------------------------------------
-const HISTORY_PATH = path.join(os.homedir(), ".termlink-history.enc");
-const HISTORY_PATH_OLD = path.join(os.homedir(), ".termlink-history.json");
+const HISTORY_PATH = path.join(os.homedir(), ".agenv-history.enc");
+const HISTORY_PATH_OLD = path.join(os.homedir(), ".agenv-history.json");
 const MAX_HISTORY = 1000;
 
 function loadHistory() {
@@ -97,9 +97,9 @@ function loadHistory() {
 function saveHistory(history) { fs.writeFileSync(HISTORY_PATH, encryptJSON(history), "utf8"); }
 
 // ---------------------------------------------------------------------------
-// Scrollback persistence (~/.termlink-scrollback/)
+// Scrollback persistence (~/.agenv-scrollback/)
 // ---------------------------------------------------------------------------
-const SCROLLBACK_DIR = path.join(os.homedir(), ".termlink-scrollback");
+const SCROLLBACK_DIR = path.join(os.homedir(), ".agenv-scrollback");
 function ensureScrollbackDir() { try { fs.mkdirSync(SCROLLBACK_DIR, { recursive: true }); } catch {} }
 function saveScrollback(session) {
   if (!session.scrollback || session.scrollback.length === 0) return;
@@ -113,9 +113,9 @@ function clearScrollbackFile(id) { try { fs.unlinkSync(path.join(SCROLLBACK_DIR,
 function saveAllScrollback() { for (const s of sessions.values()) saveScrollback(s); }
 
 // ---------------------------------------------------------------------------
-// Session archive (~/.termlink-archive.enc) — closed session history
+// Session archive (~/.agenv-archive.enc) — closed session history
 // ---------------------------------------------------------------------------
-const ARCHIVE_PATH = path.join(os.homedir(), ".termlink-archive.enc");
+const ARCHIVE_PATH = path.join(os.homedir(), ".agenv-archive.enc");
 const MAX_ARCHIVE = 100;
 
 function loadArchive() {
@@ -141,9 +141,9 @@ function archiveSession(session) {
 }
 
 // ---------------------------------------------------------------------------
-// Favorites (~/.termlink-favorites.enc) — saved folder+command combos
+// Favorites (~/.agenv-favorites.enc) — saved folder+command combos
 // ---------------------------------------------------------------------------
-const FAVORITES_PATH = path.join(os.homedir(), ".termlink-favorites.enc");
+const FAVORITES_PATH = path.join(os.homedir(), ".agenv-favorites.enc");
 
 function loadFavorites() {
   try { const f = decryptJSON(fs.readFileSync(FAVORITES_PATH, "utf8")); return Array.isArray(f) ? f : []; }
@@ -152,10 +152,10 @@ function loadFavorites() {
 function saveFavorites(favs) { fs.writeFileSync(FAVORITES_PATH, encryptJSON(favs), "utf8"); }
 
 // ---------------------------------------------------------------------------
-// Session state (~/.termlink-state.enc)
+// Session state (~/.agenv-state.enc)
 // ---------------------------------------------------------------------------
-const STATE_PATH = path.join(os.homedir(), ".termlink-state.enc");
-const STATE_PATH_OLD = path.join(os.homedir(), ".termlink-state.json");
+const STATE_PATH = path.join(os.homedir(), ".agenv-state.enc");
+const STATE_PATH_OLD = path.join(os.homedir(), ".agenv-state.json");
 
 function loadState() {
   try { return decryptJSON(fs.readFileSync(STATE_PATH, "utf8")); }
@@ -168,8 +168,10 @@ function loadState() {
   }
 }
 
+let _workspaceLayout = null; // saved by client via API
+
 function saveState() {
-  const state = { sessions: [] };
+  const state = { sessions: [], workspaceLayout: _workspaceLayout || null };
   for (const [id, session] of sessions) {
     state.sessions.push({
       id, name: session.name || "", cwd: session.cwd,
@@ -244,21 +246,23 @@ const PKG_VERSION = require(path.join(__dirname, "package.json")).version;
 
 if (command === "help" || command === "--help" || command === "-h") {
   console.log(`
-  TermLink v${PKG_VERSION} — Access your terminal from any device
+  Agenv v${PKG_VERSION} — Access your terminal from any device
 
   Usage:
-    termlink                        Start server (default)
-    termlink run <command...>       Start server & auto-run a command
-    termlink set <key> <value>      Set a config value
-    termlink get <key>              Get a config value
-    termlink update                 Update to latest version
-    termlink help                   Show this help
+    agenv                        Start server (default)
+    agenv run <command...>       Start server & auto-run a command
+    agenv stop                   Stop running server
+    agenv kill                   Force-kill running server
+    agenv set <key> <value>      Set a config value
+    agenv get <key>              Get a config value
+    agenv update                 Update to latest version
+    agenv help                   Show this help
 
   Run examples:
-    termlink run claude --model opus --dangerously-skip-permissions
-    termlink run vertex --model gemini-2.5-pro
-    termlink run ssh user@server
-    termlink run python3
+    agenv run claude --model opus --dangerously-skip-permissions
+    agenv run vertex --model gemini-2.5-pro
+    agenv run ssh user@server
+    agenv run python3
 
   Flags:
     --port <n>          Port number (default: 7681)
@@ -273,36 +277,72 @@ if (command === "help" || command === "--help" || command === "-h") {
     --name <name>       Session name (used with 'run')
 
   Config:
-    termlink set auth.username admin
-    termlink set auth.password s3cret
+    agenv set auth.username admin
+    agenv set auth.password s3cret
 `);
   process.exit(0);
 }
 
 if (command === "version" || command === "--version" || command === "-v") {
-  console.log(`termlink v${PKG_VERSION}`);
+  console.log(`agenv v${PKG_VERSION}`);
   process.exit(0);
 }
 
 if (command === "set") {
   const key = args[1]; const value = args.slice(2).join(" ");
-  if (!key || !value) { console.error("Usage: termlink set <key> <value>\n\nExamples:\n  termlink set auth.username admin\n  termlink set auth.password s3cret"); process.exit(1); }
-  if (key === "auth.password") { setConfigValue(key, hashPassword(value)); console.log("[termlink] Password saved (hashed)."); }
-  else { setConfigValue(key, value); console.log(`[termlink] ${key} = ${value}`); }
+  if (!key || !value) { console.error("Usage: agenv set <key> <value>\n\nExamples:\n  agenv set auth.username admin\n  agenv set auth.password s3cret"); process.exit(1); }
+  if (key === "auth.password") { setConfigValue(key, hashPassword(value)); console.log("[agenv] Password saved (hashed)."); }
+  else { setConfigValue(key, value); console.log(`[agenv] ${key} = ${value}`); }
   process.exit(0);
 }
 if (command === "get") {
   const key = args[1];
-  if (!key) { console.error("Usage: termlink get <key>"); process.exit(1); }
+  if (!key) { console.error("Usage: agenv get <key>"); process.exit(1); }
   const val = getConfigValue(key);
-  if (val === undefined) { console.error(`[termlink] ${key} is not set`); process.exit(1); }
+  if (val === undefined) { console.error(`[agenv] ${key} is not set`); process.exit(1); }
   console.log(key === "auth.password" ? "(hashed)" : val);
   process.exit(0);
 }
 if (command === "update") {
-  console.log(`[termlink] Current version: ${PKG_VERSION}\n[termlink] Checking for updates...`);
-  try { execSync("npm install -g termlink@latest", { stdio: "inherit" }); console.log("[termlink] Update complete."); }
-  catch { console.error("[termlink] Update failed. Try manually: npm install -g termlink@latest"); process.exit(1); }
+  console.log(`[agenv] Current version: ${PKG_VERSION}\n[agenv] Checking for updates...`);
+  try { execSync("npm install -g agenv@latest", { stdio: "inherit" }); console.log("[agenv] Update complete."); }
+  catch { console.error("[agenv] Update failed. Try manually: npm install -g agenv@latest"); process.exit(1); }
+  process.exit(0);
+}
+
+const PID_PATH = path.join(os.homedir(), ".agenv.pid");
+
+if (command === "kill" || command === "stop") {
+  try {
+    const pidData = JSON.parse(fs.readFileSync(PID_PATH, "utf8"));
+    const pid = pidData.pid;
+    console.log(`[agenv] Stopping server (PID ${pid}, port ${pidData.port || "?"})...`);
+    try {
+      process.kill(pid, command === "kill" ? "SIGKILL" : "SIGTERM");
+      console.log(`[agenv] Sent ${command === "kill" ? "SIGKILL" : "SIGTERM"} to PID ${pid}`);
+    } catch (e) {
+      if (e.code === "ESRCH") {
+        console.log("[agenv] Process not running (stale PID file). Cleaning up.");
+      } else {
+        // On Windows, process.kill with SIGTERM may not work; use taskkill
+        if (process.platform === "win32") {
+          try {
+            execSync(`taskkill /PID ${pid} /F`, { stdio: "pipe" });
+            console.log(`[agenv] Killed PID ${pid} via taskkill`);
+          } catch {
+            console.error(`[agenv] Failed to kill PID ${pid}: ${e.message}`);
+          }
+        } else {
+          console.error(`[agenv] Failed to kill PID ${pid}: ${e.message}`);
+        }
+      }
+    }
+    try { fs.unlinkSync(PID_PATH); } catch {}
+  } catch {
+    console.error("[agenv] No running server found (no PID file at " + PID_PATH + ")");
+    // Fallback: try to find by port
+    console.log("[agenv] Tip: you can also use 'taskkill /PID <pid> /F' or 'kill <pid>' manually.");
+  }
   process.exit(0);
 }
 
@@ -324,7 +364,7 @@ if (command === "run") {
   }
   RUN_COMMAND = cmdParts.join(" ");
   if (!RUN_COMMAND) {
-    console.error("Usage: termlink run <command...>\n\nExamples:\n  termlink run claude --model opus\n  termlink run vertex --model gemini-2.5-pro\n  termlink run ssh user@server");
+    console.error("Usage: agenv run <command...>\n\nExamples:\n  agenv run claude --model opus\n  agenv run vertex --model gemini-2.5-pro\n  agenv run ssh user@server");
     process.exit(1);
   }
 }
@@ -335,14 +375,20 @@ if (command === "run") {
 function flag(name, fallback) { const i = args.indexOf(name); return (i === -1 || i + 1 >= args.length) ? fallback : args[i + 1]; }
 function hasFlag(name) { return args.includes(name); }
 
-const PORT = parseInt(flag("--port", "7681"), 10);
-const HOST = flag("--host", "127.0.0.1");
+const PORT = parseInt(flag("--port", process.env.PORT || "7681"), 10);
+let HOST = flag("--host", process.env.HOST || "127.0.0.1");
+
+// Electron safety: force localhost binding
+if (process.env.ELECTRON === "1" && HOST !== "127.0.0.1" && HOST !== "localhost") {
+  console.warn(`[agenv] Electron mode: overriding HOST ${HOST} → 127.0.0.1 for security`);
+  HOST = "127.0.0.1";
+}
 const isWindows = os.platform() === "win32";
 const defaultShell = isWindows ? "cmd.exe" : process.env.SHELL || "bash";
 const SHELL = flag("--shell", defaultShell);
-const TOKEN = flag("--token", crypto.randomBytes(16).toString("hex"));
+let TOKEN = flag("--token", loadConfig().token || crypto.randomBytes(16).toString("hex"));
 const INITIAL_SESSIONS = Math.max(1, parseInt(flag("--sessions", "1"), 10));
-const MAX_SESSIONS = Math.max(1, parseInt(flag("--max-sessions", "10"), 10));
+const MAX_SESSIONS = Math.max(1, parseInt(flag("--max-sessions", "20"), 10));
 const AUTO_OPEN = hasFlag("--open");
 const SHOW_QR = !hasFlag("--no-qr");
 RUN_NAME = flag("--name", RUN_NAME);
@@ -354,8 +400,8 @@ const config = loadConfig();
 const useCredentials = !!(config.auth && config.auth.username && config.auth.password);
 const cookieSessions = new Set();
 
-if (useCredentials) console.log("[termlink] Auth mode: username/password");
-else console.log("[termlink] Auth mode: token");
+if (useCredentials) console.log("[agenv] Auth mode: username/password");
+else console.log("[agenv] Auth mode: token");
 
 function parseCookies(req) {
   const cookies = {};
@@ -378,11 +424,30 @@ function isAuthenticated(req) {
 // Scrollback ring-buffer
 // ---------------------------------------------------------------------------
 const MAX_SCROLLBACK = 100 * 1024;
+// Reset sequence prepended after truncation to neutralize any partial ANSI state:
+// \x1b[0m = reset attributes, \x1b[?25h = show cursor
+const SCROLLBACK_RESET = Buffer.from("\x1b[0m\x1b[?25h");
+
 function appendScrollback(session, data) {
   const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
   session.scrollback = Buffer.concat([session.scrollback, buf]);
-  if (session.scrollback.length > MAX_SCROLLBACK)
-    session.scrollback = session.scrollback.slice(session.scrollback.length - MAX_SCROLLBACK);
+  if (session.scrollback.length > MAX_SCROLLBACK) {
+    let start = session.scrollback.length - MAX_SCROLLBACK;
+    // Skip any UTF-8 continuation bytes (10xxxxxx) so we don't start mid-character
+    while (start < session.scrollback.length && (session.scrollback[start] & 0xC0) === 0x80) {
+      start++;
+    }
+    // Try to find a newline within 2KB for a clean line boundary
+    const searchEnd = Math.min(start + 2048, session.scrollback.length);
+    for (let i = start; i < searchEnd; i++) {
+      if (session.scrollback[i] === 0x0A) { // \n
+        start = i + 1;
+        break;
+      }
+    }
+    // Prepend a reset sequence to neutralize any cut ANSI state (colors, modes, etc.)
+    session.scrollback = Buffer.concat([SCROLLBACK_RESET, session.scrollback.slice(start)]);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -396,6 +461,148 @@ const rows = process.stdout.rows || 30;
 const sessions = new Map();
 let nextSessionId = 0;
 let shuttingDown = false;
+
+// ---------------------------------------------------------------------------
+// Session status detection — pattern matching on PTY output
+// ---------------------------------------------------------------------------
+const STATUS_PATTERNS = {
+  // Prompt patterns → idle (waiting for user input in shell)
+  idle: [
+    /[\$#>]\s*$/,                    // bash/zsh prompt
+    /^PS [A-Z]:\\/i,                 // PowerShell
+    /^[A-Z]:\\[^>]*>/,               // cmd.exe
+    /^\([\w.-]+\)\s.*[\$#>]\s*$/,    // venv prompt
+  ],
+  // Waiting patterns → agent needs human input
+  waiting: [
+    /\? .*[:：]\s*$/,                // interactive prompt
+    /\(y\/n\)/i,                     // yes/no
+    /\[Y\/n\]/i,                     // default yes
+    /\[yes\/no\]/i,
+    /Press Enter/i,
+    /waiting for.*input/i,
+    /Do you want to/i,
+    /\(yes\/no\/\[fingerprint\]\)/,  // SSH
+    /Enter passphrase/i,
+    /Password:/i,
+    /approve this tool/i,            // Claude Code
+    /Do you want to proceed/i,
+  ],
+  // Error patterns
+  error: [
+    /error[:\s]/i,
+    /Error:/,
+    /FAILED/,
+    /panic:/,
+    /Traceback \(most recent/,
+    /SyntaxError/,
+    /TypeError/,
+    /fatal:/i,
+    /ENOENT/,
+    /EACCES/,
+    /command not found/,
+  ],
+  // Busy patterns → agent is actively working
+  busy: [
+    /⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏/,      // spinner
+    /\.\.\.\s*$/,                    // trailing dots
+    /Compiling|Building|Installing/i,
+    /Downloading|Fetching/i,
+    /Running|Executing/i,
+    /Thinking|Generating/i,
+    /\[\d+\/\d+\]/,                  // progress [3/10]
+    /\d+%/,                          // percentage
+  ],
+};
+
+// Cost tracking patterns (Claude Code, Vertex, OpenAI Codex, Gemini)
+// Claude Code outputs: "Total cost: $X.XX" and "Input tokens: N, Output tokens: N"
+// Also: "Session cost: $X.XX" or lines like "$0.1234 cost"
+const COST_PATTERNS = [
+  // "$X.XX" standalone or "cost: $X.XX" or "total: $X.XX" or "session cost: $X.XX"
+  { type: "cost", pattern: /(?:cost|total|session|spent)[:\s]*\$?([\d]+\.[\d]+)/i },
+  // "X input tokens ... Y output tokens"
+  { type: "tokens_io", pattern: /(\d[\d,]*)\s*input\s*tokens?.*?(\d[\d,]*)\s*output\s*tokens?/i },
+  // "Input: N tokens" lines
+  { type: "input_tokens", pattern: /input[:\s]*(\d[\d,]*)\s*tokens?/i },
+  // "Output: N tokens" lines
+  { type: "output_tokens", pattern: /output[:\s]*(\d[\d,]*)\s*tokens?/i },
+  // "N tokens" generic
+  { type: "generic_tokens", pattern: /(\d[\d,]+)\s*tokens?\s*(?:used|consumed|total)/i },
+  // Claude Code summary: "⏺ Total cost: $X.XX"
+  { type: "cost", pattern: /\$(\d+\.[\d]+)/i },
+];
+
+function detectSessionStatus(text) {
+  const lines = text.split(/\r?\n/).filter(l => l.trim());
+  const lastLine = lines[lines.length - 1] || "";
+  const last3 = lines.slice(-3).join("\n");
+
+  // Check waiting first (highest priority)
+  for (const p of STATUS_PATTERNS.waiting) {
+    if (p.test(lastLine) || p.test(last3)) return "waiting";
+  }
+  // Check busy
+  for (const p of STATUS_PATTERNS.busy) {
+    if (p.test(lastLine) || p.test(last3)) return "running";
+  }
+  // Check error (only on last line)
+  for (const p of STATUS_PATTERNS.error) {
+    if (p.test(lastLine)) return "error";
+  }
+  // Check idle
+  for (const p of STATUS_PATTERNS.idle) {
+    if (p.test(lastLine)) return "idle";
+  }
+  return null; // unknown
+}
+
+function parseTokenInfo(text) {
+  const info = {};
+  for (const { type, pattern } of COST_PATTERNS) {
+    const m = text.match(pattern);
+    if (!m) continue;
+    if (type === "cost") {
+      const c = parseFloat(m[1]);
+      if (c > 0 && c < 1000) info.cost = c; // sanity check
+    } else if (type === "tokens_io") {
+      info.inputTokens = parseInt(m[1].replace(/,/g, ""), 10);
+      info.outputTokens = parseInt(m[2].replace(/,/g, ""), 10);
+    } else if (type === "input_tokens") {
+      info.inputTokens = parseInt(m[1].replace(/,/g, ""), 10);
+    } else if (type === "output_tokens") {
+      info.outputTokens = parseInt(m[1].replace(/,/g, ""), 10);
+    } else if (type === "generic_tokens" && !info.inputTokens) {
+      info.inputTokens = parseInt(m[1].replace(/,/g, ""), 10);
+    }
+  }
+  return Object.keys(info).length ? info : null;
+}
+
+// System stats
+function getSystemStats() {
+  const cpus = os.cpus();
+  const totalMem = os.totalmem();
+  const freeMem = os.freemem();
+  const usedMem = totalMem - freeMem;
+  // CPU usage: average across cores (idle vs total)
+  let totalIdle = 0, totalTick = 0;
+  for (const cpu of cpus) {
+    for (const type in cpu.times) totalTick += cpu.times[type];
+    totalIdle += cpu.times.idle;
+  }
+  const cpuUsage = Math.round(100 - (totalIdle / totalTick * 100));
+  return {
+    cpu: cpuUsage,
+    memUsed: usedMem,
+    memTotal: totalMem,
+    memPercent: Math.round(usedMem / totalMem * 100),
+    platform: os.platform(),
+    hostname: os.hostname(),
+    uptime: os.uptime(),
+    cores: cpus.length,
+  };
+}
 
 function spawnSession(id, opts) {
   const o = typeof opts === "string" ? { cwd: opts } : (opts || {});
@@ -412,6 +619,14 @@ function spawnSession(id, opts) {
     detectedTool: o.tool || "terminal", lastCommand: o.lastCommand || "",
     launchCommand: o.runCommand || o.launchCommand || "",
     userNamed: !!(o.userNamed),
+    // New fields for agent-deck style features
+    status: "idle",           // idle | running | waiting | error
+    group: o.group || "",     // session group name
+    note: o.note || "",       // session notes
+    analytics: {
+      inputTokens: 0, outputTokens: 0, estimatedCost: 0,
+      commandCount: 0, turnCount: 0, startTime: now,
+    },
     pty: ptyProcess, scrollback: Buffer.alloc(0), clients: new Set(),
     pendingCommand: o.runCommand || null,
   };
@@ -443,6 +658,48 @@ function spawnSession(id, opts) {
     if (osc7Match) { try { const newCwd = decodeURIComponent(osc7Match[1]); if (newCwd !== session.cwd) { session.cwd = newCwd; saveState(); const cwdMsg = JSON.stringify({ type: "cwd", cwd: newCwd }); for (const ws of session.clients) { if (ws.readyState === 1) ws.send(cwdMsg); } } } catch {} }
     if (id === 0) process.stdout.write(data);
     appendScrollback(session, data);
+
+    // CWD detection from Windows/PowerShell prompts
+    const plain = data.replace(/\x1b\[[0-9;?]*[a-zA-Z~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][0-9A-Z]/g, "");
+    if (process.platform === "win32") {
+      // cmd.exe prompt: ends with "C:\path>" at end of a line/string
+      const cmdMatch = plain.match(/([a-zA-Z]:\\[^>\r\n]*?)>\s*$/m);
+      // PowerShell prompt: "PS C:\path>" at end of a line/string
+      const psMatch = plain.match(/PS\s+([a-zA-Z]:\\[^\r\n>]*?)>\s*$/m);
+      const detected = (psMatch && psMatch[1]) || (cmdMatch && cmdMatch[1]);
+      if (detected && detected !== session.cwd) {
+        try {
+          const resolved = path.resolve(detected);
+          if (fs.existsSync(resolved) && fs.statSync(resolved).isDirectory()) {
+            session.cwd = resolved;
+            const cwdMsg = JSON.stringify({ type: "cwd", cwd: resolved });
+            for (const ws of session.clients) { if (ws.readyState === 1) ws.send(cwdMsg); }
+          }
+        } catch {}
+      }
+    }
+
+    // Status detection
+    const newStatus = detectSessionStatus(plain);
+    if (newStatus && newStatus !== session.status) {
+      session.status = newStatus;
+      const statusMsg = JSON.stringify({ type: "status", status: newStatus, sessionId: id });
+      for (const ws of session.clients) {
+        if (ws.readyState === 1) ws.send(statusMsg);
+      }
+    }
+
+    // Token/cost parsing for AI tools
+    if (session.detectedTool !== "terminal") {
+      const tokenInfo = parseTokenInfo(plain);
+      if (tokenInfo) {
+        if (tokenInfo.inputTokens) session.analytics.inputTokens += tokenInfo.inputTokens;
+        if (tokenInfo.outputTokens) session.analytics.outputTokens += tokenInfo.outputTokens;
+        if (tokenInfo.cost) session.analytics.estimatedCost += tokenInfo.cost;
+        session.analytics.turnCount++;
+      }
+    }
+
     for (const ws of session.clients) {
       if (ws.readyState === 1) ws.send(JSON.stringify({ type: "output", data }));
     }
@@ -450,7 +707,7 @@ function spawnSession(id, opts) {
 
   ptyProcess.onExit(({ exitCode }) => {
     if (shuttingDown) return;
-    console.log(`\n[termlink] Session ${id} exited (code ${exitCode})`);
+    console.log(`\n[agenv] Session ${id} exited (code ${exitCode})`);
     archiveSession(session);
     for (const ws of session.clients) {
       if (ws.readyState === 1) { ws.send(JSON.stringify({ type: "exit", code: exitCode })); ws.close(); }
@@ -478,14 +735,38 @@ function broadcastEvent(event) {
 
 // Spawn sessions — restore previous state OR create from run command
 const savedState = loadState();
+if (savedState && savedState.workspaceLayout) _workspaceLayout = savedState.workspaceLayout;
 if (RUN_COMMAND) {
-  // "termlink run <cmd>" — start fresh with a single session running the command
+  // "agenv run <cmd>" — start fresh with a single session running the command
   const runName = RUN_NAME || RUN_COMMAND.split(/\s+/)[0];
   spawnSession(nextSessionId++, {
     cwd: process.cwd(), name: runName, runCommand: RUN_COMMAND, restoreScrollback: false,
   });
 } else if (savedState && savedState.sessions && savedState.sessions.length > 0) {
-  for (const s of savedState.sessions) {
+  // Only restore sessions that are in the workspace layout (visible tabs)
+  // This prevents spawning dozens of dead PTYs on restart
+  let neededIds = new Set();
+  if (_workspaceLayout && Array.isArray(_workspaceLayout)) {
+    const collectIds = (node) => {
+      if (!node) return;
+      if (node.type === "leaf" && node.sessionId != null) neededIds.add(node.sessionId);
+      if (node.children) node.children.forEach(collectIds);
+    };
+    for (const ws of _workspaceLayout) { if (ws.rootNode) collectIds(ws.rootNode); }
+  }
+
+  let toRestore;
+  if (neededIds.size > 0) {
+    // Restore only sessions referenced in workspace layout
+    toRestore = savedState.sessions.filter(s => neededIds.has(s.id));
+  } else {
+    // No layout saved — restore only the most recent session
+    const sorted = [...savedState.sessions].sort((a, b) => (b.lastActivity || 0) - (a.lastActivity || 0));
+    toRestore = sorted.slice(0, 1);
+  }
+
+  console.log(`[agenv] Restoring ${toRestore.length} of ${savedState.sessions.length} saved sessions`);
+  for (const s of toRestore) {
     const cwdOk = s.cwd && fs.existsSync(s.cwd);
     const id = s.id != null ? s.id : nextSessionId;
     if (id >= nextSessionId) nextSessionId = id + 1;
@@ -517,7 +798,7 @@ function printBanner() {
 
   console.log("");
   console.log(`┌${line}┐`);
-  console.log(pad(`TermLink v${PKG_VERSION}`));
+  console.log(pad(`Agenv v${PKG_VERSION}`));
   console.log(`├${line}┤`);
   if (RUN_COMMAND) {
     console.log(pad(`Command:  ${RUN_COMMAND}`));
@@ -574,10 +855,77 @@ process.stdout.on("resize", () => {
 // ---------------------------------------------------------------------------
 const app = express();
 const server = http.createServer(app);
-app.use(express.json());
+app.use(express.json({ limit: "50mb" }));
+
+// Security headers
+app.use((req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  res.setHeader("Content-Security-Policy",
+    "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; font-src 'self' https://cdn.jsdelivr.net; connect-src 'self' ws: wss:; img-src 'self' data: blob:; worker-src 'self' blob:");
+  next();
+});
+
+// API rate limiter — 600 req/min per IP
+const _rateBuckets = new Map();
+function apiRateLimit(req, res, next) {
+  const ip = req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.socket?.remoteAddress || "unknown";
+  const now = Date.now();
+  let bucket = _rateBuckets.get(ip);
+  if (!bucket || now - bucket.windowStart > 60000) {
+    bucket = { count: 0, windowStart: now };
+    _rateBuckets.set(ip, bucket);
+  }
+  bucket.count++;
+  if (bucket.count > 600) {
+    return res.status(429).json({ error: "Rate limit exceeded. Try again later." });
+  }
+  next();
+}
+// Clean up stale buckets every 5 minutes
+setInterval(() => {
+  const cutoff = Date.now() - 120000;
+  for (const [ip, b] of _rateBuckets) {
+    if (b.windowStart < cutoff) _rateBuckets.delete(ip);
+  }
+}, 300000);
+app.use("/api", apiRateLimit);
+
+app.use("/public", express.static(path.join(__dirname, "public")));
+
+function isNgrokRequest(req) {
+  // ngrok sets x-forwarded-for and ngrok-specific headers
+  return !!(req.headers["x-forwarded-for"] || req.headers["ngrok-skip-browser-warning"]);
+}
+
+function getClientIp(req) {
+  return req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.socket?.remoteAddress || "";
+}
 
 function apiAuth(req, res, next) {
   if (!isAuthenticated(req)) return res.status(401).json({ error: "Unauthorized" });
+
+  // ngrok IP allowlist check
+  if (isNgrokRequest(req) && ngrokSettings.allowedIps.length > 0) {
+    const clientIp = getClientIp(req);
+    if (!ngrokSettings.allowedIps.includes(clientIp)) {
+      return res.status(403).json({ error: "IP not in allowlist: " + clientIp });
+    }
+  }
+
+  // ngrok read-only mode: block write operations
+  if (isNgrokRequest(req) && ngrokSettings.readOnly) {
+    const method = req.method.toUpperCase();
+    const writePaths = ["/api/sessions", "/api/git/stage", "/api/git/commit", "/api/git/push",
+      "/api/git/checkout", "/api/git/unstage", "/api/git/discard", "/api/git/stash",
+      "/api/git/stash-pop", "/api/git/worktree-add",
+      "/api/file", "/api/upload", "/api/clip", "/api/shutdown", "/api/quick-launch"];
+    if ((method === "POST" || method === "PUT" || method === "DELETE") &&
+        writePaths.some(p => req.path.startsWith(p))) {
+      return res.status(403).json({ error: "Read-only mode: write operations disabled via tunnel" });
+    }
+  }
   next();
 }
 
@@ -589,6 +937,8 @@ app.get("/api/sessions", apiAuth, (req, res) => {
       id, name: session.name || "", cwd: session.cwd, tool: session.detectedTool || "terminal",
       lastCommand: session.lastCommand || "", launchCommand: session.launchCommand || "",
       created: session.created, lastActivity: session.lastActivity, clients: session.clients.size,
+      status: session.status || "idle", group: session.group || "",
+      note: session.note || "", analytics: session.analytics || {},
     });
   }
   res.json(list);
@@ -598,11 +948,11 @@ app.post("/api/sessions", apiAuth, (req, res) => {
   if (sessions.size >= MAX_SESSIONS) return res.status(400).json({ error: "Maximum sessions reached (" + MAX_SESSIONS + ")" });
   const id = nextSessionId++;
   const b = req.body || {};
-  spawnSession(id, { cwd: b.cwd, name: b.name || "", runCommand: b.command || null, restoreScrollback: false });
+  spawnSession(id, { cwd: b.cwd, name: b.name || "", group: b.group || "", runCommand: b.command || null, restoreScrollback: false });
   saveState();
   const s = sessions.get(id);
-  console.log(`[termlink] Session ${id} created from browser in ${s.cwd} (${sessions.size} total)`);
-  res.json({ id, name: s.name, cwd: s.cwd, tool: s.detectedTool, created: s.created });
+  console.log(`[agenv] Session ${id} created from browser in ${s.cwd} (${sessions.size} total)`);
+  res.json({ id, name: s.name, cwd: s.cwd, tool: s.detectedTool, created: s.created, status: s.status, group: s.group });
 });
 
 app.put("/api/sessions/:id", apiAuth, (req, res) => {
@@ -611,17 +961,121 @@ app.put("/api/sessions/:id", apiAuth, (req, res) => {
   if (!session) return res.status(404).json({ error: "Session not found" });
   if (req.body.name != null) { session.name = String(req.body.name).slice(0, 64); session.userNamed = true; }
   if (req.body.tool) { session.detectedTool = String(req.body.tool); session.lastCommand = req.body.lastCommand || session.lastCommand; }
+  if (req.body.note != null) session.note = String(req.body.note).slice(0, 2000);
+  if (req.body.group != null) session.group = String(req.body.group).slice(0, 64);
   saveState();
   res.json({ ok: true });
 });
 
 app.delete("/api/sessions/:id", apiAuth, (req, res) => {
   const id = parseInt(req.params.id, 10);
-  if (id === 0) return res.status(400).json({ error: "Cannot close primary session" });
   const session = sessions.get(id);
   if (!session) return res.status(404).json({ error: "Session not found" });
-  session.pty.kill();
-  console.log(`[termlink] Session ${id} closed from browser`);
+  try { session.pty.kill(); } catch {} // safe even if already exited
+  // Notify all connected clients
+  for (const ws of session.clients) {
+    try { ws.send(JSON.stringify({ type: "exit", code: -1 })); } catch {}
+  }
+  sessions.delete(id);
+  console.log(`[agenv] Session ${id} closed from browser`);
+  res.json({ ok: true });
+});
+
+app.post("/api/sessions/:id/restart", apiAuth, (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const session = sessions.get(id);
+  if (!session) return res.status(404).json({ error: "Session not found" });
+  // Kill the old PTY
+  try { session.pty.kill(); } catch {}
+  // Create a new PTY with the same settings
+  const cwd = session.cwd || process.cwd();
+  const shell = session.launchCommand || SHELL;
+  try {
+    const newPty = pty.spawn(shell, [], {
+      name: "xterm-256color",
+      cols: session.pty.cols || 80,
+      rows: session.pty.rows || 24,
+      cwd,
+      env: { ...process.env, TERM: "xterm-256color" },
+    });
+    // Replace the PTY
+    session.pty = newPty;
+    session.status = "idle";
+    session.scrollback = Buffer.alloc(0);
+    session.lastActivity = Date.now();
+    // Re-wire PTY output to clients
+    newPty.onData((data) => {
+      // Update scrollback
+      const buf = Buffer.from(data, "utf8");
+      session.scrollback = Buffer.concat([session.scrollback, buf]);
+      if (session.scrollback.length > 100 * 1024) {
+        session.scrollback = session.scrollback.slice(-80 * 1024);
+      }
+      session.lastActivity = Date.now();
+      // Broadcast to clients
+      const msg = JSON.stringify({ type: "output", data });
+      for (const ws of session.clients) {
+        try { if (ws.readyState === 1) ws.send(msg); } catch {}
+      }
+    });
+    newPty.onExit(({ exitCode }) => {
+      session.status = "exited";
+      const msg = JSON.stringify({ type: "exit", code: exitCode });
+      for (const ws of session.clients) {
+        try { if (ws.readyState === 1) ws.send(msg); } catch {}
+      }
+    });
+    // Clear scrollback on clients so they see a fresh terminal
+    const clearMsg = JSON.stringify({ type: "output", data: "\x1b[2J\x1b[H" });
+    for (const ws of session.clients) {
+      try { if (ws.readyState === 1) ws.send(clearMsg); } catch {}
+    }
+    console.log(`[agenv] Session ${id} restarted`);
+    res.json({ ok: true, id });
+  } catch (e) {
+    res.status(500).json({ error: "Failed to restart: " + e.message });
+  }
+});
+
+// Get real CWD for a session by probing the PTY process
+app.get("/api/sessions/:id/cwd", apiAuth, (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const session = sessions.get(id);
+  if (!session) return res.status(404).json({ error: "Session not found" });
+
+  // Try to get the real CWD from the PTY child process
+  const winShell = (process.env.SystemRoot || "C:\\Windows") + "\\System32\\cmd.exe";
+  if (session.pty && session.pty.pid) {
+    try {
+      const { spawnSync } = require("child_process");
+      if (process.platform === "win32") {
+        // Use wmic or PowerShell to get process CWD — but that's unreliable
+        // Instead, use the tracked CWD which is updated from prompt detection
+      } else {
+        // On Linux/Mac, read /proc/PID/cwd
+        const r = spawnSync("readlink", ["-f", `/proc/${session.pty.pid}/cwd`], { encoding: "utf8", timeout: 2000 });
+        if (r.stdout && r.stdout.trim()) {
+          const cwd = r.stdout.trim();
+          if (cwd !== session.cwd) {
+            session.cwd = cwd;
+            const cwdMsg = JSON.stringify({ type: "cwd", cwd });
+            for (const ws of session.clients) { if (ws.readyState === 1) ws.send(cwdMsg); }
+          }
+        }
+      }
+    } catch {}
+  }
+  res.json({ cwd: session.cwd, sessionId: id });
+});
+
+// ---- Workspace layout persistence ----
+app.get("/api/workspace-layout", apiAuth, (req, res) => {
+  res.json({ layout: _workspaceLayout || null });
+});
+
+app.post("/api/workspace-layout", apiAuth, (req, res) => {
+  _workspaceLayout = req.body.layout || null;
+  saveState();
   res.json({ ok: true });
 });
 
@@ -740,27 +1194,1513 @@ app.get("/api/recent-folders", apiAuth, (req, res) => {
 });
 
 // ---- Git API ----
+// Discover git repos in/around a directory (supports monorepos)
+app.get("/api/git/repos", apiAuth, (req, res) => {
+  const dir = req.query.dir || process.cwd();
+  const repos = [];
+  const { spawnSync } = require("child_process");
+  const winShell = (process.env.SystemRoot || "C:\\Windows") + "\\System32\\cmd.exe";
+
+  // Check if dir itself is inside a git repo
+  const topLevel = spawnSync("git", ["rev-parse", "--show-toplevel"], {
+    cwd: dir, encoding: "utf8", timeout: 5000,
+    shell: process.platform === "win32" ? winShell : true,
+  });
+  if (topLevel.status === 0 && topLevel.stdout.trim()) {
+    repos.push({ path: path.resolve(topLevel.stdout.trim()), name: path.basename(topLevel.stdout.trim()), relation: "current" });
+  }
+
+  // Scan immediate subdirectories for .git folders (monorepo detection)
+  try {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
+      const subDir = path.join(dir, entry.name);
+      try {
+        const gitDir = path.join(subDir, ".git");
+        if (fs.existsSync(gitDir)) {
+          // It's a git repo (or worktree — .git can be a file pointing to worktree)
+          const repoPath = path.resolve(subDir);
+          if (!repos.find(r => r.path === repoPath)) {
+            repos.push({ path: repoPath, name: entry.name, relation: "child" });
+          }
+        }
+      } catch {}
+    }
+  } catch {}
+
+  // Also check for git worktrees (linked worktrees point to main repo)
+  if (repos.length > 0 && repos[0].relation === "current") {
+    try {
+      const wt = spawnSync("git", ["worktree", "list", "--porcelain"], {
+        cwd: repos[0].path, encoding: "utf8", timeout: 5000,
+        shell: process.platform === "win32" ? winShell : true,
+      });
+      if (wt.status === 0 && wt.stdout) {
+        const lines = wt.stdout.split("\n");
+        for (const line of lines) {
+          if (line.startsWith("worktree ")) {
+            const wtPath = line.slice(9).trim();
+            if (wtPath && !repos.find(r => r.path === path.resolve(wtPath))) {
+              repos.push({ path: path.resolve(wtPath), name: path.basename(wtPath), relation: "worktree" });
+            }
+          }
+        }
+      }
+    } catch {}
+  }
+
+  res.json({ repos, dir });
+});
+
+app.get("/api/git/diff-file", apiAuth, (req, res) => {
+  const filePath = req.query.path;
+  if (!filePath) return res.status(400).json({ error: "Missing path" });
+  const cwd = req.query.cwd || process.cwd();
+  const winShell = (process.env.SystemRoot || "C:\\Windows") + "\\System32\\cmd.exe";
+  try {
+    const { spawnSync } = require("child_process");
+    const r = spawnSync("git", ["diff", "--", filePath], {
+      cwd, encoding: "utf8", timeout: 10000, maxBuffer: 1024 * 1024,
+      shell: process.platform === "win32" ? winShell : true,
+    });
+    const out = (r.stdout || "").trim();
+    if (!out) {
+      const r2 = spawnSync("git", ["diff", "HEAD", "--", filePath], {
+        cwd, encoding: "utf8", timeout: 10000, maxBuffer: 1024 * 1024,
+        shell: process.platform === "win32" ? winShell : true,
+      });
+      const out2 = (r2.stdout || "").trim();
+      if (!out2) return res.json({ ok: true, diff: "", message: "No changes" });
+      return res.json({ ok: true, diff: out2 });
+    }
+    res.json({ ok: true, diff: out });
+  } catch (e) {
+    res.json({ ok: false, error: e.message });
+  }
+});
+
+// Combined diff endpoint for AI features — returns staged diff, full diff, and recent commits
+app.get("/api/git/diff-for-ai", apiAuth, (req, res) => {
+  const dir = req.query.dir || process.cwd();
+  const winShell = (process.env.SystemRoot || "C:\\Windows") + "\\System32\\cmd.exe";
+  const { spawnSync } = require("child_process");
+  const opts = { cwd: dir, encoding: "utf8", timeout: 10000, maxBuffer: 2 * 1024 * 1024, shell: isWindows ? winShell : true };
+
+  let diff = "", stagedDiff = "", recentCommits = "";
+  try { diff = (spawnSync("git", ["diff"], opts).stdout || "").trim(); } catch {}
+  try { stagedDiff = (spawnSync("git", ["diff", "--cached"], opts).stdout || "").trim(); } catch {}
+  try { recentCommits = (spawnSync("git", ["log", "--oneline", "-10"], opts).stdout || "").trim(); } catch {}
+
+  res.json({ diff, stagedDiff, recentCommits });
+});
+
 app.get("/api/git/:action", apiAuth, (req, res) => {
   const sid = parseInt(req.query.session || "0", 10);
   const session = sessions.get(sid);
-  const cwd = session ? session.cwd : process.cwd();
+  const cwd = req.query.dir || (session ? session.cwd : process.cwd());
   const action = req.params.action;
   const cmds = {
-    status: "git status --short",
-    diff: "git diff",
-    "diff-staged": "git diff --staged",
-    log: "git log --oneline -20",
-    branch: "git branch -a",
-    stash: "git stash list",
+    status: ["git", "status", "--porcelain"],
+    diff: ["git", "diff"],
+    "diff-staged": ["git", "diff", "--staged"],
+    log: ["git", "log", "--oneline", "-20"],
+    branch: ["git", "branch", "-a"],
+    stash: ["git", "stash", "list"],
   };
-  const cmd = cmds[action];
-  if (!cmd) return res.status(400).json({ error: "Unknown action" });
+  const args = cmds[action];
+  if (!args) return res.status(400).json({ error: "Unknown action" });
   try {
-    const out = execSync(cmd, { cwd, encoding: "utf8", timeout: 10000, maxBuffer: 512 * 1024 });
-    res.json({ ok: true, output: out, cwd });
+    const { spawnSync } = require("child_process");
+    const winShell = (process.env.SystemRoot || "C:\\Windows") + "\\System32\\cmd.exe";
+    const r = spawnSync(args[0], args.slice(1), { cwd, encoding: "utf8", timeout: 10000, maxBuffer: 512 * 1024, shell: process.platform === "win32" ? winShell : true });
+    const out = (r.stdout || "") + (r.stderr || "");
+    res.json({ ok: r.status === 0, output: out.trim(), cwd });
   } catch (e) {
-    res.json({ ok: false, output: e.stderr || e.message || "Error", cwd });
+    res.json({ ok: false, output: e.message || "Error", cwd });
   }
+});
+
+// ---- Git commit/push APIs ----
+app.post("/api/git/stage", apiAuth, (req, res) => {
+  const { dir, files } = req.body;
+  const cwd = dir || process.cwd();
+  const { spawnSync } = require("child_process");
+  const winShell = (process.env.SystemRoot || "C:\\Windows") + "\\System32\\cmd.exe";
+  // files can be array of paths, or "." for all
+  const args = ["git", "add", ...(Array.isArray(files) ? files : ["."])];
+  try {
+    const r = spawnSync(args[0], args.slice(1), { cwd, encoding: "utf8", timeout: 10000, shell: process.platform === "win32" ? winShell : true });
+    res.json({ ok: r.status === 0, output: ((r.stdout || "") + (r.stderr || "")).trim() });
+  } catch (e) {
+    res.json({ ok: false, output: e.message });
+  }
+});
+
+app.post("/api/git/commit", apiAuth, (req, res) => {
+  const { dir, message } = req.body;
+  if (!message || !message.trim()) return res.status(400).json({ ok: false, output: "Commit message required" });
+  const cwd = dir || process.cwd();
+  const { spawnSync } = require("child_process");
+  const winShell = (process.env.SystemRoot || "C:\\Windows") + "\\System32\\cmd.exe";
+  try {
+    const r = spawnSync("git", ["commit", "-m", message.trim()], {
+      cwd, encoding: "utf8", timeout: 30000, maxBuffer: 512 * 1024,
+      shell: process.platform === "win32" ? winShell : true,
+    });
+    const out = ((r.stdout || "") + (r.stderr || "")).trim();
+    res.json({ ok: r.status === 0, output: out });
+  } catch (e) {
+    res.json({ ok: false, output: e.message });
+  }
+});
+
+app.post("/api/git/push", apiAuth, (req, res) => {
+  const { dir, remote, branch } = req.body;
+  const cwd = dir || process.cwd();
+  const { spawnSync } = require("child_process");
+  const winShell = (process.env.SystemRoot || "C:\\Windows") + "\\System32\\cmd.exe";
+  const args = ["git", "push"];
+  if (remote) args.push(remote);
+  if (branch) args.push(branch);
+  try {
+    const r = spawnSync(args[0], args.slice(1), {
+      cwd, encoding: "utf8", timeout: 60000, maxBuffer: 512 * 1024,
+      shell: process.platform === "win32" ? winShell : true,
+    });
+    const out = ((r.stdout || "") + (r.stderr || "")).trim();
+    res.json({ ok: r.status === 0, output: out });
+  } catch (e) {
+    res.json({ ok: false, output: e.message });
+  }
+});
+
+app.post("/api/git/checkout", apiAuth, (req, res) => {
+  const { dir, branch } = req.body;
+  if (!branch || !branch.trim()) return res.status(400).json({ ok: false, output: "Branch name required" });
+  const cwd = dir || process.cwd();
+  const { spawnSync } = require("child_process");
+  const winShell = (process.env.SystemRoot || "C:\\Windows") + "\\System32\\cmd.exe";
+  // Strip "remotes/origin/" prefix if present (for checking out remote branches)
+  let target = branch.trim();
+  if (target.startsWith("remotes/")) target = target.replace(/^remotes\/[^/]+\//, "");
+  try {
+    const r = spawnSync("git", ["checkout", target], {
+      cwd, encoding: "utf8", timeout: 30000, maxBuffer: 512 * 1024,
+      shell: process.platform === "win32" ? winShell : true,
+    });
+    const out = ((r.stdout || "") + (r.stderr || "")).trim();
+    res.json({ ok: r.status === 0, output: out });
+  } catch (e) {
+    res.json({ ok: false, output: e.message });
+  }
+});
+
+app.post("/api/git/unstage", apiAuth, (req, res) => {
+  const { dir, files } = req.body;
+  const cwd = dir || process.cwd();
+  const { spawnSync } = require("child_process");
+  const winShell = (process.env.SystemRoot || "C:\\Windows") + "\\System32\\cmd.exe";
+  const args = ["git", "reset", "HEAD", ...(Array.isArray(files) ? files : ["."])];
+  try {
+    const r = spawnSync(args[0], args.slice(1), { cwd, encoding: "utf8", timeout: 10000, shell: process.platform === "win32" ? winShell : true });
+    res.json({ ok: r.status === 0, output: ((r.stdout || "") + (r.stderr || "")).trim() });
+  } catch (e) {
+    res.json({ ok: false, output: e.message });
+  }
+});
+
+app.post("/api/git/discard", apiAuth, (req, res) => {
+  const { dir, files } = req.body;
+  if (!files || !Array.isArray(files) || files.length === 0) return res.status(400).json({ ok: false, output: "Files required" });
+  const cwd = dir || process.cwd();
+  const { spawnSync } = require("child_process");
+  const winShell = (process.env.SystemRoot || "C:\\Windows") + "\\System32\\cmd.exe";
+  try {
+    const r = spawnSync("git", ["checkout", "--", ...files], {
+      cwd, encoding: "utf8", timeout: 10000, shell: process.platform === "win32" ? winShell : true,
+    });
+    res.json({ ok: r.status === 0, output: ((r.stdout || "") + (r.stderr || "")).trim() });
+  } catch (e) {
+    res.json({ ok: false, output: e.message });
+  }
+});
+
+app.post("/api/git/stash", apiAuth, (req, res) => {
+  const { dir, message } = req.body;
+  const cwd = dir || process.cwd();
+  const { spawnSync } = require("child_process");
+  const winShell = (process.env.SystemRoot || "C:\\Windows") + "\\System32\\cmd.exe";
+  const args = ["git", "stash", "push"];
+  if (message && message.trim()) args.push("-m", message.trim());
+  args.push("--include-untracked");
+  try {
+    const r = spawnSync(args[0], args.slice(1), {
+      cwd, encoding: "utf8", timeout: 30000, maxBuffer: 512 * 1024,
+      shell: process.platform === "win32" ? winShell : true,
+    });
+    const out = ((r.stdout || "") + (r.stderr || "")).trim();
+    res.json({ ok: r.status === 0, output: out });
+  } catch (e) {
+    res.json({ ok: false, output: e.message });
+  }
+});
+
+app.post("/api/git/stash-pop", apiAuth, (req, res) => {
+  const { dir } = req.body;
+  const cwd = dir || process.cwd();
+  const { spawnSync } = require("child_process");
+  const winShell = (process.env.SystemRoot || "C:\\Windows") + "\\System32\\cmd.exe";
+  try {
+    const r = spawnSync("git", ["stash", "pop"], {
+      cwd, encoding: "utf8", timeout: 30000, maxBuffer: 512 * 1024,
+      shell: process.platform === "win32" ? winShell : true,
+    });
+    const out = ((r.stdout || "") + (r.stderr || "")).trim();
+    res.json({ ok: r.status === 0, output: out });
+  } catch (e) {
+    res.json({ ok: false, output: e.message });
+  }
+});
+
+app.post("/api/git/worktree-add", apiAuth, (req, res) => {
+  const { dir, branch } = req.body;
+  if (!branch || !branch.trim()) return res.status(400).json({ ok: false, error: "Branch name required" });
+  const cwd = dir || process.cwd();
+  const { spawnSync } = require("child_process");
+  const winShell = (process.env.SystemRoot || "C:\\Windows") + "\\System32\\cmd.exe";
+  const branchName = branch.trim().replace(/[^a-zA-Z0-9_\-/.]/g, "");
+  const wtPath = path.join(cwd, "..", path.basename(cwd) + "-" + branchName.replace(/\//g, "-"));
+  try {
+    const r = spawnSync("git", ["worktree", "add", "-b", branchName, wtPath], {
+      cwd, encoding: "utf8", timeout: 30000, maxBuffer: 512 * 1024,
+      shell: process.platform === "win32" ? winShell : true,
+    });
+    const out = ((r.stdout || "") + (r.stderr || "")).trim();
+    if (r.status === 0) {
+      res.json({ ok: true, output: out, path: wtPath, branch: branchName });
+    } else {
+      res.json({ ok: false, output: out });
+    }
+  } catch (e) {
+    res.json({ ok: false, error: e.message });
+  }
+});
+
+// ---- File explorer APIs ----
+app.get("/api/files", apiAuth, (req, res) => {
+  const dir = req.query.dir || process.cwd();
+  const resolved = path.resolve(dir);
+  try {
+    const entries = fs.readdirSync(resolved, { withFileTypes: true });
+    const items = [];
+    for (const e of entries) {
+      if (e.name.startsWith(".") && !req.query.hidden) continue;
+      const full = path.join(resolved, e.name);
+      let stat;
+      try { stat = fs.statSync(full); } catch { continue; }
+      items.push({
+        name: e.name,
+        path: full,
+        isDir: e.isDirectory(),
+        size: e.isDirectory() ? 0 : stat.size,
+        mtime: stat.mtimeMs,
+      });
+    }
+    items.sort((a, b) => {
+      if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+      return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+    });
+    res.json({ dir: resolved, parent: path.dirname(resolved), items });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.get("/api/file", apiAuth, (req, res) => {
+  const filePath = req.query.path;
+  if (!filePath) return res.status(400).json({ error: "Missing path" });
+  const resolved = path.resolve(filePath);
+  try {
+    const stat = fs.statSync(resolved);
+    if (stat.size > 2 * 1024 * 1024) return res.status(400).json({ error: "File too large (>2MB)" });
+    const content = fs.readFileSync(resolved, "utf8");
+    res.json({ path: resolved, name: path.basename(resolved), content, size: stat.size });
+  } catch (e) {
+    if (e.code === "ENOENT") {
+      return res.status(404).json({ error: "File not found", code: "ENOENT", path: resolved });
+    }
+    res.status(400).json({ error: e.message });
+  }
+});
+
+// ---- File save API ----
+app.put("/api/file", apiAuth, (req, res) => {
+  const filePath = req.body.path;
+  const content = req.body.content;
+  if (!filePath) return res.status(400).json({ error: "Missing path" });
+  if (content == null) return res.status(400).json({ error: "Missing content" });
+  const resolved = path.resolve(filePath);
+  // Safety: don't write outside of known directories
+  try {
+    fs.writeFileSync(resolved, content, "utf8");
+    const stat = fs.statSync(resolved);
+    res.json({ ok: true, path: resolved, size: stat.size });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+// ---- Search APIs ----
+function fuzzyMatch(query, text) {
+  let qi = 0;
+  const q = query.toLowerCase();
+  const t = text.toLowerCase();
+  for (let ti = 0; ti < t.length && qi < q.length; ti++) {
+    if (t[ti] === q[qi]) qi++;
+  }
+  return qi === q.length;
+}
+
+const SEARCH_SKIP_DIRS = new Set([".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build", ".next", "target", ".cache", "coverage"]);
+const SEARCH_TEXT_EXTS = new Set(["js","ts","jsx","tsx","py","go","rs","rb","java","c","h","cpp","cc","cxx","hpp","cs","swift","kt","php","sh","bash","zsh","ps1","json","yaml","yml","toml","xml","html","htm","css","scss","less","sql","md","txt","dockerfile","makefile","r","lua","perl","pl","zig","dart","env","ini","cfg","conf","gitignore","lock","csv","svg","mjs","cjs","psm1"]);
+
+app.get("/api/search/files", apiAuth, (req, res) => {
+  const dir = req.query.dir || process.cwd();
+  const query = (req.query.q || "").trim();
+  const maxResults = Math.min(parseInt(req.query.limit || "100", 10), 500);
+  const resolved = path.resolve(dir);
+  const results = [];
+
+  function walk(d, depth) {
+    if (depth > 10 || results.length >= maxResults) return;
+    try {
+      const entries = fs.readdirSync(d, { withFileTypes: true });
+      for (const e of entries) {
+        if (results.length >= maxResults) return;
+        if (e.name.startsWith(".") && e.name !== ".env" && e.name !== ".gitignore") continue;
+        if (SEARCH_SKIP_DIRS.has(e.name)) continue;
+        const full = path.join(d, e.name);
+        if (e.isDirectory()) {
+          walk(full, depth + 1);
+        } else {
+          const rel = path.relative(resolved, full).replace(/\\/g, "/");
+          if (!query || rel.toLowerCase().includes(query.toLowerCase()) || fuzzyMatch(query, rel)) {
+            results.push({ path: full, relative: rel, name: e.name });
+          }
+        }
+      }
+    } catch {}
+  }
+
+  walk(resolved, 0);
+
+  // Sort: exact name matches first, then substring matches, then fuzzy by length
+  if (query) {
+    const ql = query.toLowerCase();
+    results.sort((a, b) => {
+      const aName = a.name.toLowerCase().includes(ql) ? 0 : 1;
+      const bName = b.name.toLowerCase().includes(ql) ? 0 : 1;
+      if (aName !== bName) return aName - bName;
+      const aRel = a.relative.toLowerCase().includes(ql) ? 0 : 1;
+      const bRel = b.relative.toLowerCase().includes(ql) ? 0 : 1;
+      if (aRel !== bRel) return aRel - bRel;
+      return a.relative.length - b.relative.length;
+    });
+  }
+
+  res.json({ results: results.slice(0, maxResults), dir: resolved });
+});
+
+app.get("/api/search/text", apiAuth, (req, res) => {
+  const dir = req.query.dir || process.cwd();
+  const query = req.query.q;
+  if (!query) return res.status(400).json({ error: "Missing query" });
+  const maxResults = Math.min(parseInt(req.query.limit || "100", 10), 200);
+  const resolved = path.resolve(dir);
+  const results = [];
+  const ql = query.toLowerCase();
+
+  function walk(d, depth) {
+    if (depth > 8 || results.length >= maxResults) return;
+    try {
+      const entries = fs.readdirSync(d, { withFileTypes: true });
+      for (const e of entries) {
+        if (results.length >= maxResults) return;
+        if (e.name.startsWith(".") && e.name !== ".env" && e.name !== ".gitignore") continue;
+        if (SEARCH_SKIP_DIRS.has(e.name)) continue;
+        const full = path.join(d, e.name);
+        if (e.isDirectory()) {
+          walk(full, depth + 1);
+        } else {
+          const ext = e.name.split(".").pop().toLowerCase();
+          const baseName = e.name.toLowerCase();
+          if (!SEARCH_TEXT_EXTS.has(ext) && !baseName.match(/^(dockerfile|makefile|readme|license|changelog)$/)) continue;
+          try {
+            const stat = fs.statSync(full);
+            if (stat.size > 512 * 1024 || stat.size === 0) continue;
+          } catch { continue; }
+          try {
+            const content = fs.readFileSync(full, "utf8");
+            const lines = content.split("\n");
+            for (let i = 0; i < lines.length && results.length < maxResults; i++) {
+              if (lines[i].toLowerCase().includes(ql)) {
+                results.push({
+                  file: path.relative(resolved, full).replace(/\\/g, "/"),
+                  fullPath: full,
+                  line: i + 1,
+                  text: lines[i].substring(0, 200),
+                });
+              }
+            }
+          } catch {}
+        }
+      }
+    } catch {}
+  }
+
+  walk(resolved, 0);
+  res.json({ results, dir: resolved });
+});
+
+// ---- File/image upload API (for drag-drop and clipboard paste) ----
+const UPLOAD_DIR = path.join(os.tmpdir(), "agenv-uploads");
+try { fs.mkdirSync(UPLOAD_DIR, { recursive: true }); } catch {}
+
+app.post("/api/upload", apiAuth, (req, res) => {
+  const { filename, data, type } = req.body;
+  if (!data) return res.status(400).json({ error: "Missing data" });
+
+  const ext = filename
+    ? path.extname(filename)
+    : (type === "image/png" ? ".png" : type === "image/jpeg" ? ".jpg" : type === "image/gif" ? ".gif" : ".bin");
+  const baseName = filename
+    ? path.basename(filename, path.extname(filename))
+    : "upload";
+  const safeName = baseName.replace(/[^a-zA-Z0-9._-]/g, "_") + "-" + Date.now() + ext;
+  const filePath = path.join(UPLOAD_DIR, safeName);
+
+  try {
+    const buf = Buffer.from(data, "base64");
+    if (buf.length > 50 * 1024 * 1024) return res.status(400).json({ error: "File too large (>50MB)" });
+    fs.writeFileSync(filePath, buf);
+    res.json({ ok: true, path: filePath, name: safeName, size: buf.length });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---- Smart Paste / Clip API ----
+// Saves clipboard content to a file in the session's CWD and returns the path.
+// This lets LLMs read the content from a file path instead of inline paste.
+app.post("/api/clip", apiAuth, (req, res) => {
+  const { sessionId, content, contentBase64, mimeType, filename } = req.body;
+  if (!content && !contentBase64) return res.status(400).json({ error: "Missing content" });
+
+  // Determine save directory — session CWD if available, else UPLOAD_DIR
+  let saveDir = UPLOAD_DIR;
+  if (sessionId) {
+    const session = sessions.get(Number(sessionId));
+    if (session && session.cwd) {
+      saveDir = path.join(session.cwd, ".clips");
+    }
+  }
+  try { fs.mkdirSync(saveDir, { recursive: true }); } catch {}
+
+  // Determine extension and name
+  let ext = ".txt";
+  if (filename) {
+    ext = path.extname(filename) || ext;
+  } else if (mimeType) {
+    if (mimeType.startsWith("image/png")) ext = ".png";
+    else if (mimeType.startsWith("image/jpeg")) ext = ".jpg";
+    else if (mimeType.startsWith("image/gif")) ext = ".gif";
+    else if (mimeType.startsWith("image/webp")) ext = ".webp";
+    else if (mimeType.startsWith("image/svg")) ext = ".svg";
+    else if (mimeType === "text/html") ext = ".html";
+    else if (mimeType === "text/csv") ext = ".csv";
+    else if (mimeType === "application/json") ext = ".json";
+  }
+
+  const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  const baseName = filename ? path.basename(filename, path.extname(filename)).replace(/[^a-zA-Z0-9._-]/g, "_") : "clip";
+  const safeName = `${baseName}-${ts}${ext}`;
+  const filePath = path.join(saveDir, safeName);
+
+  try {
+    if (contentBase64) {
+      const buf = Buffer.from(contentBase64, "base64");
+      if (buf.length > 50 * 1024 * 1024) return res.status(400).json({ error: "Content too large (>50MB)" });
+      fs.writeFileSync(filePath, buf);
+      res.json({ ok: true, path: filePath, name: safeName, size: buf.length });
+    } else {
+      if (content.length > 50 * 1024 * 1024) return res.status(400).json({ error: "Content too large (>50MB)" });
+      fs.writeFileSync(filePath, content, "utf8");
+      res.json({ ok: true, path: filePath, name: safeName, size: Buffer.byteLength(content, "utf8") });
+    }
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---- System stats API (cached) ----
+let _statsCache = null;
+let _statsCacheTs = 0;
+app.get("/api/stats", apiAuth, (req, res) => {
+  const now = Date.now();
+  if (!_statsCache || now - _statsCacheTs > 3000) {
+    _statsCache = getSystemStats();
+    _statsCacheTs = now;
+  }
+  res.json(_statsCache);
+});
+
+// ---- Shutdown API ----
+app.post("/api/shutdown", apiAuth, (req, res) => {
+  res.json({ ok: true, message: "Server shutting down..." });
+  setTimeout(() => gracefulShutdown("Shutdown via API"), 500);
+});
+
+// ---- Session analytics API ----
+app.get("/api/analytics", apiAuth, (req, res) => {
+  const result = { sessions: {}, totals: { inputTokens: 0, outputTokens: 0, estimatedCost: 0, sessionCount: sessions.size } };
+  for (const [id, s] of sessions) {
+    const a = s.analytics || {};
+    result.sessions[id] = {
+      name: s.name || "Session " + id, tool: s.detectedTool || "terminal",
+      status: s.status, duration: Date.now() - (a.startTime || s.created),
+      inputTokens: a.inputTokens || 0, outputTokens: a.outputTokens || 0,
+      estimatedCost: a.estimatedCost || 0, turnCount: a.turnCount || 0,
+      commandCount: a.commandCount || 0,
+    };
+    result.totals.inputTokens += a.inputTokens || 0;
+    result.totals.outputTokens += a.outputTokens || 0;
+    result.totals.estimatedCost += a.estimatedCost || 0;
+  }
+  res.json(result);
+});
+
+// ---- Claude Code Usage API (reads ~/.claude/projects/*.jsonl) ----
+// Pricing per 1M tokens, per provider.
+// Anthropic API: cache_create = 1.25x input, cache_read = 0.1x input
+// AWS Bedrock:   cache_create = 1x input (no markup), cache_read = 0.1x input; Haiku priced higher
+// Vertex AI:     same as Anthropic API rates
+// Effective pricing for Claude Code with ephemeral caching ($/M tokens)
+// Cache writes are FREE (ephemeral 5-min), cache reads ~1% of input rate
+const PRICING_TABLES = {
+  anthropic: {
+    opus:   { input: 15,   output: 40,   cache_create: 0, cache_read: 0.10  },
+    sonnet: { input: 3,    output: 8,    cache_create: 0, cache_read: 0.02  },
+    haiku:  { input: 0.25, output: 0.65, cache_create: 0, cache_read: 0.002 },
+  },
+  bedrock: {
+    opus:   { input: 15,   output: 40,   cache_create: 0, cache_read: 0.10  },
+    sonnet: { input: 3,    output: 8,    cache_create: 0, cache_read: 0.02  },
+    haiku:  { input: 0.80, output: 4,    cache_create: 0, cache_read: 0.008 },
+  },
+  vertex: {
+    opus:   { input: 15,   output: 40,   cache_create: 0, cache_read: 0.10  },
+    sonnet: { input: 3,    output: 8,    cache_create: 0, cache_read: 0.02  },
+    haiku:  { input: 0.25, output: 0.65, cache_create: 0, cache_read: 0.002 },
+  },
+};
+
+function getModelPricing(modelId, provider) {
+  const table = PRICING_TABLES[provider] || PRICING_TABLES.anthropic;
+  if (!modelId) return table.sonnet;
+  const lower = modelId.toLowerCase();
+  if (lower.includes("opus")) return table.opus;
+  if (lower.includes("haiku")) return table.haiku;
+  return table.sonnet; // default to sonnet
+}
+
+/** Detect provider from message ID patterns in JSONL entries */
+function detectProvider(msgId) {
+  if (!msgId) return null;
+  if (msgId.startsWith("msg_bdrk_")) return "bedrock";
+  if (msgId.startsWith("msg_vrtx_")) return "vertex";
+  return "anthropic";
+}
+
+function extractTokens(usage) {
+  if (!usage) return null;
+  // Handle multiple field name formats
+  const input = usage.inputTokens || usage.input_tokens || usage.prompt_tokens || 0;
+  const output = usage.outputTokens || usage.output_tokens || usage.completion_tokens || 0;
+  const cacheCreate = usage.cacheCreationInputTokens || usage.cache_creation_input_tokens || 0;
+  const cacheRead = usage.cacheReadInputTokens || usage.cache_read_input_tokens || 0;
+  return { input, output, cacheCreate, cacheRead };
+}
+
+const _usageCache = new Map(); // key → { data, ts }
+app.get("/api/claude-usage", apiAuth, (req, res) => {
+  const providerOverride = req.query.provider || ""; // "anthropic", "bedrock", "vertex", or "" (auto)
+  const cacheKey = (req.query.from || "") + "|" + (req.query.to || "") + "|" + providerOverride;
+  const cached = _usageCache.get(cacheKey);
+  if (cached && Date.now() - cached.ts < 30000) return res.json(cached.data);
+
+  const claudeDir = path.join(os.homedir(), ".claude", "projects");
+  const fromDate = req.query.from ? new Date(req.query.from) : null;
+  const toDate = req.query.to ? new Date(req.query.to) : null;
+
+  const result = {
+    models: {},
+    totals: { input: 0, output: 0, cacheCreate: 0, cacheRead: 0, cost: 0, messages: 0 },
+    daily: {},
+    sessions: [],
+    providers: {}, // auto-detected: { anthropic: count, bedrock: count, vertex: count }
+    firstSeen: null,
+    lastSeen: null,
+  };
+
+  try {
+    if (!fs.existsSync(claudeDir)) {
+      return res.json(result);
+    }
+
+    // Recursively find all .jsonl files
+    const jsonlFiles = [];
+    function findJsonl(dir, depth) {
+      if (depth > 5) return;
+      try {
+        const entries = fs.readdirSync(dir, { withFileTypes: true });
+        for (const e of entries) {
+          const full = path.join(dir, e.name);
+          if (e.isDirectory()) {
+            findJsonl(full, depth + 1);
+          } else if (e.name.endsWith(".jsonl")) {
+            jsonlFiles.push(full);
+          }
+        }
+      } catch {}
+    }
+    findJsonl(claudeDir, 0);
+
+    // Parse each JSONL file
+    for (const filePath of jsonlFiles) {
+      try {
+        const content = fs.readFileSync(filePath, "utf8");
+        const lines = content.split("\n").filter(l => l.trim());
+        let sessionInfo = { file: path.basename(filePath), messages: 0, cost: 0 };
+
+        for (const line of lines) {
+          try {
+            const entry = JSON.parse(line);
+
+            // Track timestamps
+            const ts = entry.timestamp || entry.created_at || entry.ts;
+            let entryDate = null;
+            if (ts) {
+              entryDate = new Date(ts);
+              // Apply date filter
+              if (fromDate && entryDate < fromDate) continue;
+              if (toDate && entryDate >= toDate) continue;
+              if (!result.firstSeen || entryDate < result.firstSeen) result.firstSeen = entryDate;
+              if (!result.lastSeen || entryDate > result.lastSeen) result.lastSeen = entryDate;
+            }
+
+            // Extract usage data — could be at top level or nested in response/message
+            let usage = entry.usage || entry.response?.usage || entry.message?.usage;
+            let model = entry.model || entry.response?.model || entry.message?.model;
+
+            // Auto-detect provider from message ID
+            const msgId = entry.message?.id || entry.response?.id || entry.id || "";
+            let entryProvider = null;
+            if (msgId) {
+              entryProvider = detectProvider(msgId);
+              if (entryProvider && usage) {
+                result.providers[entryProvider] = (result.providers[entryProvider] || 0) + 1;
+              }
+            }
+
+            if (usage) {
+              const tokens = extractTokens(usage);
+              if (tokens) {
+                // Use override provider if set, otherwise auto-detected, otherwise anthropic
+                const pricingProvider = providerOverride || entryProvider || "anthropic";
+                const pricing = getModelPricing(model, pricingProvider);
+                const cost =
+                  (tokens.input * pricing.input / 1000000) +
+                  (tokens.output * pricing.output / 1000000) +
+                  (tokens.cacheCreate * pricing.cache_create / 1000000) +
+                  (tokens.cacheRead * pricing.cache_read / 1000000);
+
+                // Aggregate per model
+                const modelKey = model || "unknown";
+                if (!result.models[modelKey]) {
+                  result.models[modelKey] = { input: 0, output: 0, cacheCreate: 0, cacheRead: 0, cost: 0, messages: 0 };
+                }
+                result.models[modelKey].input += tokens.input;
+                result.models[modelKey].output += tokens.output;
+                result.models[modelKey].cacheCreate += tokens.cacheCreate;
+                result.models[modelKey].cacheRead += tokens.cacheRead;
+                result.models[modelKey].cost += cost;
+                result.models[modelKey].messages += 1;
+
+                // Aggregate totals
+                result.totals.input += tokens.input;
+                result.totals.output += tokens.output;
+                result.totals.cacheCreate += tokens.cacheCreate;
+                result.totals.cacheRead += tokens.cacheRead;
+                result.totals.cost += cost;
+                result.totals.messages += 1;
+
+                // Daily breakdown
+                if (entryDate) {
+                  const dayKey = entryDate.toISOString().slice(0, 10);
+                  if (!result.daily[dayKey]) {
+                    result.daily[dayKey] = { input: 0, output: 0, cost: 0, messages: 0 };
+                  }
+                  result.daily[dayKey].input += tokens.input;
+                  result.daily[dayKey].output += tokens.output;
+                  result.daily[dayKey].cost += cost;
+                  result.daily[dayKey].messages += 1;
+                }
+
+                sessionInfo.messages += 1;
+                sessionInfo.cost += cost;
+              }
+            }
+          } catch {} // skip malformed lines
+        }
+
+        if (sessionInfo.messages > 0) {
+          result.sessions.push(sessionInfo);
+        }
+      } catch {} // skip unreadable files
+    }
+
+    // Sort sessions by cost descending
+    result.sessions.sort((a, b) => b.cost - a.cost);
+    result.sessions = result.sessions.slice(0, 20);
+
+    // Convert dates to ISO strings
+    if (result.firstSeen) result.firstSeen = result.firstSeen.toISOString();
+    if (result.lastSeen) result.lastSeen = result.lastSeen.toISOString();
+
+    _usageCache.set(cacheKey, { data: result, ts: Date.now() });
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---- ngrok tunnel API ----
+let ngrokProcess = null;
+let ngrokUrl = null;
+let ngrokSettings = { allowedIps: [], readOnly: false };
+
+app.post("/api/ngrok/start", apiAuth, (req, res) => {
+  if (ngrokProcess) {
+    return res.json({ ok: true, url: ngrokUrl, pid: ngrokProcess.pid, message: "Already running" });
+  }
+  const port = req.body.port || PORT;
+  const { spawn } = require("child_process");
+  try {
+    const proc = spawn("ngrok", ["http", String(port)], {
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: false,
+    });
+    ngrokProcess = proc;
+
+    let started = false;
+    const timeout = setTimeout(() => {
+      if (!started) {
+        // Try to get the URL from ngrok's local API
+        fetchNgrokUrl().then(url => {
+          if (url) {
+            ngrokUrl = url;
+            res.json({ ok: true, url, pid: proc.pid });
+          } else {
+            res.json({ ok: false, error: "ngrok started but could not determine tunnel URL. Check ngrok dashboard." });
+          }
+        }).catch(() => {
+          res.json({ ok: false, error: "ngrok started but tunnel URL not available yet. Check http://localhost:4040" });
+        });
+        started = true;
+      }
+    }, 3000);
+
+    proc.on("error", (err) => {
+      clearTimeout(timeout);
+      ngrokProcess = null;
+      if (!started) {
+        started = true;
+        res.json({ ok: false, error: "Failed to start ngrok: " + err.message + ". Is ngrok installed? (npm i -g ngrok or https://ngrok.com/download)" });
+      }
+    });
+
+    proc.on("exit", (code) => {
+      ngrokProcess = null;
+      ngrokUrl = null;
+    });
+
+  } catch (e) {
+    res.json({ ok: false, error: e.message });
+  }
+});
+
+async function fetchNgrokUrl() {
+  // ngrok exposes a local API at port 4040
+  return new Promise((resolve, reject) => {
+    const req = http.get("http://127.0.0.1:4040/api/tunnels", (res) => {
+      let body = "";
+      res.on("data", c => body += c);
+      res.on("end", () => {
+        try {
+          const data = JSON.parse(body);
+          const tunnel = (data.tunnels || []).find(t => t.proto === "https") || data.tunnels?.[0];
+          resolve(tunnel ? tunnel.public_url : null);
+        } catch { resolve(null); }
+      });
+    });
+    req.on("error", () => resolve(null));
+    req.setTimeout(2000, () => { req.destroy(); resolve(null); });
+  });
+}
+
+app.post("/api/ngrok/stop", apiAuth, (req, res) => {
+  if (ngrokProcess) {
+    try { ngrokProcess.kill(); } catch {}
+    ngrokProcess = null;
+    ngrokUrl = null;
+  }
+  res.json({ ok: true });
+});
+
+app.get("/api/ngrok/status", apiAuth, async (req, res) => {
+  if (!ngrokProcess) return res.json({ running: false });
+  // Only fetch URL from ngrok API if we don't have it yet
+  if (!ngrokUrl) {
+    try {
+      const url = await fetchNgrokUrl();
+      if (url) ngrokUrl = url;
+    } catch {}
+    if (!ngrokProcess) return res.json({ running: false });
+  }
+  res.json({ running: true, url: ngrokUrl, pid: ngrokProcess.pid });
+});
+
+app.post("/api/ngrok/settings", apiAuth, (req, res) => {
+  const { allowedIps, readOnly } = req.body;
+  if (Array.isArray(allowedIps)) ngrokSettings.allowedIps = allowedIps.filter(ip => ip && typeof ip === "string");
+  if (typeof readOnly === "boolean") ngrokSettings.readOnly = readOnly;
+  res.json({ ok: true, settings: ngrokSettings });
+});
+
+app.get("/api/ngrok/settings", apiAuth, (req, res) => {
+  res.json(ngrokSettings);
+});
+
+// ---- Token rotation API ----
+app.post("/api/token/rotate", apiAuth, (req, res) => {
+  try {
+    const newToken = crypto.randomBytes(24).toString("hex");
+    TOKEN = newToken;
+    const cfg = loadConfig();
+    cfg.token = newToken;
+    saveConfig(cfg);
+    res.json({ ok: true, token: newToken });
+  } catch (e) {
+    res.json({ ok: false, error: e.message });
+  }
+});
+
+// ---- Groups API ----
+app.get("/api/groups", apiAuth, (req, res) => {
+  const groups = new Map();
+  for (const s of sessions.values()) {
+    const g = s.group || "ungrouped";
+    if (!groups.has(g)) groups.set(g, []);
+    groups.get(g).push(s.id);
+  }
+  res.json(Object.fromEntries(groups));
+});
+
+// ---- AI Assistant (rides on user's configured CLI agent) ----
+// Spawns the user's agent CLI in one-shot mode to power AI features
+// in git, CLAUDE.md manager, prompts, etc. No extra API key needed.
+app.post("/api/ai/ask", apiAuth, express.json({ limit: "2mb" }), (req, res) => {
+  const { prompt, agent, model, cwd, timeout: userTimeout } = req.body;
+  if (!prompt) return res.status(400).json({ error: "prompt required" });
+
+  const cli = agent || "claude";
+  const mdl = model || "sonnet";
+  const timeoutMs = Math.min(userTimeout || 90000, 120000);
+  const workDir = cwd || process.cwd();
+
+  // Build command args based on agent type
+  let cmd, args;
+  if (cli === "claude") {
+    cmd = "claude";
+    args = ["-p", "--model", mdl, "--output-format", "text"];
+  } else if (cli === "gemini") {
+    cmd = "gemini";
+    args = ["-p"];
+  } else if (cli === "codex") {
+    cmd = "codex";
+    args = ["-p"];
+  } else {
+    cmd = cli;
+    args = ["-p"];
+  }
+
+  const start = Date.now();
+  const chunks = [];
+  const errChunks = [];
+
+  const winShell = (process.env.SystemRoot || "C:\\Windows") + "\\System32\\cmd.exe";
+  const child = spawn(cmd, args, {
+    cwd: workDir,
+    env: { ...process.env },
+    shell: isWindows ? winShell : true,
+    timeout: timeoutMs,
+    windowsHide: true,
+  });
+
+  child.stdout.on("data", (d) => chunks.push(d));
+  child.stderr.on("data", (d) => errChunks.push(d));
+
+  // Pipe prompt to stdin then close
+  child.stdin.write(prompt);
+  child.stdin.end();
+
+  const timer = setTimeout(() => {
+    try { child.kill(); } catch {}
+  }, timeoutMs);
+
+  child.on("close", (code) => {
+    clearTimeout(timer);
+    const response = Buffer.concat(chunks).toString("utf8").trim();
+    const stderr = Buffer.concat(errChunks).toString("utf8").trim();
+    const elapsed = Date.now() - start;
+
+    if (code !== 0 && !response) {
+      return res.status(500).json({ error: stderr || `Process exited with code ${code}`, elapsed });
+    }
+    res.json({ response, agent: cli, model: mdl, elapsed });
+  });
+
+  child.on("error", (err) => {
+    clearTimeout(timer);
+    res.status(500).json({ error: `Failed to spawn ${cli}: ${err.message}` });
+  });
+});
+
+// ---- Claude Session Index (search & reuse past agent conversations) ----
+const CLAUDE_HOME = path.join(os.homedir(), ".claude");
+const CLAUDE_PROJECTS_DIR = path.join(CLAUDE_HOME, "projects");
+const CLAUDE_INDEX_PATH = path.join(CLAUDE_HOME, "agenv-session-index.json");
+
+let claudeIndex = null;
+let claudeIndexBuiltAt = 0;
+
+const STOP_WORDS = new Set("the a an is are was were be been being have has had do does did will would could should may might can shall it its i me my we our you your he she they them their this that these those what which who whom where when why how all each every both few more most other some such no not only own same so than too very just because but and or if then else for of to from in on at by with about against between into through during before after above below up down out off over under again further once here there also need want like make use used using get got let please now still well dont file code add change update fix look check think know see new way work thing something anything".split(" "));
+
+function decodeClaudeProjectPath(dirName) {
+  // "C--Projects-remotecontrol" → "C:\Projects\remotecontrol"
+  // Drive letter followed by -- encodes the colon-backslash
+  // Remaining hyphens encode path separators (ambiguous with real hyphens, best-effort)
+  return dirName.replace(/^([A-Za-z])--/, "$1:\\").replace(/-/g, "\\");
+}
+
+function extractKeywords(text, bag) {
+  const words = text.toLowerCase().replace(/[^a-z0-9\-_.]/g, " ").split(/\s+/)
+    .filter(w => w.length > 2 && w.length < 30 && !STOP_WORDS.has(w));
+  for (const w of words) bag.set(w, (bag.get(w) || 0) + 1);
+  // Bigrams
+  const parts = text.toLowerCase().replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim()
+    .split(" ").filter(w => w.length > 2 && !STOP_WORDS.has(w));
+  for (let i = 0; i < parts.length - 1; i++) {
+    const bg = parts[i] + " " + parts[i + 1];
+    if (bg.length > 5 && bg.length < 40) bag.set(bg, (bag.get(bg) || 0) + 1);
+  }
+}
+
+async function indexConversationFile(filePath, fileId, projDir) {
+  const content = await fs.promises.readFile(filePath, "utf8");
+  const lines = content.trim().split("\n");
+  if (!lines.length) return null;
+
+  let firstTs = null, lastTs = null, slug = null, model = null, branch = null;
+  let cwd = null, entrypoint = null, sessionId = null;
+  let msgCount = 0, userMsgCount = 0, freshInTok = 0, cacheWriteTok = 0, cacheReadTok = 0, outTok = 0;
+  const kwBag = new Map();
+  const filesEdited = new Set();
+  const cmds = new Set();
+  const userMsgs = [];
+
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    let e; try { e = JSON.parse(line); } catch { continue; }
+
+    if (e.timestamp) { if (!firstTs) firstTs = e.timestamp; lastTs = e.timestamp; }
+    if (!slug && e.slug) slug = e.slug;
+    if (!branch && e.gitBranch && e.gitBranch !== "HEAD") branch = e.gitBranch;
+    if (!cwd && e.cwd) cwd = e.cwd;
+    if (!entrypoint && e.entrypoint) entrypoint = e.entrypoint;
+    if (!sessionId && e.sessionId) sessionId = e.sessionId;
+
+    if (e.type === "user" && e.message?.role === "user") {
+      msgCount++;
+      const c = e.message.content;
+      if (typeof c === "string") {
+        userMsgCount++;
+        if (userMsgCount <= 25) { userMsgs.push(c); extractKeywords(c, kwBag); }
+      }
+      if (e.toolUseResult?.filePath) {
+        filesEdited.add(e.toolUseResult.filePath.replace(/\\/g, "/").split("/").pop());
+      }
+    }
+
+    if (e.type === "assistant" && e.message) {
+      msgCount++;
+      const u = e.message.usage;
+      if (u) {
+        freshInTok += u.input_tokens || 0;
+        cacheWriteTok += u.cache_creation_input_tokens || 0;
+        cacheReadTok += u.cache_read_input_tokens || 0;
+        outTok += u.output_tokens || 0;
+      }
+      if (!model && e.message.model) model = e.message.model;
+      if (Array.isArray(e.message.content)) {
+        for (const b of e.message.content) {
+          if (b.type === "tool_use" && b.name === "Bash" && b.input?.command) {
+            cmds.add(b.input.command.split("\n")[0].trim().slice(0, 60));
+          }
+          // Index text blocks from assistant for richer keyword extraction
+          if (b.type === "text" && typeof b.text === "string" && userMsgCount <= 25) {
+            // Only extract from first ~200 chars of each response to avoid noise
+            extractKeywords(b.text.slice(0, 200), kwBag);
+          }
+        }
+      }
+    }
+  }
+
+  if (userMsgCount === 0) return null;
+
+  const sortedKw = [...kwBag.entries()].sort((a, b) => b[1] - a[1]).slice(0, 25).map(([w]) => w);
+
+  // Cost estimate — effective rates for Claude Code with ephemeral caching
+  // Cache writes are free (ephemeral 5-min), cache reads ~1% input, output discounted
+  let cIn = 15, cCacheRead = 0.10, cOut = 40; // opus $/M (effective)
+  if (model?.includes("sonnet")) { cIn = 3; cCacheRead = 0.02; cOut = 8; }
+  if (model?.includes("haiku")) { cIn = 0.25; cCacheRead = 0.002; cOut = 0.65; }
+  const cost = Math.round((
+    (freshInTok / 1e6 * cIn) +           // fresh (uncached) input at full rate
+    (cacheReadTok / 1e6 * cCacheRead) +   // cache reads at ~1% of input (ephemeral)
+    (outTok / 1e6 * cOut)                  // output at full rate
+  ) * 100) / 100;
+  const totalInTok = freshInTok + cacheWriteTok + cacheReadTok;
+
+  return {
+    id: fileId,
+    project: projDir,
+    projectPath: decodeClaudeProjectPath(projDir),
+    slug: slug || fileId.slice(0, 8),
+    model: model || "unknown",
+    branch: branch || "",
+    cwd: cwd || "",
+    entrypoint: entrypoint || "cli",
+    firstMessage: firstTs,
+    lastMessage: lastTs,
+    messageCount: msgCount,
+    userMessageCount: userMsgCount,
+    totalInputTokens: totalInTok,
+    totalOutputTokens: outTok,
+    estimatedCost: cost,
+    keywords: sortedKw,
+    filesEdited: [...filesEdited].slice(0, 25),
+    commands: [...cmds].slice(0, 20),
+    summary: userMsgs.slice(0, 3).join(" | ").slice(0, 250),
+  };
+}
+
+async function buildClaudeIndex(force) {
+  if (!force && claudeIndex && Date.now() - claudeIndexBuiltAt < 60000) return claudeIndex;
+
+  // Try disk cache
+  if (!force) {
+    try {
+      const cached = JSON.parse(await fs.promises.readFile(CLAUDE_INDEX_PATH, "utf8"));
+      if (cached.timestamp && Date.now() - cached.timestamp < 300000) {
+        claudeIndex = cached.sessions;
+        claudeIndexBuiltAt = cached.timestamp;
+        return claudeIndex;
+      }
+    } catch {}
+  }
+
+  const result = [];
+  try {
+    const dirs = await fs.promises.readdir(CLAUDE_PROJECTS_DIR);
+    for (const d of dirs) {
+      const dp = path.join(CLAUDE_PROJECTS_DIR, d);
+      let stat; try { stat = await fs.promises.stat(dp); } catch { continue; }
+      if (!stat.isDirectory()) continue;
+      let files; try { files = await fs.promises.readdir(dp); } catch { continue; }
+      for (const f of files.filter(x => x.endsWith(".jsonl"))) {
+        try {
+          const s = await indexConversationFile(path.join(dp, f), f.replace(".jsonl", ""), d);
+          if (s && s.messageCount > 0) result.push(s);
+        } catch {}
+      }
+    }
+  } catch {}
+
+  result.sort((a, b) => new Date(b.lastMessage) - new Date(a.lastMessage));
+  claudeIndex = result;
+  claudeIndexBuiltAt = Date.now();
+
+  try { await fs.promises.writeFile(CLAUDE_INDEX_PATH, JSON.stringify({ timestamp: Date.now(), sessions: result })); } catch {}
+  return result;
+}
+
+app.get("/api/claude/sessions", apiAuth, async (_req, res) => {
+  try { res.json(await buildClaudeIndex(_req.query.refresh === "1")); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get("/api/claude/search", apiAuth, async (req, res) => {
+  try {
+    const q = (req.query.q || "").toLowerCase().trim();
+    if (!q) return res.json([]);
+    const idx = await buildClaudeIndex();
+    const terms = q.split(/\s+/);
+    const scored = idx.map(s => {
+      let score = 0;
+      for (const t of terms) {
+        if (s.keywords.some(k => k.includes(t))) score += 10;
+        if (s.summary.toLowerCase().includes(t)) score += 5;
+        if (s.filesEdited.some(f => f.toLowerCase().includes(t))) score += 3;
+        if (s.commands.some(c => c.toLowerCase().includes(t))) score += 3;
+        if (s.project.toLowerCase().includes(t)) score += 2;
+        if (s.branch.toLowerCase().includes(t)) score += 2;
+        if (s.slug.toLowerCase().includes(t)) score += 1;
+      }
+      return { ...s, score };
+    }).filter(s => s.score > 0).sort((a, b) => b.score - a.score).slice(0, 50);
+    res.json(scored);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get("/api/claude/sessions/:id", apiAuth, async (req, res) => {
+  try {
+    const idx = await buildClaudeIndex();
+    const s = idx.find(x => x.id === req.params.id);
+    if (!s) return res.status(404).json({ error: "Not found" });
+    // Return conversation entries (user messages + assistant text only, skip binary/tool noise)
+    const content = await fs.promises.readFile(path.join(CLAUDE_PROJECTS_DIR, s.project, s.id + ".jsonl"), "utf8");
+    const entries = [];
+    for (const line of content.trim().split("\n")) {
+      let e; try { e = JSON.parse(line); } catch { continue; }
+      if (e.type === "user" && typeof e.message?.content === "string") {
+        entries.push({ type: "user", text: e.message.content, ts: e.timestamp });
+      } else if (e.type === "assistant" && Array.isArray(e.message?.content)) {
+        const texts = e.message.content.filter(b => b.type === "text").map(b => b.text).join("\n");
+        if (texts) entries.push({ type: "assistant", text: texts.slice(0, 500), ts: e.timestamp, model: e.message.model });
+      }
+    }
+    res.json({ ...s, entries: entries.slice(0, 100) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post("/api/claude/reindex", apiAuth, async (_req, res) => {
+  try {
+    const idx = await buildClaudeIndex(true);
+    res.json({ ok: true, count: idx.length });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ---- CLAUDE.md Manager ----
+// Resolve real project path from encoded dir name by reading the first JSONL entry's cwd
+function resolveProjectPath(projDir) {
+  try {
+    const dp = path.join(CLAUDE_PROJECTS_DIR, projDir);
+    const files = fs.readdirSync(dp).filter(f => f.endsWith(".jsonl"));
+    for (const f of files) {
+      const first = fs.readFileSync(path.join(dp, f), "utf8").split("\n")[0];
+      const e = JSON.parse(first);
+      if (e.cwd) return e.cwd.replace(/\//g, path.sep);
+    }
+  } catch {}
+  return decodeClaudeProjectPath(projDir);
+}
+
+let projectPathCache = null;
+function getProjectPaths() {
+  if (projectPathCache) return projectPathCache;
+  const result = [];
+  try {
+    const dirs = fs.readdirSync(CLAUDE_PROJECTS_DIR);
+    for (const d of dirs) {
+      try {
+        if (!fs.statSync(path.join(CLAUDE_PROJECTS_DIR, d)).isDirectory()) continue;
+        const resolved = resolveProjectPath(d);
+        result.push({ dir: d, path: resolved, name: path.basename(resolved) });
+      } catch {}
+    }
+  } catch {}
+  projectPathCache = result;
+  setTimeout(() => { projectPathCache = null; }, 60000);
+  return result;
+}
+
+const CLAUDEMD_TEMPLATES = {
+  basic: `# Project Guidelines
+
+## Overview
+Brief description of the project.
+
+## Architecture
+Key architecture decisions and patterns.
+
+## Code Style
+- Prefer X over Y
+- Follow existing patterns in the codebase
+
+## Testing
+How to run tests, what to test.
+
+## Important Notes
+Things to remember when working on this project.
+`,
+  webdev: `# Web Project Guidelines
+
+## Stack
+- Frontend: [framework]
+- Backend: [framework]
+- Database: [database]
+
+## Development
+\`\`\`bash
+npm install
+npm run dev
+\`\`\`
+
+## Code Style
+- Use TypeScript strict mode
+- Components in PascalCase
+- Utilities in camelCase
+
+## API Conventions
+- RESTful endpoints at /api/
+- Always validate input
+- Return consistent error shapes
+
+## Testing
+\`\`\`bash
+npm test
+npm run test:e2e
+\`\`\`
+
+## Deployment
+- Branch: main → production
+- PRs require review
+`,
+  cli: `# CLI Tool Guidelines
+
+## Overview
+What this CLI does and who uses it.
+
+## Development
+\`\`\`bash
+npm install
+npm link  # for local testing
+\`\`\`
+
+## Architecture
+- Entry point: src/index.ts
+- Commands in src/commands/
+- Shared utils in src/lib/
+
+## Adding Commands
+1. Create file in src/commands/
+2. Export handler function
+3. Register in src/index.ts
+
+## Testing
+\`\`\`bash
+npm test
+\`\`\`
+`,
+  python: `# Python Project Guidelines
+
+## Setup
+\`\`\`bash
+python -m venv venv
+source venv/bin/activate  # or venv\\Scripts\\activate on Windows
+pip install -r requirements.txt
+\`\`\`
+
+## Code Style
+- Follow PEP 8
+- Type hints on all public functions
+- Docstrings on classes and public methods
+
+## Testing
+\`\`\`bash
+pytest
+pytest --cov
+\`\`\`
+
+## Project Structure
+- src/ — main source code
+- tests/ — test files
+- scripts/ — utility scripts
+`,
+};
+
+app.get("/api/claudemd/list", apiAuth, (_req, res) => {
+  const projects = getProjectPaths();
+  const result = [];
+  for (const p of projects) {
+    const claudemdPath = path.join(p.path, "CLAUDE.md");
+    const localSettingsPath = path.join(p.path, ".claude", "settings.local.json");
+    const memoryDir = path.join(CLAUDE_PROJECTS_DIR, p.dir);
+    let memoryFiles = [];
+    // Check for memory dir — could be directly under project dir or nested in a session subdir
+    try {
+      const directMem = path.join(memoryDir, "memory");
+      if (fs.existsSync(directMem) && fs.statSync(directMem).isDirectory()) {
+        memoryFiles = fs.readdirSync(directMem).filter(f => f.endsWith(".md"));
+      } else {
+        const sub = fs.readdirSync(memoryDir).find(f => {
+          try { return fs.statSync(path.join(memoryDir, f)).isDirectory() && fs.existsSync(path.join(memoryDir, f, "memory")); } catch { return false; }
+        });
+        if (sub) {
+          memoryFiles = fs.readdirSync(path.join(memoryDir, sub, "memory")).filter(f => f.endsWith(".md"));
+        }
+      }
+    } catch {}
+
+    let hasClaude = false, size = 0;
+    try { const st = fs.statSync(claudemdPath); hasClaude = true; size = st.size; } catch {}
+
+    result.push({
+      dir: p.dir,
+      path: p.path,
+      name: p.name,
+      hasClaude,
+      size,
+      hasLocalSettings: fs.existsSync(localSettingsPath),
+      memoryFiles,
+    });
+  }
+  // Sort: projects with CLAUDE.md first, then alphabetical
+  result.sort((a, b) => (b.hasClaude ? 1 : 0) - (a.hasClaude ? 1 : 0) || a.name.localeCompare(b.name));
+  res.json(result);
+});
+
+app.get("/api/claudemd/read", apiAuth, (req, res) => {
+  const projectPath = req.query.path;
+  if (!projectPath) return res.status(400).json({ error: "path required" });
+  const claudemdPath = path.join(projectPath, "CLAUDE.md");
+  try {
+    const content = fs.readFileSync(claudemdPath, "utf8");
+    res.json({ content, path: claudemdPath });
+  } catch {
+    res.json({ content: "", path: claudemdPath, exists: false });
+  }
+});
+
+app.put("/api/claudemd/write", apiAuth, express.json({ limit: "1mb" }), (req, res) => {
+  const projectPath = req.body.path;
+  const content = req.body.content;
+  if (!projectPath || content == null) return res.status(400).json({ error: "path and content required" });
+  const claudemdPath = path.join(projectPath, "CLAUDE.md");
+  try {
+    fs.writeFileSync(claudemdPath, content, "utf8");
+    res.json({ ok: true, path: claudemdPath });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/api/claudemd/templates", apiAuth, (_req, res) => {
+  res.json(Object.entries(CLAUDEMD_TEMPLATES).map(([id, content]) => ({ id, name: id.charAt(0).toUpperCase() + id.slice(1), content })));
+});
+
+app.get("/api/claudemd/memory", apiAuth, (req, res) => {
+  const projDir = req.query.dir;
+  if (!projDir) return res.status(400).json({ error: "dir required" });
+  const memBase = path.join(CLAUDE_PROJECTS_DIR, projDir);
+  try {
+    // Check direct memory/ dir first, then nested session subdirs
+    const directMem = path.join(memBase, "memory");
+    let memDir = null;
+    if (fs.existsSync(directMem) && fs.statSync(directMem).isDirectory()) {
+      memDir = directMem;
+    } else {
+      const subdirs = fs.readdirSync(memBase).filter(f => {
+        try { return fs.statSync(path.join(memBase, f)).isDirectory(); } catch { return false; }
+      });
+      for (const sd of subdirs) {
+        const candidate = path.join(memBase, sd, "memory");
+        if (fs.existsSync(candidate)) { memDir = candidate; break; }
+      }
+    }
+    if (memDir) {
+      const files = fs.readdirSync(memDir).filter(f => f.endsWith(".md"));
+      const memories = files.map(f => {
+        const content = fs.readFileSync(path.join(memDir, f), "utf8");
+        return { file: f, content };
+      });
+      return res.json({ memories, path: memDir });
+    }
+    res.json({ memories: [], path: null });
+  } catch { res.json({ memories: [], path: null }); }
+});
+
+// ---- Prompt Library ----
+const PROMPTS_FILE = path.join(CLAUDE_HOME, "agenv-prompts.json");
+
+function loadPrompts() {
+  try { return JSON.parse(fs.readFileSync(PROMPTS_FILE, "utf8")); }
+  catch { return []; }
+}
+function savePrompts(prompts) {
+  fs.writeFileSync(PROMPTS_FILE, JSON.stringify(prompts, null, 2));
+}
+
+app.get("/api/prompts", apiAuth, (_req, res) => {
+  res.json(loadPrompts());
+});
+
+app.post("/api/prompts", apiAuth, express.json(), (req, res) => {
+  const { title, content, category, tags } = req.body;
+  if (!title || !content) return res.status(400).json({ error: "title and content required" });
+  const prompts = loadPrompts();
+  const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  const prompt = { id, title, content, category: category || "general", tags: tags || [], created: Date.now(), used: 0 };
+  prompts.push(prompt);
+  savePrompts(prompts);
+  res.json(prompt);
+});
+
+app.put("/api/prompts/:id", apiAuth, express.json(), (req, res) => {
+  const prompts = loadPrompts();
+  const idx = prompts.findIndex(p => p.id === req.params.id);
+  if (idx < 0) return res.status(404).json({ error: "Not found" });
+  Object.assign(prompts[idx], req.body, { id: req.params.id });
+  savePrompts(prompts);
+  res.json(prompts[idx]);
+});
+
+app.delete("/api/prompts/:id", apiAuth, (req, res) => {
+  let prompts = loadPrompts();
+  prompts = prompts.filter(p => p.id !== req.params.id);
+  savePrompts(prompts);
+  res.json({ ok: true });
+});
+
+app.post("/api/prompts/:id/use", apiAuth, (req, res) => {
+  const prompts = loadPrompts();
+  const p = prompts.find(p => p.id === req.params.id);
+  if (p) { p.used = (p.used || 0) + 1; p.lastUsed = Date.now(); savePrompts(prompts); }
+  res.json({ ok: true });
 });
 
 // ---- Auth routes ----
@@ -775,7 +2715,8 @@ if (useCredentials) {
     if (cfg.auth && cfg.auth.username === username && cfg.auth.password && verifyPassword(password, cfg.auth.password)) {
       const sid = crypto.randomBytes(32).toString("hex");
       cookieSessions.add(sid);
-      res.setHeader("Set-Cookie", `session=${sid}; HttpOnly; SameSite=Strict; Path=/`);
+      const secure = (req.secure || req.headers["x-forwarded-proto"] === "https") ? "; Secure" : "";
+      res.setHeader("Set-Cookie", `session=${sid}; HttpOnly; SameSite=Strict; Path=/${secure}`);
       res.redirect("/");
     } else {
       res.status(401).type("html").send(buildLoginPage("Invalid username or password."));
@@ -799,7 +2740,7 @@ if (useCredentials) {
 // ---------------------------------------------------------------------------
 // WebSocket server
 // ---------------------------------------------------------------------------
-const wss = new WebSocketServer({ server, path: "/ws", maxPayload: 64 * 1024 });
+const wss = new WebSocketServer({ server, path: "/ws", maxPayload: 16 * 1024 * 1024 });
 
 function makeRateLimiter(limit = 200) {
   let count = 0, windowStart = Date.now();
@@ -808,6 +2749,17 @@ function makeRateLimiter(limit = 200) {
 
 wss.on("connection", (ws, req) => {
   if (!isAuthenticated(req)) { ws.close(4401, "Unauthorized"); return; }
+
+  // ngrok IP allowlist check for WebSocket
+  const isNgrok = !!(req.headers["x-forwarded-for"] || req.headers["ngrok-skip-browser-warning"]);
+  if (isNgrok && ngrokSettings.allowedIps.length > 0) {
+    const clientIp = (req.headers["x-forwarded-for"] || "").split(",")[0].trim();
+    if (!ngrokSettings.allowedIps.includes(clientIp)) {
+      ws.close(4403, "IP not in allowlist"); return;
+    }
+  }
+  const wsReadOnly = isNgrok && ngrokSettings.readOnly;
+
   const urlObj = new URL(req.url, "http://localhost");
   const sessionId = parseInt(urlObj.searchParams.get("session") || "0", 10);
   const session = sessions.get(sessionId);
@@ -815,7 +2767,7 @@ wss.on("connection", (ws, req) => {
 
   session.clients.add(ws);
   const rl = makeRateLimiter();
-  console.log(`[termlink] Browser connected to session ${sessionId} (${session.clients.size} client(s))`);
+  console.log(`[agenv] Browser connected to session ${sessionId} (${session.clients.size} client(s))${wsReadOnly ? " [read-only]" : ""}`);
 
   ws.send(JSON.stringify({ type: "resize", cols: session.pty.cols, rows: session.pty.rows }));
   if (session.scrollback.length > 0) ws.send(JSON.stringify({ type: "output", data: session.scrollback.toString("utf8") }));
@@ -823,7 +2775,7 @@ wss.on("connection", (ws, req) => {
   ws.on("message", (raw) => {
     if (!rl()) { ws.close(4429, "Too Many Requests"); return; }
     let msg; try { msg = JSON.parse(raw); } catch { return; }
-    if (msg.type === "input" && typeof msg.data === "string") { if (msg.data.length <= 4096) session.pty.write(msg.data); }
+    if (msg.type === "input" && typeof msg.data === "string") { if (wsReadOnly) return; if (msg.data.length <= 262144) session.pty.write(msg.data); }
     else if (msg.type === "resize") {
       session.pty.resize(
         Math.max(1, Math.min(Math.floor(Number(msg.cols)) || 80, 500)),
@@ -831,13 +2783,19 @@ wss.on("connection", (ws, req) => {
       );
     }
   });
-  ws.on("close", () => { session.clients.delete(ws); console.log(`[termlink] Browser disconnected from session ${sessionId} (${session.clients.size} client(s))`); });
+  ws.on("close", () => { session.clients.delete(ws); console.log(`[agenv] Browser disconnected from session ${sessionId} (${session.clients.size} client(s))`); });
 });
 
 // ---------------------------------------------------------------------------
 // Start listening
 // ---------------------------------------------------------------------------
-server.listen(PORT, HOST, () => console.log(`[termlink] Listening on ${HOST}:${PORT}`));
+server.listen(PORT, HOST, () => {
+  console.log(`[agenv] Listening on ${HOST}:${PORT}`);
+  // Write PID file so 'agenv stop/kill' can find us
+  try {
+    fs.writeFileSync(PID_PATH, JSON.stringify({ pid: process.pid, port: PORT, host: HOST, started: Date.now() }));
+  } catch {}
+});
 
 // ---------------------------------------------------------------------------
 // Graceful shutdown — save state on ALL exit paths
@@ -845,19 +2803,69 @@ server.listen(PORT, HOST, () => console.log(`[termlink] Listening on ${HOST}:${P
 function gracefulShutdown(reason) {
   if (shuttingDown) return;
   shuttingDown = true;
-  console.log(`\n[termlink] ${reason} — saving state...`);
-  try { saveState(); } catch {} try { saveAllScrollback(); } catch {}
+  console.log(`\n[agenv] ${reason} — saving state...`);
+  try { saveState(); } catch {}
+  try { saveAllScrollback(); } catch {}
   clearInterval(periodicSaveInterval);
+  // Clean up PID file
+  try { fs.unlinkSync(PID_PATH); } catch {}
+  // Kill all PTY processes
   for (const s of sessions.values()) { try { s.pty.kill(); } catch {} }
-  server.close();
-  process.exit(0);
+  server.close(() => {
+    console.log("[agenv] Server closed.");
+    process.exit(0);
+  });
+  // Force exit after 3s if server.close() hangs
+  setTimeout(() => process.exit(0), 3000).unref();
 }
 
+// Signal handling — works on both Windows and Unix
 let ctrlCCount = 0, ctrlCTimer;
-process.on("SIGINT", () => { ctrlCCount++; if (ctrlCCount >= 2) gracefulShutdown("Double Ctrl+C"); clearTimeout(ctrlCTimer); ctrlCTimer = setTimeout(() => { ctrlCCount = 0; }, 1000); });
+process.on("SIGINT", () => {
+  ctrlCCount++;
+  if (ctrlCCount >= 2) {
+    gracefulShutdown("Double Ctrl+C");
+  } else {
+    console.log("\n[agenv] Press Ctrl+C again to exit (or run 'agenv stop')");
+  }
+  clearTimeout(ctrlCTimer);
+  ctrlCTimer = setTimeout(() => { ctrlCCount = 0; }, 2000);
+});
 process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
 process.on("SIGHUP", () => gracefulShutdown("SIGHUP"));
-process.on("exit", () => { if (!shuttingDown) { try { saveState(); } catch {} try { saveAllScrollback(); } catch {} } });
+// Windows: handle Ctrl+Break
+if (process.platform === "win32") {
+  process.on("SIGBREAK", () => gracefulShutdown("Ctrl+Break"));
+}
+process.on("exit", () => {
+  if (!shuttingDown) { try { saveState(); } catch {} try { saveAllScrollback(); } catch {} }
+  try { fs.unlinkSync(PID_PATH); } catch {}
+});
+
+// Windows: enable raw stdin so Ctrl+C is received by Node, not swallowed by PTY
+if (process.platform === "win32" && process.stdin.isTTY) {
+  try {
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stdin.on("data", (data) => {
+      // Ctrl+C = 0x03
+      if (data[0] === 3) {
+        ctrlCCount++;
+        if (ctrlCCount >= 2) {
+          gracefulShutdown("Double Ctrl+C");
+        } else {
+          console.log("\n[agenv] Press Ctrl+C again to exit (or run 'agenv stop')");
+          clearTimeout(ctrlCTimer);
+          ctrlCTimer = setTimeout(() => { ctrlCCount = 0; }, 2000);
+        }
+      }
+      // 'q' or 'Q' to quit (only when not piped)
+      if (data[0] === 113 || data[0] === 81) {
+        gracefulShutdown("Quit (q pressed)");
+      }
+    });
+  } catch {}
+}
 
 // ---------------------------------------------------------------------------
 // HTML builders
@@ -866,9 +2874,19 @@ function buildLoginPage(error) {
   return LOGIN_TEMPLATE.replace(/__ERROR__/g, error ? `<p class="error">${error}</p>` : "");
 }
 
+let _pageCache = null;
+function getPageTemplate() {
+  if (!_pageCache) _pageCache = fs.readFileSync(path.join(__dirname, "public", "index.html"), "utf8");
+  return _pageCache;
+}
+// Invalidate cache when files change in dev
+if (process.env.NODE_ENV !== "production") {
+  try { fs.watch(path.join(__dirname, "public", "index.html"), () => { _pageCache = null; }); } catch {}
+}
+
 function buildPage(token) {
   const sessionList = Array.from(sessions.entries()).sort((a, b) => a[0] - b[0])
-    .map(([id, s]) => ({ id, name: s.name || "", cwd: s.cwd, tool: s.detectedTool || "terminal", lastCommand: s.lastCommand || "", launchCommand: s.launchCommand || "", created: s.created, lastActivity: s.lastActivity }));
+    .map(([id, s]) => ({ id, name: s.name || "", cwd: s.cwd, tool: s.detectedTool || "terminal", lastCommand: s.lastCommand || "", launchCommand: s.launchCommand || "", created: s.created, lastActivity: s.lastActivity, status: s.status || "idle", group: s.group || "", note: s.note || "", analytics: s.analytics || {} }));
   const archive = loadArchive().reverse().slice(0, 30);
   const favorites = loadFavorites();
   const recentFolders = [];
@@ -878,976 +2896,19 @@ function buildPage(token) {
   for (const [cwd, ts] of folderMap) { try { if (fs.existsSync(cwd)) recentFolders.push({ cwd, lastActivity: ts }); } catch {} }
   recentFolders.sort((a, b) => b.lastActivity - a.lastActivity);
 
-  return PAGE_TEMPLATE
-    .replace(/__WS_TOKEN__/g, token)
-    .replace(/__SESSION_LIST__/g, JSON.stringify(sessionList))
-    .replace(/__ARCHIVE__/g, JSON.stringify(archive))
-    .replace(/__FAVORITES__/g, JSON.stringify(favorites))
-    .replace(/__RECENT_FOLDERS__/g, JSON.stringify(recentFolders.slice(0, 15)));
+  const runtimeData = JSON.stringify({
+    token, sessions: sessionList, archive, favorites, recentFolders: recentFolders.slice(0, 15),
+    workspaceLayout: _workspaceLayout || null,
+  });
+  const runtimeScript = `window.__RUNTIME__ = ${runtimeData};`;
+
+  return getPageTemplate().replace("/*__RUNTIME_DATA__*/", runtimeScript);
 }
 
 // ---------------------------------------------------------------------------
 // Login page
 // ---------------------------------------------------------------------------
-const LOGIN_TEMPLATE = /* html */ `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width,initial-scale=1.0" /><title>TermLink — Login</title>
+const LOGIN_TEMPLATE = /* html */ `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width,initial-scale=1.0" /><title>Agenv — Login</title>
 <style>*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}html,body{height:100%;background:#1e1e1e;color:#ccc;font-family:'Cascadia Code','Fira Code',Consolas,monospace;display:flex;align-items:center;justify-content:center}.card{background:#252526;border:1px solid #3c3c3c;border-radius:8px;padding:2rem 2.5rem;width:340px}h1{font-size:1.1rem;margin-bottom:1.5rem;color:#fff;text-align:center}label{display:block;font-size:.85rem;margin-bottom:.3rem;color:#999}input{width:100%;padding:8px 10px;margin-bottom:1rem;background:#1e1e1e;border:1px solid #3c3c3c;border-radius:4px;color:#fff;font-family:inherit;font-size:.9rem;outline:none}input:focus{border-color:#007acc}button{width:100%;padding:10px;background:#007acc;color:#fff;border:none;border-radius:4px;font-family:inherit;font-size:.9rem;cursor:pointer}button:hover{background:#005f9e}.error{color:#f44;font-size:.85rem;margin-bottom:1rem;text-align:center}</style></head>
-<body><div class="card"><h1>TermLink</h1>__ERROR__<form method="POST" action="/login"><label for="username">Username</label><input type="text" id="username" name="username" autocomplete="username" autofocus required /><label for="password">Password</label><input type="password" id="password" name="password" autocomplete="current-password" required /><button type="submit">Sign In</button></form></div></body></html>`;
+<body><div class="card"><h1>Agenv</h1>__ERROR__<form method="POST" action="/login"><label for="username">Username</label><input type="text" id="username" name="username" autocomplete="username" autofocus required /><label for="password">Password</label><input type="password" id="password" name="password" autocomplete="current-password" required /><button type="submit">Sign In</button></form></div></body></html>`;
 
-// ---------------------------------------------------------------------------
-// Main page — Dashboard + Terminal
-// ---------------------------------------------------------------------------
-const PAGE_TEMPLATE = /* html */ `<!DOCTYPE html>
-<html lang="en"><head><meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no"/>
-<title>TermLink</title>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css"/>
-<style>
-:root{--bg:#0d1117;--bg2:#161b22;--bg3:#1c2333;--border:#30363d;--text:#e6edf3;--text2:#8b949e;--text3:#484f58;--accent:#58a6ff;--accent2:#388bfd;--purple:#bc8cff;--green:#3fb950;--orange:#d29922;--red:#f85149;--radius:8px;--font:'Cascadia Code','Fira Code','Consolas','Monaco',monospace}
-*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--font);overflow:hidden}
-body{display:flex;flex-direction:column}
-
-/* ===== DASHBOARD ===== */
-#dashboard{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:0 0 80px}
-#dashboard.hidden{display:none}
-.dash-inner{max-width:600px;margin:0 auto;padding:20px 16px}
-.dash-hero{padding:24px 0 16px;text-align:center}
-.dash-hero h1{font-size:20px;font-weight:700;color:var(--text);letter-spacing:-.5px}
-.dash-hero h1 span{color:var(--accent)}
-.dash-hero p{font-size:11px;color:var(--text3);margin-top:6px}
-
-.dash-section{margin-top:20px}
-.dash-label{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.8px;color:var(--text3);margin-bottom:8px;padding-left:2px}
-
-/* Action grid */
-.act-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-.act-btn{display:flex;align-items:center;gap:10px;padding:14px;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);cursor:pointer;-webkit-tap-highlight-color:transparent;touch-action:manipulation;transition:border-color .2s,background .2s}
-.act-btn:hover,.act-btn:active{background:var(--bg3);border-color:var(--accent2)}
-.act-btn .act-icon{width:36px;height:36px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0}
-.act-btn .act-icon.claude{background:rgba(139,92,246,.15);color:#a78bfa}
-.act-btn .act-icon.vertex{background:rgba(63,185,80,.12);color:var(--green)}
-.act-btn .act-icon.terminal{background:rgba(88,166,255,.1);color:var(--accent)}
-.act-btn .act-icon.folder{background:rgba(210,153,34,.1);color:var(--orange)}
-.act-btn .act-text{min-width:0}
-.act-btn .act-title{font-size:13px;font-weight:600;color:var(--text)}
-.act-btn .act-sub{font-size:10px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-
-/* Session cards */
-.ses-list{display:flex;flex-direction:column;gap:6px}
-.ses-card{display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);cursor:pointer;-webkit-tap-highlight-color:transparent;touch-action:manipulation;transition:border-color .2s}
-.ses-card:hover,.ses-card:active{border-color:var(--text3)}
-.ses-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
-.ses-dot.live{background:var(--green)}
-.ses-dot.dead{background:var(--text3)}
-.ses-info{flex:1;min-width:0}
-.ses-name{font-size:12px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.ses-path{font-size:10px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
-.ses-badge{font-size:9px;font-weight:700;padding:2px 6px;border-radius:4px;text-transform:uppercase;letter-spacing:.3px;flex-shrink:0}
-.ses-badge.claude{background:rgba(139,92,246,.2);color:#c4b5fd}
-.ses-badge.vertex{background:rgba(63,185,80,.15);color:#7ee787}
-.ses-badge.ssh{background:rgba(210,153,34,.15);color:#e3b341}
-.ses-time{font-size:10px;color:var(--text3);flex-shrink:0;min-width:24px;text-align:right}
-
-.empty-msg{font-size:11px;color:var(--text3);padding:12px 4px}
-
-/* ===== TERMINAL VIEW ===== */
-#terminal-view{flex:1;display:flex;flex-direction:column}
-#terminal-view.hidden{display:none}
-
-/* Top bar */
-#top-bar{display:flex;align-items:center;background:var(--bg2);border-bottom:1px solid var(--border);height:38px;flex-shrink:0}
-.top-btn{display:flex;align-items:center;justify-content:center;width:38px;height:100%;background:none;border:none;color:var(--text2);font-size:16px;cursor:pointer;flex-shrink:0;font-family:var(--font)}
-.top-btn:hover{color:var(--text);background:rgba(255,255,255,.04)}
-#tab-bar{display:flex;flex:1;overflow-x:auto;height:100%;align-items:stretch;gap:0}
-#tab-bar::-webkit-scrollbar{height:0}
-.tab{display:flex;align-items:center;gap:5px;padding:0 12px;color:var(--text2);font-size:11px;cursor:pointer;border:none;background:none;border-bottom:2px solid transparent;white-space:nowrap;user-select:none;flex-shrink:0;transition:all .15s;font-family:var(--font);height:100%}
-.tab:hover{color:var(--text);background:rgba(255,255,255,.03)}
-.tab.active{color:var(--text);border-bottom-color:var(--accent);background:rgba(88,166,255,.04)}
-.tab-icon{font-size:12px;opacity:.7}
-.tab.active .tab-icon{opacity:1}
-.tab-label{max-width:100px;overflow:hidden;text-overflow:ellipsis}
-.tab-close{width:16px;height:16px;border-radius:3px;font-size:13px;line-height:16px;text-align:center;opacity:0;transition:opacity .1s}
-.tab:hover .tab-close{opacity:.4}
-.tab-close:hover{opacity:1!important;background:rgba(255,255,255,.1)}
-.tab-rename{background:var(--bg);border:1px solid var(--accent);color:var(--text);font:11px/1 var(--font);padding:2px 4px;width:90px;outline:none;border-radius:3px}
-
-/* Terminals */
-#terminals{flex:1;position:relative}
-.term-container{position:absolute;top:0;left:0;right:0;bottom:0}
-
-/* Status bar */
-#status-bar{display:flex;align-items:center;justify-content:space-between;background:var(--accent2);height:22px;padding:0 12px;font-size:10px;color:#fff;flex-shrink:0}
-#status-bar.disconnected{background:var(--red)}
-#status-bar .left,#status-bar .right{display:flex;align-items:center;gap:8px}
-
-/* Autocomplete */
-#ac-panel{position:fixed;z-index:100;background:var(--bg2);border:1px solid var(--border);border-radius:6px;max-height:240px;overflow-y:auto;min-width:200px;max-width:400px;display:none;box-shadow:0 8px 24px rgba(0,0,0,.5);padding:4px 0;font-size:12px}
-.ac-item{padding:5px 10px;color:var(--text2);cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:flex;align-items:center;gap:6px;margin:0 4px;border-radius:4px}
-.ac-item.active{background:rgba(88,166,255,.15);color:var(--text)}
-.ac-item:hover:not(.active){background:rgba(255,255,255,.04)}
-.ac-match{color:var(--accent);font-weight:700}
-.ac-icon{font-size:10px;opacity:.4;width:14px;text-align:center;flex-shrink:0}
-.ac-label{font-size:9px;color:var(--text3);margin-left:auto;flex-shrink:0}
-
-/* Mobile bottom bar */
-#mobile-bar{display:none;flex-direction:column;background:var(--bg2);border-top:1px solid var(--border);flex-shrink:0}
-@media(pointer:coarse){#mobile-bar{display:flex}}
-#quick-cmds{display:flex;padding:6px 8px;gap:6px;overflow-x:auto;-webkit-overflow-scrolling:touch}
-#quick-cmds::-webkit-scrollbar{display:none}
-.qcmd{padding:8px 14px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text2);font:11px/1 var(--font);cursor:pointer;white-space:nowrap;flex-shrink:0;touch-action:manipulation;-webkit-tap-highlight-color:transparent;transition:background .15s}
-.qcmd:active{background:rgba(88,166,255,.15);border-color:var(--accent)}
-#mobile-kb{display:flex;padding:4px 8px 6px;gap:4px;overflow-x:auto;-webkit-overflow-scrolling:touch}
-#mobile-kb::-webkit-scrollbar{display:none}
-.kb-key{min-width:32px;height:30px;padding:0 7px;background:var(--bg3);color:var(--text2);border:1px solid var(--border);border-radius:5px;font:12px/30px var(--font);text-align:center;cursor:pointer;user-select:none;-webkit-user-select:none;flex-shrink:0;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
-.kb-key:active{background:rgba(255,255,255,.1)}
-.kb-key.mod{background:var(--bg);color:var(--text3);font-size:10px;min-width:38px}
-.kb-key.mod.on{background:var(--accent2);color:#fff;border-color:var(--accent2)}
-.kb-key.arrow{font-size:14px;min-width:30px;padding:0 4px}
-
-/* Context menu */
-#ctx-menu{position:fixed;z-index:200;background:var(--bg2);border:1px solid var(--border);border-radius:8px;min-width:200px;max-width:320px;max-height:80vh;overflow-y:auto;padding:4px 0;display:none;box-shadow:0 8px 30px rgba(0,0,0,.7);font-size:12px}
-.ctx-header{padding:4px 14px 3px;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--text3);user-select:none;margin-top:2px}
-.ctx-item{padding:7px 14px;color:var(--text2);cursor:pointer;display:flex;align-items:center;gap:8px;transition:background .1s}
-.ctx-item:hover{background:rgba(88,166,255,.12);color:var(--text)}
-.ctx-item:active{background:rgba(88,166,255,.2)}
-.ctx-item .ctx-key{margin-left:auto;font-size:10px;color:var(--text3);flex-shrink:0}
-.ctx-item .ctx-ico{width:16px;text-align:center;font-size:13px;flex-shrink:0;opacity:.5}
-.ctx-sep{height:1px;background:var(--border);margin:4px 0}
-.ctx-item.danger:hover{background:rgba(248,81,73,.12);color:var(--red)}
-.ctx-item.ai{color:var(--purple)}
-.ctx-item.ai:hover{background:rgba(139,92,246,.12)}
-
-/* Favorites */
-.fav-star{width:28px;height:28px;border:none;background:none;color:var(--text3);font-size:16px;cursor:pointer;border-radius:4px;flex-shrink:0;display:flex;align-items:center;justify-content:center;transition:color .15s;-webkit-tap-highlight-color:transparent}
-.fav-star:hover{color:var(--orange)}
-.fav-star.on{color:var(--orange)}
-.ses-cmd{font-size:10px;color:var(--accent);opacity:.7;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px;font-style:italic}
-.fav-rm{width:24px;height:24px;border:none;background:none;color:var(--text3);font-size:14px;cursor:pointer;border-radius:4px;flex-shrink:0;display:flex;align-items:center;justify-content:center;opacity:0;transition:opacity .15s}
-.ses-card:hover .fav-rm{opacity:.6}
-.fav-rm:hover{opacity:1!important;color:var(--red)}
-
-/* Mobile options panel */
-#mobile-panel-overlay{position:fixed;inset:0;z-index:300;background:rgba(0,0,0,.5);display:none;-webkit-tap-highlight-color:transparent}
-#mobile-panel-overlay.show{display:block}
-#mobile-panel{position:fixed;left:0;right:0;bottom:0;z-index:301;max-height:75vh;background:var(--bg2);border-top:1px solid var(--border);border-radius:16px 16px 0 0;transform:translateY(100%);transition:transform .25s ease;overflow-y:auto;-webkit-overflow-scrolling:touch;padding-bottom:env(safe-area-inset-bottom,0)}
-#mobile-panel.show{transform:translateY(0)}
-.mp-handle{width:36px;height:4px;background:var(--border);border-radius:2px;margin:10px auto 6px}
-.mp-section{padding:4px 12px 10px}
-.mp-label{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--text3);padding:6px 4px 4px}
-.mp-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}
-.mp-btn{display:flex;align-items:center;gap:8px;padding:12px;background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);cursor:pointer;-webkit-tap-highlight-color:transparent;touch-action:manipulation}
-.mp-btn:active{background:rgba(88,166,255,.12);border-color:var(--accent2)}
-.mp-btn .mp-icon{width:28px;height:28px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;flex-shrink:0}
-.mp-btn .mp-icon.ai{background:rgba(139,92,246,.15);color:#a78bfa}
-.mp-btn .mp-icon.green{background:rgba(63,185,80,.12);color:var(--green)}
-.mp-btn .mp-icon.blue{background:rgba(88,166,255,.1);color:var(--accent)}
-.mp-btn .mp-icon.orange{background:rgba(210,153,34,.1);color:var(--orange)}
-.mp-btn .mp-txt{min-width:0}
-.mp-btn .mp-t1{font-size:12px;font-weight:600;color:var(--text)}
-.mp-btn .mp-t2{font-size:9px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
-.mp-pills{display:flex;flex-wrap:wrap;gap:5px;padding:4px 0}
-.mp-pill{padding:8px 12px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text2);font:11px/1 var(--font);cursor:pointer;white-space:nowrap;-webkit-tap-highlight-color:transparent;touch-action:manipulation}
-.mp-pill:active{background:rgba(88,166,255,.15);border-color:var(--accent);color:var(--text)}
-.mp-pill.sig{color:var(--orange);border-color:rgba(210,153,34,.3)}
-.mp-pill.sig:active{background:rgba(210,153,34,.15);border-color:var(--orange)}
-.mp-hist{display:flex;flex-direction:column;gap:2px;padding:4px 0;max-height:160px;overflow-y:auto}
-.mp-hist-item{padding:7px 10px;color:var(--text2);font-size:11px;border-radius:5px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;-webkit-tap-highlight-color:transparent}
-.mp-hist-item:active{background:rgba(88,166,255,.12);color:var(--text)}
-.mp-row{display:flex;gap:5px;padding:4px 0;flex-wrap:wrap}
-.mp-act{flex:1;min-width:60px;padding:10px 6px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text2);font:11px/1 var(--font);text-align:center;cursor:pointer;-webkit-tap-highlight-color:transparent;touch-action:manipulation}
-.mp-act:active{background:rgba(88,166,255,.15);border-color:var(--accent)}
-.top-btn.opt-btn{font-size:18px;letter-spacing:-1px}
-
-/* Git viewer overlay */
-#git-overlay{position:fixed;inset:0;z-index:400;background:rgba(0,0,0,.6);display:none;align-items:flex-end;justify-content:center}
-#git-overlay.show{display:flex}
-#git-viewer{width:100%;max-width:700px;max-height:85vh;background:var(--bg);border:1px solid var(--border);border-radius:12px 12px 0 0;display:flex;flex-direction:column;overflow:hidden}
-.gv-bar{display:flex;align-items:center;padding:10px 14px;background:var(--bg2);border-bottom:1px solid var(--border);gap:8px;flex-shrink:0}
-.gv-title{font-size:13px;font-weight:700;color:var(--text);flex:1}
-.gv-tab{padding:5px 10px;font:11px/1 var(--font);color:var(--text3);background:none;border:1px solid transparent;border-radius:5px;cursor:pointer}
-.gv-tab.active{color:var(--text);background:var(--bg3);border-color:var(--border)}
-.gv-tab:hover:not(.active){color:var(--text2)}
-.gv-close{width:28px;height:28px;background:none;border:none;color:var(--text3);font-size:16px;cursor:pointer;border-radius:4px;display:flex;align-items:center;justify-content:center}
-.gv-close:hover{color:var(--text);background:rgba(255,255,255,.06)}
-.gv-body{flex:1;overflow:auto;-webkit-overflow-scrolling:touch;padding:0;font-size:12px;line-height:1.5}
-.gv-body pre{margin:0;padding:10px 14px;white-space:pre-wrap;word-break:break-all;font-family:var(--font);color:var(--text2)}
-.gv-line{display:block;padding:0 14px}
-.gv-line.add{background:rgba(63,185,80,.1);color:#7ee787}
-.gv-line.del{background:rgba(248,81,73,.1);color:#ffa198}
-.gv-line.hunk{color:var(--purple);background:rgba(188,140,255,.06);font-weight:600;padding-top:8px;margin-top:4px;border-top:1px solid var(--border)}
-.gv-line.meta{color:var(--text3);font-style:italic}
-.gv-empty{padding:40px 20px;text-align:center;color:var(--text3);font-size:12px}
-.gv-stat{display:flex;gap:6px;padding:8px 14px;background:var(--bg2);border-bottom:1px solid var(--border);font-size:11px;color:var(--text3);flex-shrink:0;flex-wrap:wrap}
-.gv-stat span{padding:2px 6px;border-radius:3px;font-weight:600}
-.gv-stat .s-add{background:rgba(63,185,80,.15);color:var(--green)}
-.gv-stat .s-del{background:rgba(248,81,73,.15);color:var(--red)}
-.gv-stat .s-file{color:var(--accent)}
-</style></head>
-<body>
-
-<!-- DASHBOARD -->
-<div id="dashboard">
-<div class="dash-inner">
-  <div class="dash-hero"><h1>Term<span>Link</span></h1><p>Remote dev terminal &mdash; phone, tablet, anywhere</p></div>
-
-  <div class="dash-section"><div class="dash-label">Quick Actions</div>
-    <div class="act-grid" id="actions"></div>
-  </div>
-
-  <div class="dash-section" id="fav-section" style="display:none"><div class="dash-label">Favorites</div>
-    <div class="ses-list" id="fav-list"></div>
-  </div>
-
-  <div class="dash-section"><div class="dash-label">Active Sessions</div>
-    <div class="ses-list" id="active-list"></div>
-  </div>
-
-  <div class="dash-section"><div class="dash-label">Recent Sessions</div>
-    <div class="ses-list" id="archive-list"></div>
-  </div>
-
-  <div class="dash-section"><div class="dash-label">Recent Folders</div>
-    <div class="ses-list" id="folder-list"></div>
-  </div>
-</div>
-</div>
-
-<!-- TERMINAL -->
-<div id="terminal-view" class="hidden">
-  <div id="top-bar">
-    <button class="top-btn" id="home-btn" title="Home">&#8962;</button>
-    <div id="tab-bar"></div>
-    <button class="top-btn" id="add-tab" title="New tab">+</button>
-    <button class="top-btn opt-btn" id="opt-btn" title="Options">&#8943;</button>
-  </div>
-  <div id="terminals"></div>
-  <div id="ac-panel"></div>
-  <div id="ctx-menu"></div>
-  <div id="status-bar"><div class="left"><span id="sb-name">-</span><span style="opacity:.4">|</span><span id="sb-cwd">~</span></div><div class="right"><span id="sb-status">...</span></div></div>
-  <div id="mobile-bar">
-    <div id="quick-cmds"></div>
-    <div id="mobile-kb"></div>
-  </div>
-</div>
-<div id="mobile-panel-overlay"></div>
-<div id="mobile-panel"><div class="mp-handle"></div><div id="mp-content"></div></div>
-<div id="git-overlay"><div id="git-viewer"><div class="gv-bar"><span class="gv-title">Git</span><div id="gv-tabs"></div><button class="gv-close" id="gv-close">&times;</button></div><div class="gv-stat" id="gv-stat"></div><div class="gv-body" id="gv-body"></div></div></div>
-
-<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
-<script>
-(function(){
-  var TK = "__WS_TOKEN__";
-  var SESSIONS = __SESSION_LIST__;
-  var ARCHIVE = __ARCHIVE__;
-  var FAVORITES = __FAVORITES__;
-  var FOLDERS = __RECENT_FOLDERS__;
-
-  var $ = document.getElementById.bind(document);
-  var dash = $("dashboard"), tv = $("terminal-view");
-  var tabBar = $("tab-bar"), terminalsEl = $("terminals"), acPanel = $("ac-panel");
-  var sbName = $("sb-name"), sbCwd = $("sb-cwd"), sbStatus = $("sb-status"), statusBar = $("status-bar");
-
-  var sMap = {}, activeId = null, cmdHistory = [];
-
-  /* ---- Helpers ---- */
-  function api(p) { return p + (p.indexOf("?") >= 0 ? "&" : "?") + "token=" + encodeURIComponent(TK); }
-  function esc(s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
-  function ago(ts) { if (!ts) return ""; var d = (Date.now() - ts) / 1000; if (d < 60) return "now"; if (d < 3600) return Math.floor(d/60) + "m"; if (d < 86400) return Math.floor(d/3600) + "h"; return Math.floor(d/86400) + "d"; }
-  function short(p) { if (!p) return "~"; var s = p.replace(/\\\\/g, "/").split("/").filter(Boolean); return s.length > 2 ? "../" + s.slice(-2).join("/") : p; }
-  function fname(p) { if (!p) return ""; return p.replace(/\\\\/g, "/").split("/").filter(Boolean).pop() || ""; }
-  function tIcon(t) { return {claude:"C",vertex:"V",gcloud:"G",aws:"A",azure:"Az",ssh:"S",docker:"D",k8s:"K",python:"Py",node:"N",npm:"n",git:"G",terminal:">"}[t] || ">"; }
-
-  /* ---- Favorites helpers ---- */
-  function isFav(cwd, command) {
-    return FAVORITES.some(function(f) { return f.cwd === (cwd||"") && f.command === (command||""); });
-  }
-  function addFav(name, cwd, command, tool) {
-    fetch(api("/api/favorites"), { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({name:name,cwd:cwd,command:command,tool:tool}) })
-      .then(function(r){return r.json()}).then(function() { refreshFavs(); }).catch(function(){});
-  }
-  function removeFav(idx) {
-    fetch(api("/api/favorites/" + idx), { method: "DELETE" })
-      .then(function(r){return r.json()}).then(function() { refreshFavs(); }).catch(function(){});
-  }
-  function refreshFavs() {
-    fetch(api("/api/favorites")).then(function(r){return r.json()}).then(function(d){ if(Array.isArray(d)){FAVORITES=d;renderDash();} }).catch(function(){});
-  }
-
-  /* ---- Dashboard ---- */
-  function renderDash() {
-    /* Actions */
-    var ag = $("actions");
-    ag.innerHTML = "";
-    var acts = [
-      { title: "New Terminal", sub: "shell session", cls: "terminal", icon: ">_", fn: function() { addSession(); } },
-      { title: "Claude", sub: "--continue", cls: "claude", icon: "C", fn: function() { launch("claude --continue", "claude"); } },
-      { title: "New Claude", sub: "fresh session", cls: "claude", icon: "C+", fn: function() { launch("claude", "claude"); } },
-      { title: "Vertex AI", sub: "gcloud session", cls: "vertex", icon: "V", fn: function() { launch("", "vertex"); } },
-    ];
-    acts.forEach(function(a) {
-      var el = document.createElement("div"); el.className = "act-btn";
-      el.innerHTML = '<div class="act-icon ' + a.cls + '">' + esc(a.icon) + '</div><div class="act-text"><div class="act-title">' + esc(a.title) + '</div><div class="act-sub">' + esc(a.sub) + '</div></div>';
-      el.onclick = a.fn; ag.appendChild(el);
-    });
-
-    /* Favorites */
-    var fs = $("fav-section"), fl2 = $("fav-list"); fl2.innerHTML = "";
-    if (FAVORITES.length) {
-      fs.style.display = "";
-      FAVORITES.forEach(function(f, idx) {
-        var el = document.createElement("div"); el.className = "ses-card";
-        var icon = tIcon(f.tool || "terminal");
-        var nm = f.name || fname(f.cwd) || f.command || "favorite";
-        var cmdLine = f.command ? '<div class="ses-cmd">' + esc(f.command) + '</div>' : '';
-        el.innerHTML = '<span class="ses-dot" style="background:var(--orange)"></span><div class="ses-info"><div class="ses-name">' + esc(nm) + '</div><div class="ses-path">' + esc(short(f.cwd)) + '</div>' + cmdLine + '</div><button class="fav-rm" data-fav-idx="' + idx + '" title="Remove">&times;</button>';
-        el.onclick = function(e) { if (e.target.closest(".fav-rm")) return; launchAt(f.cwd, f.command, f.name || f.tool); };
-        el.querySelector(".fav-rm").onclick = function(e) { e.stopPropagation(); removeFav(idx); };
-        fl2.appendChild(el);
-      });
-    } else { fs.style.display = "none"; }
-
-    /* Active sessions */
-    var al = $("active-list"); al.innerHTML = "";
-    if (!SESSIONS.length) { al.innerHTML = '<div class="empty-msg">No active sessions</div>'; }
-    SESSIONS.forEach(function(s) {
-      var el = document.createElement("div"); el.className = "ses-card";
-      var badge = s.tool && s.tool !== "terminal" ? '<span class="ses-badge ' + s.tool + '">' + esc(s.tool) + '</span>' : '';
-      var dn = s.name || fname(s.cwd) || "Session " + (s.id + 1);
-      el.innerHTML = '<span class="ses-dot live"></span><div class="ses-info"><div class="ses-name">' + esc(dn) + '</div><div class="ses-path">' + esc(short(s.cwd)) + '</div></div>' + badge + '<span class="ses-time">' + ago(s.lastActivity) + '</span>';
-      el.onclick = function() { showTerm(); switchSes(s.id); };
-      al.appendChild(el);
-    });
-
-    /* Archive — show full launch command for LLM sessions */
-    var rl = $("archive-list"); rl.innerHTML = "";
-    var arch = ARCHIVE.filter(function(a) { return a.tool === "claude" || a.tool === "vertex" || a.tool === "ssh" || a.lastCommand; });
-    if (!arch.length) { rl.innerHTML = '<div class="empty-msg">Run Claude, Vertex, or SSH to see history here</div>'; }
-    arch.slice(0, 10).forEach(function(a) {
-      var el = document.createElement("div"); el.className = "ses-card";
-      var badge = a.tool && a.tool !== "terminal" ? '<span class="ses-badge ' + a.tool + '">' + esc(a.tool) + '</span>' : '';
-      var nm = a.name || a.tool || "terminal";
-      var relaunchCmd = a.launchCommand || a.lastCommand || "";
-      var cmdLine = relaunchCmd ? '<div class="ses-cmd">' + esc(relaunchCmd) + '</div>' : '';
-      var starred = isFav(a.cwd, relaunchCmd);
-      var starHtml = relaunchCmd ? '<button class="fav-star' + (starred ? " on" : "") + '" title="' + (starred ? "Saved" : "Save to favorites") + '">&#9733;</button>' : '';
-      el.innerHTML = '<span class="ses-dot dead"></span><div class="ses-info"><div class="ses-name">' + esc(nm) + '</div><div class="ses-path">' + esc(short(a.cwd)) + '</div>' + cmdLine + '</div>' + badge + starHtml + '<span class="ses-time">' + ago(a.closed || a.lastActivity) + '</span>';
-      el.onclick = function(e) {
-        if (e.target.closest(".fav-star")) {
-          if (!starred) addFav(nm, a.cwd, relaunchCmd, a.tool);
-          return;
-        }
-        launchAt(a.cwd, relaunchCmd, nm);
-      };
-      rl.appendChild(el);
-    });
-
-    /* Folders — with star button */
-    var fl = $("folder-list"); fl.innerHTML = "";
-    if (!FOLDERS.length) { fl.innerHTML = '<div class="empty-msg">No recent folders yet</div>'; }
-    FOLDERS.slice(0, 8).forEach(function(f) {
-      var el = document.createElement("div"); el.className = "ses-card";
-      var starred = isFav(f.cwd, "");
-      el.innerHTML = '<span class="ses-dot" style="background:var(--orange)"></span><div class="ses-info"><div class="ses-name">' + esc(fname(f.cwd)) + '</div><div class="ses-path">' + esc(f.cwd) + '</div></div><button class="fav-star' + (starred ? " on" : "") + '" title="' + (starred ? "Saved" : "Save to favorites") + '">&#9733;</button><span class="ses-time">' + ago(f.lastActivity) + '</span>';
-      el.onclick = function(e) {
-        if (e.target.closest(".fav-star")) {
-          if (!starred) addFav(fname(f.cwd), f.cwd, "", "terminal");
-          return;
-        }
-        launchAt(f.cwd, "", "");
-      };
-      fl.appendChild(el);
-    });
-  }
-
-  function showDash() {
-    dash.classList.remove("hidden"); tv.classList.add("hidden");
-    fetch(api("/api/sessions")).then(function(r){return r.json()}).then(function(d){SESSIONS=d;renderDash()}).catch(function(){});
-    fetch(api("/api/archive")).then(function(r){return r.json()}).then(function(d){ARCHIVE=Array.isArray(d)?d.reverse():d;renderDash()}).catch(function(){});
-    fetch(api("/api/favorites")).then(function(r){return r.json()}).then(function(d){if(Array.isArray(d)){FAVORITES=d;renderDash();}}).catch(function(){});
-  }
-
-  function showTerm() {
-    dash.classList.add("hidden"); tv.classList.remove("hidden");
-    setTimeout(function() { if (activeId !== null && sMap[activeId]) { sMap[activeId].fitAddon.fit(); sMap[activeId].term.focus(); } }, 50);
-  }
-
-  function launch(cmd, name) {
-    var cwd = (activeId !== null && sMap[activeId]) ? sMap[activeId].cwd : "";
-    fetch(api("/api/quick-launch"), { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({command:cmd,name:name,cwd:cwd||undefined}) })
-      .then(function(r){return r.json()}).then(function(d){ if(d.error){alert(d.error);return;} createSes(d.id,true,d); showTerm(); }).catch(function(e){alert(e.message)});
-  }
-  function launchAt(cwd, cmd, name) {
-    fetch(api("/api/quick-launch"), { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({cwd:cwd,command:cmd,name:name}) })
-      .then(function(r){return r.json()}).then(function(d){ if(d.error){alert(d.error);return;} createSes(d.id,true,d); showTerm(); }).catch(function(e){alert(e.message)});
-  }
-
-  /* ---- History ---- */
-  fetch(api("/api/history")).then(function(r){return r.json()}).then(function(d){if(Array.isArray(d))cmdHistory=d}).catch(function(){});
-
-  /* ---- Mobile mods ---- */
-  var kbMods = { ctrl: false, alt: false };
-  function updMods() { var bs = document.querySelectorAll(".kb-key[data-mod]"); for (var i = 0; i < bs.length; i++) bs[i].classList.toggle("on", !!kbMods[bs[i].getAttribute("data-mod")]); }
-
-  /* ---- Autocomplete ---- */
-  var acTimer = null;
-  var BASE = ["cd","ls","pwd","clear","exit","git status","git add .","git commit","git push","git pull","git diff","git log --oneline -5","npm install","npm run","npm start","npm test","docker ps","docker run","python3","node","ssh","curl","mkdir","rm","cp","mv","grep","find","echo","export","claude","claude --continue","gcloud","aws","kubectl"];
-
-  function acResults(q) {
-    if (!q) return []; var ql = q.toLowerCase(), seen = {}, res = [];
-    for (var i = cmdHistory.length - 1; i >= 0 && res.length < 16; i--) {
-      var c = cmdHistory[i]; if (seen[c]) continue; var cl = c.toLowerCase(), sc = 0;
-      if (cl.indexOf(ql) === 0) sc = 100 + (i / cmdHistory.length) * 15;
-      else if (cl.indexOf(" " + ql) >= 0) sc = 60 + (i / cmdHistory.length) * 10;
-      else if (cl.indexOf(ql) >= 0) sc = 40 + (i / cmdHistory.length) * 10;
-      else { var qi = 0; for (var ci = 0; ci < cl.length && qi < ql.length; ci++) { if (cl[ci] === ql[qi]) qi++; } if (qi === ql.length) sc = 15; }
-      if (sc > 0 && c !== q) { seen[c] = true; res.push({ cmd: c, sc: sc, src: "history" }); }
-    }
-    for (var j = 0; j < BASE.length && res.length < 16; j++) {
-      if (!seen[BASE[j]] && BASE[j].toLowerCase().indexOf(ql) === 0 && BASE[j] !== q) { seen[BASE[j]] = true; res.push({ cmd: BASE[j], sc: 5, src: "base" }); }
-    }
-    res.sort(function(a, b) { return b.sc - a.sc; }); return res.slice(0, 8);
-  }
-  function hlM(t, q) {
-    var i = t.toLowerCase().indexOf(q.toLowerCase());
-    if (i >= 0) return esc(t.substring(0,i)) + '<span class="ac-match">' + esc(t.substring(i, i+q.length)) + '</span>' + esc(t.substring(i+q.length));
-    var h = "", qi = 0, ql = q.toLowerCase();
-    for (var x = 0; x < t.length; x++) { if (qi < ql.length && t[x].toLowerCase() === ql[qi]) { h += '<span class="ac-match">' + esc(t[x]) + '</span>'; qi++; } else h += esc(t[x]); }
-    return h;
-  }
-  function showAc() {
-    var s = sMap[activeId]; if (!s) return; var st = s.ac, q = st.buf;
-    if (q.length < 1) { hideAc(); return; }
-    var res = acResults(q); if (!res.length) { hideAc(); return; }
-    st.items = res.map(function(r) { return r.cmd; }); st.visible = true; if (st.idx >= res.length) st.idx = 0;
-    var h = "";
-    for (var j = 0; j < res.length; j++) {
-      h += '<div class="ac-item' + (j === st.idx ? " active" : "") + '" data-i="' + j + '"><span class="ac-icon">' + (res[j].src === "history" ? "&#8635;" : "&gt;") + '</span><span>' + hlM(res[j].cmd, q) + '</span>' + (res[j].src === "history" ? '<span class="ac-label">history</span>' : '') + '</div>';
-    }
-    acPanel.innerHTML = h; acPanel.style.display = "block"; posAc(s);
-  }
-  function hideAc() { acPanel.style.display = "none"; if (sMap[activeId]) { var st = sMap[activeId].ac; st.visible = false; st.items = []; st.idx = 0; } }
-  function posAc(s) {
-    var scr = s.container.querySelector(".xterm-screen"); if (!scr) return;
-    var r = scr.getBoundingClientRect(), cw = r.width / s.term.cols, ch = r.height / s.term.rows;
-    var l = r.left + s.term.buffer.active.cursorX * cw, tp = r.top + s.term.buffer.active.cursorY * ch, ph = acPanel.offsetHeight || 100;
-    acPanel.style.top = (tp - ph > 0 ? tp - ph : tp + ch + 2) + "px";
-    acPanel.style.left = Math.max(0, Math.min(l, innerWidth - 220)) + "px";
-  }
-  function navAc(d) { var s = sMap[activeId]; if (!s || !s.ac.visible) return; var st = s.ac; st.idx = (st.idx + d + st.items.length) % st.items.length; var els = acPanel.querySelectorAll(".ac-item"); for (var i = 0; i < els.length; i++) els[i].className = "ac-item" + (i === st.idx ? " active" : ""); if (els[st.idx]) els[st.idx].scrollIntoView({ block: "nearest" }); }
-  function complAc(s) { var st = s.ac; if (!st.visible || !st.items.length) return; var r = st.items[st.idx].substring(st.buf.length); if (r && s.ws && s.ws.readyState === 1) s.ws.send(JSON.stringify({ type: "input", data: r })); st.buf = st.items[st.idx]; hideAc(); }
-
-  function handleAc(ses, data) {
-    var st = ses.ac;
-    if (data === "\\r" || data === "\\n") { var cmd = st.buf.trim(); if (cmd) { if (!cmdHistory.length || cmdHistory[cmdHistory.length-1] !== cmd) { cmdHistory.push(cmd); if (cmdHistory.length > 1000) cmdHistory.splice(0, cmdHistory.length - 1000); } fetch(api("/api/history"), { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({command:cmd,sessionId:ses.id}) }).catch(function(){}); } st.buf = ""; hideAc(); return false; }
-    if (data.length === 1 && data.charCodeAt(0) < 32 && data !== "\\t") { st.buf = ""; hideAc(); return false; }
-    if (data === "\\t") { if (st.visible && st.items.length) { complAc(ses); return true; } return false; }
-    if (data === "\\x1b") { if (st.visible) { hideAc(); return true; } return false; }
-    if (data === "\\x1b[A") { if (st.visible) { navAc(-1); return true; } return false; }
-    if (data === "\\x1b[B") { if (st.visible) { navAc(1); return true; } return false; }
-    if (data === "\\x1b[C" || data === "\\x1b[D") { hideAc(); return false; }
-    if (data === "\\x7f" || data === "\\b") { if (st.buf.length) st.buf = st.buf.slice(0, -1); clearTimeout(acTimer); acTimer = setTimeout(showAc, 60); return false; }
-    if (data.length === 1 && data.charCodeAt(0) >= 32) { st.buf += data; clearTimeout(acTimer); acTimer = setTimeout(showAc, 60); return false; }
-    if (data.length > 1 && data.charCodeAt(0) >= 32) { var nl = Math.max(data.lastIndexOf("\\r"), data.lastIndexOf("\\n")); st.buf = nl >= 0 ? data.substring(nl+1) : st.buf + data; clearTimeout(acTimer); acTimer = setTimeout(showAc, 60); return false; }
-    return false;
-  }
-  function sendIn(ses, data) { if (handleAc(ses, data)) return; if (ses.ws && ses.ws.readyState === 1) ses.ws.send(JSON.stringify({ type: "input", data: data })); }
-
-  acPanel.addEventListener("mousedown", function(e) { e.preventDefault(); });
-  acPanel.addEventListener("click", function(e) { var el = e.target.closest(".ac-item"); if (!el) return; var s = sMap[activeId]; if (!s) return; s.ac.idx = parseInt(el.getAttribute("data-i"), 10); complAc(s); s.term.focus(); });
-
-  /* ---- Status bar ---- */
-  function updSB() {
-    var s = sMap[activeId]; if (!s) return;
-    sbName.textContent = s.name || ("Session " + (s.id + 1));
-    sbCwd.textContent = short(s.cwd || "");
-    var ok = s.ws && s.ws.readyState === 1;
-    sbStatus.textContent = ok ? "connected" : "reconnecting...";
-    statusBar.className = ok ? "" : "disconnected";
-  }
-
-  /* ---- Session management ---- */
-  function createSes(id, sw, meta) {
-    meta = meta || {};
-    var ct = document.createElement("div"); ct.className = "term-container"; ct.style.display = "none"; terminalsEl.appendChild(ct);
-
-    var dn = meta.name || fname(meta.cwd) || ("Session " + (id + 1));
-    var tab = document.createElement("div"); tab.className = "tab"; tab.setAttribute("data-session", id); tab.title = meta.cwd || dn;
-    var ti = document.createElement("span"); ti.className = "tab-icon"; ti.textContent = tIcon(meta.tool || "terminal"); tab.appendChild(ti);
-    var lbl = document.createElement("span"); lbl.className = "tab-label"; lbl.textContent = dn; tab.appendChild(lbl);
-    if (id !== 0) { var cb = document.createElement("span"); cb.className = "tab-close"; cb.setAttribute("data-session", id); cb.textContent = "\\u00d7"; tab.appendChild(cb); }
-    tabBar.appendChild(tab);
-
-    var term = new Terminal({ cursorBlink: true, fontSize: 14, fontFamily: "var(--font)", theme: { background: "#0d1117", foreground: "#e6edf3", cursor: "#58a6ff", selectionBackground: "rgba(88,166,255,.3)" }, scrollback: 10000, convertEol: false, allowProposedApi: true });
-    var fit = new FitAddon.FitAddon(); term.loadAddon(fit); term.loadAddon(new WebLinksAddon.WebLinksAddon()); term.open(ct);
-
-    var ses = { id: id, term: term, fitAddon: fit, ws: null, container: ct, tabEl: tab, dead: false, name: meta.name || "", cwd: meta.cwd || "", tool: meta.tool || "terminal", userNamed: !!(meta.name), ac: { buf: "", visible: false, items: [], idx: 0 } };
-    sMap[id] = ses;
-
-    lbl.addEventListener("dblclick", function(e) { e.stopPropagation(); e.preventDefault(); startRename(ses); });
-
-    term.attachCustomKeyEventHandler(function(ev) {
-      if (ev.type !== "keydown") return true;
-      if ((ev.ctrlKey || ev.metaKey) && ev.key === "k") { ev.preventDefault(); showDash(); return false; }
-      if ((ev.ctrlKey || ev.metaKey) && ev.key === "t") { ev.preventDefault(); addSession(); return false; }
-      if (kbMods.ctrl && !ev.ctrlKey && !ev.altKey && !ev.metaKey && ev.key.length === 1) { var c = ev.key.toLowerCase().charCodeAt(0); if (c >= 97 && c <= 122) { sendIn(ses, String.fromCharCode(c - 96)); kbMods.ctrl = false; updMods(); return false; } }
-      if (kbMods.alt && !ev.ctrlKey && !ev.altKey && !ev.metaKey && ev.key.length === 1) { sendIn(ses, "\\x1b" + ev.key); kbMods.alt = false; updMods(); return false; }
-      return true;
-    });
-
-    var rDelay = 500;
-    function connect() {
-      var ws = new WebSocket((location.protocol === "https:" ? "wss:" : "ws:") + "//" + location.host + "/ws?session=" + id + "&token=" + encodeURIComponent(TK));
-      ses.ws = ws;
-      ws.onopen = function() { rDelay = 500; updSB(); var d = fit.proposeDimensions(); if (d) ws.send(JSON.stringify({ type: "resize", cols: d.cols, rows: d.rows })); };
-      ws.onmessage = function(ev) { var m; try { m = JSON.parse(ev.data); } catch(e) { return; }
-        if (m.type === "output") term.write(m.data);
-        else if (m.type === "resize") { term.resize(m.cols, m.rows); setTimeout(function() { fit.fit(); }, 50); }
-        else if (m.type === "exit") { term.write("\\r\\n[exited " + m.code + "]\\r\\n"); ses.dead = true; }
-        else if (m.type === "cwd") { ses.cwd = m.cwd; ses.tabEl.title = m.cwd; if (!ses.userNamed && ses.tool === "terminal") { var fn = fname(m.cwd); if (fn) { ses.name = fn; var lb = ses.tabEl.querySelector(".tab-label"); if (lb) lb.textContent = fn; } } updSB(); }
-        else if (m.type === "event" && m.event === "archive-updated") { fetch(api("/api/archive")).then(function(r){return r.json()}).then(function(d){ARCHIVE=Array.isArray(d)?d.reverse():d}).catch(function(){}); }
-      };
-      ws.onclose = function(ev) { if (ses.dead) return; if (ev.code === 4401) { sbStatus.textContent = "unauthorized"; statusBar.className = "disconnected"; return; } updSB(); setTimeout(connect, rDelay); rDelay = Math.min(rDelay * 1.5, 5000); };
-      ws.onerror = function() { ws.close(); };
-    }
-    connect();
-    term.onData(function(d) { sendIn(ses, d); });
-    term.onResize(function(sz) { if (ses.ws && ses.ws.readyState === 1) ses.ws.send(JSON.stringify({ type: "resize", cols: sz.cols, rows: sz.rows })); });
-    if (sw) switchSes(id);
-  }
-
-  var renaming = false;
-  function startRename(ses) {
-    if (renaming) return;
-    renaming = true;
-    var lbl = ses.tabEl.querySelector(".tab-label");
-    var inp = document.createElement("input"); inp.type = "text"; inp.className = "tab-rename"; inp.value = ses.name || lbl.textContent;
-    lbl.style.display = "none"; ses.tabEl.insertBefore(inp, lbl);
-    setTimeout(function() { inp.focus(); inp.select(); }, 50);
-    var finished = false;
-    function done() {
-      if (finished) return; finished = true; renaming = false;
-      var v = inp.value.trim();
-      if (v) { ses.name = v; ses.userNamed = true; lbl.textContent = v; fetch(api("/api/sessions/" + ses.id), { method: "PUT", headers: {"Content-Type":"application/json"}, body: JSON.stringify({name:v}) }).catch(function(){}); }
-      lbl.style.display = ""; if (inp.parentNode) inp.remove(); updSB();
-    }
-    inp.addEventListener("blur", done);
-    inp.addEventListener("keydown", function(e) { if (e.key === "Enter") { e.preventDefault(); inp.blur(); } if (e.key === "Escape") { inp.value = lbl.textContent; inp.blur(); } });
-  }
-
-  function switchSes(id) {
-    var s = sMap[id]; if (!s) return;
-    if (activeId !== null && sMap[activeId]) { sMap[activeId].container.style.display = "none"; sMap[activeId].tabEl.classList.remove("active"); }
-    activeId = id; hideAc(); s.container.style.display = ""; s.tabEl.classList.add("active");
-    setTimeout(function() { s.fitAddon.fit(); if (!renaming) s.term.focus(); }, 20); updSB();
-  }
-
-  function closeSes(id) {
-    if (id === 0) return; var s = sMap[id]; if (!s) return;
-    s.dead = true; if (s.ws) s.ws.close(); s.term.dispose(); s.container.remove(); s.tabEl.remove(); delete sMap[id];
-    if (activeId === id) { var ids = Object.keys(sMap).map(Number).sort(function(a,b){return a-b}); if (ids.length) switchSes(ids[0]); else showDash(); }
-    fetch(api("/api/sessions/" + id), { method: "DELETE" });
-  }
-
-  function addSession() {
-    fetch(api("/api/sessions"), { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({}) })
-      .then(function(r){return r.json()}).then(function(d){ if(d.error){alert(d.error);return;} createSes(d.id,true,d); showTerm(); }).catch(function(e){alert(e.message)});
-  }
-
-  /* ---- Events ---- */
-  $("home-btn").onclick = showDash;
-  $("add-tab").onclick = addSession;
-  tabBar.addEventListener("click", function(e) {
-    if (e.target.classList.contains("tab-close")) { e.stopPropagation(); closeSes(parseInt(e.target.getAttribute("data-session"), 10)); return; }
-    var tab = e.target.closest(".tab"); if (tab) switchSes(parseInt(tab.getAttribute("data-session"), 10));
-  });
-  document.addEventListener("keydown", function(e) { if ((e.ctrlKey || e.metaKey) && e.key === "k" && !tv.classList.contains("hidden")) { e.preventDefault(); showDash(); } });
-
-  /* ---- Shared: send command to active session ---- */
-  function runCmd(cmd, enter) {
-    var s = sMap[activeId]; if (!s || !s.ws || s.ws.readyState !== 1) return;
-    s.ws.send(JSON.stringify({ type: "input", data: cmd + (enter !== false ? "\\r" : "") }));
-    s.term.focus();
-  }
-  function sendSig(sig) { var s = sMap[activeId]; if (s && s.ws && s.ws.readyState === 1) s.ws.send(JSON.stringify({ type: "input", data: sig })); }
-
-  /* ---- AI preset commands ---- */
-  var AI_PRESETS = [
-    { label: "Claude --continue", cmd: "claude --continue", cls: "ai" },
-    { label: "Claude Opus", cmd: "claude --model opus", cls: "ai" },
-    { label: "Claude Sonnet", cmd: "claude --model sonnet", cls: "ai" },
-    { label: "Claude Opus (skip perms)", cmd: "claude --model opus --dangerously-skip-permissions", cls: "ai" },
-    { label: "Claude Sonnet (skip perms)", cmd: "claude --model sonnet --dangerously-skip-permissions", cls: "ai" },
-    { label: "New Claude session", cmd: "claude", cls: "ai" },
-    { label: "Vertex AI", cmd: "vertex", cls: "ai" },
-  ];
-
-  /* ---- Context menu ---- */
-  var ctxMenu = $("ctx-menu"), ctxTarget = null;
-  function showCtx(x, y, items) {
-    var h = "";
-    items.forEach(function(it) {
-      if (it === "---") { h += '<div class="ctx-sep"></div>'; return; }
-      if (it.header) { h += '<div class="ctx-header">' + esc(it.header) + '</div>'; return; }
-      h += '<div class="ctx-item' + (it.cls ? " " + it.cls : "") + '" data-action="' + esc(it.action) + '"'
-        + (it.cmd ? ' data-cmd="' + esc(it.cmd) + '"' : '')
-        + '>' + (it.ico ? '<span class="ctx-ico">' + it.ico + '</span>' : '')
-        + esc(it.label) + (it.key ? '<span class="ctx-key">' + esc(it.key) + '</span>' : '') + '</div>';
-    });
-    ctxMenu.innerHTML = h; ctxMenu.style.display = "block";
-    var mw = ctxMenu.offsetWidth, mh = ctxMenu.offsetHeight;
-    ctxMenu.style.left = Math.min(x, innerWidth - mw - 8) + "px";
-    ctxMenu.style.top = Math.max(4, Math.min(y, innerHeight - mh - 8)) + "px";
-  }
-  function hideCtx() { ctxMenu.style.display = "none"; ctxTarget = null; }
-  document.addEventListener("click", function(e) { if (!ctxMenu.contains(e.target)) hideCtx(); });
-  document.addEventListener("contextmenu", function(e) { if (!ctxMenu.contains(e.target)) hideCtx(); });
-
-  ctxMenu.addEventListener("click", function(e) {
-    var el = e.target.closest(".ctx-item"); if (!el) return;
-    var act = el.getAttribute("data-action"), cmd = el.getAttribute("data-cmd");
-    var tgt = ctxTarget != null && sMap[ctxTarget] ? sMap[ctxTarget] : sMap[activeId];
-    if (act === "run" && cmd) { runCmd(cmd); }
-    else if (act === "run-no-enter" && cmd) { runCmd(cmd, false); }
-    else if (act === "git-open" && cmd) { openGit("git-" + cmd); }
-    else if (act === "copy" && tgt) { var sel = tgt.term.getSelection(); if (sel) navigator.clipboard.writeText(sel).catch(function(){}); }
-    else if (act === "paste" && tgt) { navigator.clipboard.readText().then(function(t) { if (t && tgt.ws && tgt.ws.readyState === 1) tgt.ws.send(JSON.stringify({ type: "input", data: t })); }).catch(function(){}); }
-    else if (act === "selectall" && tgt) { tgt.term.selectAll(); }
-    else if (act === "clear" && tgt) { tgt.term.clear(); }
-    else if (act === "sigint") sendSig("\\x03");
-    else if (act === "sigeof") sendSig("\\x04");
-    else if (act === "sigtstp") sendSig("\\x1a");
-    else if (act === "clearline") sendSig("\\x15");
-    else if (act === "rename" && tgt) startRename(tgt);
-    else if (act === "copypath" && tgt) navigator.clipboard.writeText(tgt.cwd || "").catch(function(){});
-    else if (act === "favorite" && tgt) addFav(tgt.name || fname(tgt.cwd), tgt.cwd || "", "", tgt.tool || "terminal");
-    else if (act === "close" && tgt && tgt.id !== 0) closeSes(tgt.id);
-    else if (act === "newtab") addSession();
-    else if (act === "home") showDash();
-    hideCtx();
-  });
-
-  /* Right-click on terminal */
-  terminalsEl.addEventListener("contextmenu", function(e) {
-    e.preventDefault(); var s = sMap[activeId]; if (!s) return;
-    var items = [];
-    /* clipboard */
-    if (s.term.getSelection()) items.push({ label: "Copy", action: "copy", key: "Ctrl+C", ico: "\\u2702" });
-    items.push({ label: "Paste", action: "paste", key: "Ctrl+V", ico: "\\u2398" });
-    items.push({ label: "Select All", action: "selectall", ico: "\\u25A8" });
-    items.push("---");
-    /* signals & clear */
-    items.push({ label: "Interrupt (Ctrl+C)", action: "sigint", key: "^C" });
-    items.push({ label: "EOF / Exit (Ctrl+D)", action: "sigeof", key: "^D" });
-    items.push({ label: "Clear Terminal", action: "clear" });
-    items.push("---");
-    /* git */
-    items.push({ header: "Git" });
-    items.push({ label: "View Diff", action: "git-open", cmd: "diff" });
-    items.push({ label: "View Staged", action: "git-open", cmd: "diff-staged" });
-    items.push({ label: "View Status", action: "git-open", cmd: "status" });
-    items.push({ label: "View Log", action: "git-open", cmd: "log" });
-    /* AI quick run */
-    items.push({ header: "AI Quick Run" });
-    AI_PRESETS.slice(0, 4).forEach(function(p) { items.push({ label: p.label, action: "run", cmd: p.cmd, cls: p.cls }); });
-    /* recent history */
-    if (cmdHistory.length) {
-      items.push({ header: "Recent Commands" });
-      var seen = {}, rc = [];
-      for (var i = cmdHistory.length - 1; i >= 0 && rc.length < 5; i--) {
-        if (!seen[cmdHistory[i]]) { seen[cmdHistory[i]] = true; rc.push(cmdHistory[i]); }
-      }
-      rc.forEach(function(c) { items.push({ label: c.length > 40 ? c.substring(0, 37) + "..." : c, action: "run", cmd: c }); });
-    }
-    items.push("---");
-    /* session actions */
-    items.push({ label: "Rename Session", action: "rename" });
-    items.push({ label: "Copy Path", action: "copypath" });
-    items.push({ label: "Add to Favorites", action: "favorite" });
-    items.push({ label: "New Tab", action: "newtab" });
-    if (s.id !== 0) items.push("---", { label: "Close Session", action: "close", cls: "danger" });
-    showCtx(e.clientX, e.clientY, items);
-  });
-
-  /* Right-click on tab */
-  tabBar.addEventListener("contextmenu", function(e) {
-    var tab = e.target.closest(".tab"); if (!tab) return;
-    e.preventDefault();
-    var tid = parseInt(tab.getAttribute("data-session"), 10);
-    ctxTarget = tid;
-    var items = [
-      { label: "Rename", action: "rename" },
-      { label: "Copy Path", action: "copypath" },
-      { label: "Add to Favorites", action: "favorite" },
-    ];
-    if (tid !== 0) items.push("---", { label: "Close", action: "close", cls: "danger" });
-    showCtx(e.clientX, e.clientY, items);
-  });
-
-  /* ---- Init ---- */
-  for (var i = 0; i < SESSIONS.length; i++) createSes(SESSIONS[i].id, false, SESSIONS[i]);
-  if (SESSIONS.length) switchSes(SESSIONS[0].id);
-  renderDash();
-
-  /* ---- Resize ---- */
-  function doFit() { if (activeId !== null && sMap[activeId] && !tv.classList.contains("hidden")) sMap[activeId].fitAddon.fit(); }
-  window.addEventListener("resize", doFit);
-  window.addEventListener("orientationchange", function() { setTimeout(doFit, 200); });
-  terminalsEl.addEventListener("click", function() { if (sMap[activeId]) sMap[activeId].term.focus(); });
-
-  /* ---- Mobile quick commands (horizontal bar) ---- */
-  (function() {
-    var qc = $("quick-cmds");
-    var cmds = [
-      ["\\u2630 Menu", null, "menu"],
-      ["Ctrl+C","\\x03"],["claude --continue","claude --continue\\r"],["cd ..","cd ..\\r"],
-      ["ls","ls\\r"],["git status","git status\\r"],["git pull","git pull\\r"],
-      ["clear","clear\\r"],["pwd","pwd\\r"],["exit","exit\\r"],
-      ["npm run","npm run "],["python3","python3 "],["Ctrl+D","\\x04"]
-    ];
-    cmds.forEach(function(c) {
-      var b = document.createElement("div"); b.className = "qcmd";
-      b.textContent = c[0];
-      if (c[2] === "menu") { b.style.fontWeight = "700"; b.style.color = "var(--accent)"; b.onclick = function() { openPanel(); }; }
-      else { b.onclick = function() { var s = sMap[activeId]; if (s && s.ws && s.ws.readyState === 1) { s.ws.send(JSON.stringify({ type: "input", data: c[1] })); s.term.focus(); } }; }
-      qc.appendChild(b);
-    });
-  })();
-
-  /* ---- Mobile keyboard ---- */
-  (function() {
-    var kb = $("mobile-kb"); if (!kb) return;
-    [["Tab","\\t","mod"],["Esc","\\x1b","mod"],["Ctrl",null,"mod","ctrl"],["Alt",null,"mod","alt"],
-     ["\\u2191","\\x1b[A","arrow"],["\\u2193","\\x1b[B","arrow"],["\\u2190","\\x1b[D","arrow"],["\\u2192","\\x1b[C","arrow"],
-     ["|"],["/"],["\\\\"],["~"],["-"],["_"],["."],[":"],[";"],["'"],["\\\""],["\\u0060"],
-     ["{"],["}"],["["],["]"],["("],[")"],["<"],[">"],[" ="],[" !"],[" @"],["#"],["$"],["&"],["*"],["^"],["+"]
-    ].forEach(function(k) {
-      var b = document.createElement("button"); b.className = "kb-key" + (k[2] ? " " + k[2] : ""); b.textContent = k[0];
-      if (k[3]) b.setAttribute("data-mod", k[3]);
-      else if (k[1]) b.setAttribute("data-send", k[1]);
-      else b.setAttribute("data-char", k[0].trim());
-      kb.appendChild(b);
-    });
-    kb.addEventListener("mousedown", function(e) { e.preventDefault(); });
-    kb.addEventListener("click", function(e) {
-      var btn = e.target.closest(".kb-key"); if (!btn) return; var s = sMap[activeId]; if (!s) return;
-      var mod = btn.getAttribute("data-mod");
-      if (mod) { kbMods[mod] = !kbMods[mod]; updMods(); return; }
-      var data = btn.getAttribute("data-send") || btn.getAttribute("data-char"); if (!data) return;
-      if (kbMods.ctrl && data.length === 1) { var c = data.toLowerCase().charCodeAt(0); if (c >= 97 && c <= 122) data = String.fromCharCode(c - 96); kbMods.ctrl = false; updMods(); }
-      else if (kbMods.alt && data.length === 1) { data = "\\x1b" + data; kbMods.alt = false; updMods(); }
-      sendIn(s, data); s.term.focus();
-    });
-  })();
-
-  /* ---- Mobile options panel ---- */
-  var mpOverlay = $("mobile-panel-overlay"), mpPanel = $("mobile-panel"), mpContent = $("mp-content");
-  function openPanel() {
-    renderPanel();
-    mpOverlay.classList.add("show");
-    mpPanel.classList.add("show");
-  }
-  function closePanel() {
-    mpPanel.classList.remove("show");
-    mpOverlay.classList.remove("show");
-    var s = sMap[activeId]; if (s) s.term.focus();
-  }
-  mpOverlay.addEventListener("click", closePanel);
-  mpPanel.querySelector(".mp-handle").addEventListener("click", closePanel);
-  $("opt-btn").onclick = openPanel;
-
-  function renderPanel() {
-    var h = "";
-
-    /* AI Quick Launch */
-    h += '<div class="mp-section"><div class="mp-label">AI Quick Launch</div><div class="mp-grid">';
-    var aiButtons = [
-      { t1: "Claude", t2: "--continue", cmd: "claude --continue", ico: "ai" },
-      { t1: "Claude Opus", t2: "--model opus", cmd: "claude --model opus", ico: "ai" },
-      { t1: "Claude Sonnet", t2: "--model sonnet", cmd: "claude --model sonnet", ico: "ai" },
-      { t1: "Opus + Auto", t2: "--dangerously-skip-permissions", cmd: "claude --model opus --dangerously-skip-permissions", ico: "ai" },
-      { t1: "Sonnet + Auto", t2: "--dangerously-skip-permissions", cmd: "claude --model sonnet --dangerously-skip-permissions", ico: "ai" },
-      { t1: "New Claude", t2: "fresh session", cmd: "claude", ico: "ai" },
-      { t1: "Vertex AI", t2: "gcloud ai", cmd: "vertex", ico: "green" },
-      { t1: "New Terminal", t2: "shell session", cmd: null, ico: "blue" },
-    ];
-    aiButtons.forEach(function(b) {
-      h += '<div class="mp-btn" data-cmd="' + (b.cmd ? esc(b.cmd) : "") + '" data-newtab="' + (b.cmd === null ? "1" : "") + '">'
-        + '<div class="mp-icon ' + b.ico + '">' + (b.ico === "ai" ? "C" : b.ico === "green" ? "V" : "&gt;") + '</div>'
-        + '<div class="mp-txt"><div class="mp-t1">' + esc(b.t1) + '</div><div class="mp-t2">' + esc(b.t2) + '</div></div></div>';
-    });
-    h += '</div></div>';
-
-    /* Git section */
-    h += '<div class="mp-section"><div class="mp-label">Git</div><div class="mp-grid">';
-    [{ t1: "Diff", t2: "view changes", act: "git-diff", ico: "orange" },
-     { t1: "Staged", t2: "staged changes", act: "git-diff-staged", ico: "green" },
-     { t1: "Status", t2: "file status", act: "git-status", ico: "blue" },
-     { t1: "Log", t2: "recent commits", act: "git-log", ico: "blue" },
-    ].forEach(function(b) {
-      h += '<div class="mp-btn" data-gitact="' + b.act + '"><div class="mp-icon ' + b.ico + '">' + b.t1[0] + '</div>'
-        + '<div class="mp-txt"><div class="mp-t1">' + esc(b.t1) + '</div><div class="mp-t2">' + esc(b.t2) + '</div></div></div>';
-    });
-    h += '</div><div class="mp-pills" style="margin-top:6px">';
-    [["git pull","git pull"],["git push","git push"],["git add .","git add ."],["git commit","git commit -m \\\""],
-     ["git stash","git stash"],["git stash pop","git stash pop"],["git checkout .","git checkout ."],["git branch","git branch"]
-    ].forEach(function(c) { h += '<div class="mp-pill" data-cmd="' + esc(c[1]) + '">' + esc(c[0]) + '</div>'; });
-    h += '</div></div>';
-
-    /* Quick Commands */
-    h += '<div class="mp-section"><div class="mp-label">Quick Commands</div><div class="mp-pills">';
-    [["cd ..", "cd .."], ["ls", "ls"], ["ls -la", "ls -la"], ["pwd", "pwd"],
-     ["npm install", "npm install"], ["npm start", "npm start"], ["npm test", "npm test"], ["npm run dev", "npm run dev"],
-     ["docker ps", "docker ps"], ["python3", "python3"], ["clear", "clear"], ["exit", "exit"]
-    ].forEach(function(c) { h += '<div class="mp-pill" data-cmd="' + esc(c[1]) + '">' + esc(c[0]) + '</div>'; });
-    h += '</div></div>';
-
-    /* Signals & Terminal Control */
-    h += '<div class="mp-section"><div class="mp-label">Signals &amp; Control</div><div class="mp-pills">';
-    [["Ctrl+C (stop)","\\x03"],["Ctrl+D (exit)","\\x04"],["Ctrl+Z (suspend)","\\x1a"],
-     ["Ctrl+L (clear)","\\x0c"],["Ctrl+U (clear line)","\\x15"],["Ctrl+A (home)","\\x01"],["Ctrl+E (end)","\\x05"],["Ctrl+W (del word)","\\x17"]
-    ].forEach(function(c) { h += '<div class="mp-pill sig" data-sig="' + esc(c[1]) + '">' + esc(c[0]) + '</div>'; });
-    h += '</div></div>';
-
-    /* Recent Commands */
-    if (cmdHistory.length) {
-      h += '<div class="mp-section"><div class="mp-label">Recent Commands</div><div class="mp-hist">';
-      var seen = {}, rc = [];
-      for (var i = cmdHistory.length - 1; i >= 0 && rc.length < 15; i--) {
-        if (!seen[cmdHistory[i]]) { seen[cmdHistory[i]] = true; rc.push(cmdHistory[i]); }
-      }
-      rc.forEach(function(c) { h += '<div class="mp-hist-item" data-cmd="' + esc(c) + '">' + esc(c) + '</div>'; });
-      h += '</div></div>';
-    }
-
-    /* Actions row */
-    h += '<div class="mp-section"><div class="mp-label">Actions</div><div class="mp-row">';
-    [["Copy","copy"],["Paste","paste"],["Select All","selectall"],["Clear","clear"],["Home","home"],["New Tab","newtab"],["Rename","rename"]
-    ].forEach(function(a) { h += '<div class="mp-act" data-act="' + a[1] + '">' + esc(a[0]) + '</div>'; });
-    h += '</div></div>';
-
-    mpContent.innerHTML = h;
-  }
-
-  /* Panel click handler */
-  mpContent.addEventListener("click", function(e) {
-    /* Git viewer buttons */
-    var gitBtn = e.target.closest("[data-gitact]");
-    if (gitBtn) { closePanel(); openGit(gitBtn.getAttribute("data-gitact")); return; }
-    /* AI grid buttons */
-    var btn = e.target.closest(".mp-btn");
-    if (btn) {
-      var newtab = btn.getAttribute("data-newtab");
-      if (newtab) { addSession(); closePanel(); return; }
-      var cmd = btn.getAttribute("data-cmd");
-      if (cmd) { closePanel(); launch(cmd, cmd.split(" ")[0]); return; }
-    }
-    /* Quick command pills */
-    var pill = e.target.closest(".mp-pill");
-    if (pill) {
-      var sig = pill.getAttribute("data-sig");
-      if (sig) { sendSig(sig); closePanel(); return; }
-      var pc = pill.getAttribute("data-cmd");
-      if (pc) { runCmd(pc); closePanel(); return; }
-    }
-    /* History items */
-    var hist = e.target.closest(".mp-hist-item");
-    if (hist) { runCmd(hist.getAttribute("data-cmd")); closePanel(); return; }
-    /* Action buttons */
-    var act = e.target.closest(".mp-act");
-    if (act) {
-      var a = act.getAttribute("data-act"), tgt = sMap[activeId];
-      if (a === "copy" && tgt) { var sel = tgt.term.getSelection(); if (sel) navigator.clipboard.writeText(sel).catch(function(){}); }
-      else if (a === "paste" && tgt) { navigator.clipboard.readText().then(function(t) { if (t && tgt.ws && tgt.ws.readyState === 1) tgt.ws.send(JSON.stringify({ type: "input", data: t })); }).catch(function(){}); }
-      else if (a === "selectall" && tgt) tgt.term.selectAll();
-      else if (a === "clear" && tgt) tgt.term.clear();
-      else if (a === "home") showDash();
-      else if (a === "newtab") addSession();
-      else if (a === "rename" && tgt) startRename(tgt);
-      closePanel();
-    }
-  });
-  mpContent.addEventListener("mousedown", function(e) { if (e.target.closest(".mp-btn,.mp-pill,.mp-hist-item,.mp-act")) e.preventDefault(); });
-
-  /* ---- Git viewer ---- */
-  var gitOverlay = $("git-overlay"), gitViewer = $("git-viewer");
-  var gvTabs = $("gv-tabs"), gvStat = $("gv-stat"), gvBody = $("gv-body");
-  var gitActiveTab = "diff";
-
-  function openGit(action) {
-    gitActiveTab = action.replace("git-", "");
-    renderGitTabs();
-    gvBody.innerHTML = '<pre style="padding:20px;color:var(--text3)">Loading...</pre>';
-    gvStat.innerHTML = "";
-    gitOverlay.classList.add("show");
-    fetchGit(action.replace("git-", ""));
-  }
-  function closeGit() { gitOverlay.classList.remove("show"); var s = sMap[activeId]; if (s) s.term.focus(); }
-  $("gv-close").onclick = closeGit;
-  gitOverlay.addEventListener("click", function(e) { if (e.target === gitOverlay) closeGit(); });
-
-  function renderGitTabs() {
-    var tabs = [["diff","Diff"],["diff-staged","Staged"],["status","Status"],["log","Log"],["branch","Branches"],["stash","Stashes"]];
-    gvTabs.innerHTML = "";
-    tabs.forEach(function(t) {
-      var b = document.createElement("button"); b.className = "gv-tab" + (gitActiveTab === t[0] ? " active" : "");
-      b.textContent = t[1]; b.setAttribute("data-tab", t[0]);
-      b.onclick = function() { gitActiveTab = t[0]; renderGitTabs(); fetchGit(t[0]); };
-      gvTabs.appendChild(b);
-    });
-  }
-
-  function fetchGit(action) {
-    var sid = activeId !== null ? activeId : 0;
-    fetch(api("/api/git/" + action + "?session=" + sid))
-      .then(function(r) { return r.json(); })
-      .then(function(d) { renderGitOutput(action, d.output || "", d.cwd || ""); })
-      .catch(function(e) { gvBody.innerHTML = '<pre style="padding:20px;color:var(--red)">' + esc(e.message) + '</pre>'; });
-  }
-
-  function renderGitOutput(action, output, cwd) {
-    if (!output || !output.trim()) {
-      gvBody.innerHTML = '<div class="gv-empty">No output &mdash; ' + (action === "diff" ? "working tree clean" : action === "diff-staged" ? "nothing staged" : "nothing to show") + '</div>';
-      gvStat.innerHTML = '<span class="s-file">' + esc(fname(cwd)) + '</span>';
-      return;
-    }
-    if (action === "diff" || action === "diff-staged") {
-      renderDiff(output, cwd);
-    } else {
-      gvBody.innerHTML = '<pre>' + esc(output) + '</pre>';
-      gvStat.innerHTML = '<span class="s-file">' + esc(fname(cwd)) + '</span>';
-    }
-  }
-
-  function renderDiff(raw, cwd) {
-    var lines = raw.split("\\n"), h = "", adds = 0, dels = 0, files = [];
-    for (var i = 0; i < lines.length; i++) {
-      var ln = lines[i], cls = "";
-      if (ln.indexOf("diff --git") === 0) {
-        var m = ln.match(/b\\/(.+)$/);
-        if (m) files.push(m[1]);
-        cls = "meta";
-      } else if (ln.indexOf("index ") === 0 || ln.indexOf("---") === 0 || ln.indexOf("+++") === 0) {
-        cls = "meta";
-      } else if (ln.indexOf("@@") === 0) {
-        cls = "hunk";
-      } else if (ln.length > 0 && ln[0] === "+") {
-        cls = "add"; adds++;
-      } else if (ln.length > 0 && ln[0] === "-") {
-        cls = "del"; dels++;
-      }
-      h += '<span class="gv-line' + (cls ? " " + cls : "") + '">' + esc(ln) + '</span>\\n';
-    }
-    gvBody.innerHTML = '<pre>' + h + '</pre>';
-    var stat = '<span class="s-file">' + esc(fname(cwd)) + '</span>';
-    stat += '<span class="s-add">+' + adds + '</span>';
-    stat += '<span class="s-del">-' + dels + '</span>';
-    if (files.length) stat += '<span>' + files.length + ' file' + (files.length > 1 ? "s" : "") + '</span>';
-    gvStat.innerHTML = stat;
-  }
-
-  /* ---- Visual viewport ---- */
-  if (window.visualViewport) { var vt; function hvr() { clearTimeout(vt); vt = setTimeout(function() { document.body.style.height = visualViewport.height + "px"; doFit(); }, 50); } visualViewport.addEventListener("resize", hvr); visualViewport.addEventListener("scroll", function() { document.body.style.height = visualViewport.height + "px"; }); }
-})();
-</script></body></html>`;

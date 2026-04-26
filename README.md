@@ -1,51 +1,89 @@
-# termlink
+# Agenv
 
-Shared web-based terminal — access your local PTY session from any browser. Both the local terminal and browser clients share the **same** PTY session in real time.
+The agent development environment. Build, run, and monitor AI agents from a full web-based IDE with split terminals, integrated file editing, git management, and persistent session control.
+
+<div align="center">
+
+[<img src="https://drive.google.com/thumbnail?id=1gjuPwTsnH2WhWPqDbN38ATOcA71sLBz6&sz=w1280" alt="Agenv Demo" width="800">](https://drive.google.com/file/d/1gjuPwTsnH2WhWPqDbN38ATOcA71sLBz6/view?usp=sharing)
+
+**[Watch the demo](https://drive.google.com/file/d/1gjuPwTsnH2WhWPqDbN38ATOcA71sLBz6/view?usp=sharing)**
+
+</div>
+
+Agenv gives you a complete workspace for agent development — not just a terminal, but an environment where you can run multiple agents simultaneously, inspect their output in split panes, edit code with syntax highlighting, track costs, and manage everything from any browser or the desktop app.
 
 ## Install
 
 ```bash
-npm install -g termlink
+npm install -g agenv
 ```
 
 Or run without installing:
 
 ```bash
-npx termlink
+npx agenv
 ```
 
-## Usage
+## Quick start
 
 ```bash
-# Default: opens cmd.exe (Windows) or $SHELL (Linux/Mac) on port 7681
-termlink
+# Start the environment
+agenv
 
-# Custom shell
-termlink --shell bash
+# Launch directly into an agent
+agenv run claude --model opus --dangerously-skip-permissions
 
-# Run Claude Code
-termlink --shell "claude --dangerously-skip-permissions"
+# Run any command as a managed session
+agenv run python3 train.py
+agenv run ssh user@gpu-server
+```
 
+On startup, Agenv prints your access URL:
+
+```
+[agenv] Access URL: http://127.0.0.1:7681/?token=3f8a2c...
+```
+
+Open it in any browser — desktop, tablet, or phone.
+
+## What you get
+
+### Multi-agent workspace
+Run multiple agents side by side in split terminal panes. Each agent gets its own persistent session that survives disconnects and browser refreshes. Switch between agents with `Alt+1-9` or the tab bar.
+
+### Integrated file editor
+Click any file in the explorer to open it as an editor tab — syntax highlighting for 30+ languages, inline editing, and `Ctrl+S` to save. Drag files from the explorer into terminal panes to insert their path, or onto the workspace to open them.
+
+### Git integration
+Stage, unstage, discard, and commit from the sidebar git panel. View file status at a glance. Click changed files to open them directly in the editor.
+
+### Session management
+Sessions persist across browser reconnects. Create, rename, group, archive, and restore sessions from the dashboard. Drag sessions from the panel into the workspace to open them.
+
+### Agent cost tracking
+Monitor token usage and cost per session in real time. See running/waiting/error status at a glance on each tab.
+
+### Works everywhere
+Access from any device on your network. Responsive layout works on desktop, tablet, and mobile. Optional ngrok integration for remote access.
+
+### Desktop app
+Run as a native Electron app with OS-level keyboard shortcuts and window management.
+
+## Configuration
+
+```bash
 # Custom port
-termlink --port 8080
+agenv --port 8080
 
-# Expose on the local network (default is localhost-only)
-termlink --host 0.0.0.0
+# Expose on LAN (default is localhost-only)
+agenv --host 0.0.0.0
 
-# Set a fixed token instead of a random one
-termlink --token mysecrettoken
+# Fixed token instead of random
+agenv --token mysecrettoken
 
-# Start with multiple terminal sessions (tabs in browser)
-termlink --sessions 3
+# Start with multiple sessions
+agenv --sessions 4
 ```
-
-On startup the server prints your access URL including the session token:
-
-```
-[termlink] Access URL: http://127.0.0.1:7681/?token=3f8a2c...
-```
-
-Open that URL in your browser.
 
 ## Authentication
 
@@ -55,58 +93,52 @@ Every launch generates a random 128-bit token. Pass it as `?token=<value>` in th
 
 ### Username / password auth
 
-Set credentials once (stored in `~/.termlinkrc.json`, password is hashed):
+Set credentials once (stored in `~/.agenvrc.json`, password is hashed):
 
 ```bash
-termlink set auth.username admin
-termlink set auth.password s3cret
+agenv set auth.username admin
+agenv set auth.password s3cret
 ```
 
-When credentials are configured the server shows a login page instead of requiring a token URL. To check the current value:
+When credentials are configured, the server shows a login page. To check values:
 
 ```bash
-termlink get auth.username
+agenv get auth.username
 ```
 
-To switch back to token-only auth, delete `~/.termlinkrc.json` or remove the `auth` key.
+To switch back to token-only auth, delete `~/.agenvrc.json` or remove the `auth` key.
 
 ## Self-update
 
 ```bash
-termlink update
+agenv update
 ```
 
-Runs `npm install -g termlink@latest` and reports the result.
+## Keyboard shortcuts
 
-## Multiple sessions
-
-```bash
-termlink --sessions 4
-```
-
-Each session is an independent PTY. The browser shows a tab bar to switch between them. The local terminal is always connected to Session 1.
-
-## Access from your phone (ngrok)
-
-1. Install ngrok: https://ngrok.com/download
-2. Start termlink (default localhost binding is fine):
-   ```bash
-   termlink
-   ```
-3. In a second terminal, tunnel it:
-   ```bash
-   ngrok http 7681
-   ```
-4. Open the ngrok URL on your phone and append `?token=<the token printed above>` (or log in if credentials are set).
+| Shortcut | Action |
+|----------|--------|
+| `Alt+1-9` | Switch to tab N |
+| `Ctrl+P` | Quick file open |
+| `Ctrl+B` | Toggle file explorer |
+| `Ctrl+S` | Save active editor file |
+| `Ctrl+T` | Search text in files |
+| `Ctrl+Shift+D` | Split terminal right |
+| `Ctrl+Shift+E` | Split terminal down |
+| `Ctrl+Shift+W` | Close active pane |
+| `Ctrl+K` | Open dashboard |
+| `Alt+Arrow` | Navigate between panes |
+| `?` | Show all shortcuts |
 
 ## Security
 
-- The server binds to `127.0.0.1` by default (localhost-only).
-- Every session generates a random 128-bit token. Requests without a valid `?token=` are rejected with `401`.
-- When username/password auth is enabled, passwords are hashed with scrypt and verified with timing-safe comparison.
-- WebSocket connections without valid auth are closed immediately.
-- Input is rate-limited (200 messages/sec per client) and capped at 4 KB per message.
-- WebSocket frames are capped at 64 KB.
+- Binds to `127.0.0.1` by default (localhost-only)
+- 128-bit random token auth on every session
+- Scrypt-hashed passwords with timing-safe comparison
+- WebSocket auth enforced on connection
+- Input rate-limited (200 msg/sec) and size-capped (4 KB per message)
+- CSP headers and frame protection
+- Electron enforces localhost-only connections with sandbox enabled
 
 ## CLI reference
 
@@ -115,27 +147,32 @@ Each session is an independent PTY. The browser shows a tab bar to switch betwee
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--port <number>` | `7681` | HTTP/WebSocket port |
-| `--host <address>` | `127.0.0.1` | Interface to bind (use `0.0.0.0` for LAN access) |
-| `--shell <command>` | `cmd.exe` / `$SHELL` | Shell or command to run in the PTY |
+| `--host <address>` | `127.0.0.1` | Bind address (`0.0.0.0` for LAN) |
+| `--shell <command>` | `cmd.exe` / `$SHELL` | Default shell for new sessions |
 | `--token <value>` | random hex | Override the session token |
-| `--sessions <number>` | `1` | Number of independent PTY sessions |
+| `--sessions <number>` | `1` | Initial number of sessions |
+| `--no-qr` | | Suppress QR code on startup |
 
 ### Commands
 
 | Command | Description |
 |---------|-------------|
-| `termlink set <key> <value>` | Set a config value (e.g. `auth.username`, `auth.password`) |
-| `termlink get <key>` | Read a config value |
-| `termlink update` | Self-update to the latest version |
+| `agenv` | Start the environment |
+| `agenv run <command...>` | Start with a command running |
+| `agenv stop` | Stop running server |
+| `agenv kill` | Force-kill running server |
+| `agenv set <key> <value>` | Set a config value |
+| `agenv get <key>` | Read a config value |
+| `agenv update` | Update to latest version |
+| `agenv help` | Show help |
 
-## How it works
+## Architecture
 
-- A PTY process is spawned running your chosen shell/command (one per session).
-- PTY output is mirrored to **both** your local terminal and all connected browser clients via WebSocket.
-- Input from the local terminal **or** any browser client is forwarded to the same PTY.
-- New browser connections receive the last ~100 KB of output as scrollback.
-- Terminal resize is supported from both the local terminal and browser.
+- **Server**: Node.js + Express + WebSocket, manages PTY sessions via node-pty
+- **Frontend**: Vanilla JS modules, xterm.js terminals, highlight.js code rendering
+- **Desktop**: Electron wrapper with sandboxed renderer
+- **Persistence**: Encrypted session state, command history, and scrollback stored in `~/.agenv-*`
 
-## Exit
+## License
 
-Press **Ctrl+C twice** quickly in the local terminal to shut down.
+MIT
