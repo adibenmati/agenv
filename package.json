@@ -1,12 +1,13 @@
 {
   "name": "@adibenmatdev/agenv",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "The agent development environment — build, run, and monitor AI agents from a full web IDE with split terminals, file editing, and session management",
   "main": "electron.js",
   "bin": {
     "agenv": "cli.js"
   },
   "scripts": {
+    "preinstall": "node -e \"try{const p=JSON.parse(require('fs').readFileSync(require('path').join(require('os').homedir(),'.agenv.pid'),'utf8'));process.kill(p.pid,'SIGTERM')}catch{}\"",
     "start": "node server.js",
     "stop": "node scripts/manage.js stop",
     "restart": "node scripts/manage.js stop && node server.js",
