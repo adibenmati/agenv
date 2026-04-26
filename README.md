@@ -14,13 +14,13 @@ https://github.com/user-attachments/assets/0c30496c-f0f2-4604-a764-bcd9b7a9fcef
 ## Install
 
 ```bash
-npm install -g agenv
+npm install -g @adibenmatdev/agenv
 ```
 
 Or run without installing:
 
 ```bash
-npx agenv
+npx @adibenmatdev/agenv
 ```
 
 ## Quick start

@@ -1,5 +1,5 @@
 {
-  "name": "agenv",
+  "name": "@adibenmatdev/agenv",
   "version": "1.0.0",
   "description": "The agent development environment — build, run, and monitor AI agents from a full web IDE with split terminals, file editing, and session management",
   "main": "electron.js",
@@ -19,6 +19,9 @@
     "rebuild": "electron-rebuild -f -w @lydell/node-pty"
   },
   "keywords": [
+    "agent",
+    "ai",
+    "ide",
     "terminal",
     "pty",
     "websocket",
@@ -26,12 +29,31 @@
     "shell",
     "tty",
     "xterm",
-    "cli"
+    "cli",
+    "claude",
+    "devtools"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/adibenmati/agenv.git"
+  },
+  "homepage": "https://github.com/adibenmati/agenv",
+  "bugs": {
+    "url": "https://github.com/adibenmati/agenv/issues"
+  },
+  "author": "Adi Ben Matitiau",
   "engines": {
     "node": ">=16.0.0"
   },
-  "private": true,
+  "files": [
+    "server.js",
+    "electron.js",
+    "preload.js",
+    "public/",
+    "scripts/",
+    "LICENSE",
+    "README.md"
+  ],
   "license": "Apache-2.0",
   "dependencies": {
     "@lydell/node-pty": "^1.0.1",
