@@ -29,12 +29,14 @@ npx @adibenmatdev/agenv
 # Start the environment
 agenv
 
-# Launch directly into an agent
-agenv run claude --model opus --dangerously-skip-permissions
+# Start on a custom port
+agenv --port 8080
 
-# Run any command as a managed session
-agenv run python3 train.py
-agenv run ssh user@gpu-server
+# Open the web UI automatically
+agenv --web
+
+# Start with multiple sessions
+agenv --sessions 4
 ```
 
 On startup, Agenv prints your access URL:
