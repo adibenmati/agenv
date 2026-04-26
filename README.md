@@ -1,10 +1,11 @@
+
 # Agenv
 
 The agent development environment. Build, run, and monitor AI agents from a full web-based IDE with split terminals, integrated file editing, git management, and persistent session control.
 
 <div align="center">
 
-[<img src="https://img.shields.io/badge/▶_Watch_Demo-blue?style=for-the-badge&logo=youtube&logoColor=white" alt="Watch Demo">](https://github.com/adibenmati/agenv/releases/download/v1.0.0/Video.Project.mp4)
+https://github.com/user-attachments/assets/0c30496c-f0f2-4604-a764-bcd9b7a9fcef
 
 </div>
 
