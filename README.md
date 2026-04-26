@@ -3,7 +3,9 @@
 The agent development environment. Build, run, and monitor AI agents from a full web-based IDE with split terminals, integrated file editing, git management, and persistent session control.
 
 <div align="center">
-  <video src="https://github.com/adibenmati/agenv/releases/download/v1.0.0/Video.Project.mp4" controls muted width="800"></video>
+
+![Agenv Demo](https://github.com/adibenmati/agenv/releases/download/v1.0.0/Video.Project.mp4)
+
 </div>
 
 Agenv gives you a complete workspace for agent development — not just a terminal, but an environment where you can run multiple agents simultaneously, inspect their output in split panes, edit code with syntax highlighting, track costs, and manage everything from any browser or the desktop app.
