@@ -4,7 +4,7 @@ The agent development environment. Build, run, and monitor AI agents from a full
 
 <div align="center">
 
-![Agenv Demo](https://github.com/adibenmati/agenv/releases/download/v1.0.0/Video.Project.mp4)
+![Agenv Demo](demo.mp4)
 
 </div>
 
