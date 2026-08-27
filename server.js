@@ -101,16 +101,22 @@ function saveHistory(history) { fs.writeFileSync(HISTORY_PATH, encryptJSON(histo
 // ---------------------------------------------------------------------------
 const SCROLLBACK_DIR = path.join(os.homedir(), ".agenv-scrollback");
 function ensureScrollbackDir() { try { fs.mkdirSync(SCROLLBACK_DIR, { recursive: true }); } catch {} }
-function saveScrollback(session) {
-  if (!session.scrollback || session.scrollback.length === 0) return;
+function saveScrollback(session, force) {
+  const rb = session.scrollback;
+  if (!rb || rb.bytes === 0) return;
+  // Nothing new since the last save — don't re-encrypt 100KB for nothing.
+  if (!force && !rb.dirty) return;
   ensureScrollbackDir();
-  try { fs.writeFileSync(path.join(SCROLLBACK_DIR, `session-${session.id}.enc`), encryptJSON(session.scrollback.toString("utf8")), "utf8"); } catch {}
+  try {
+    fs.writeFileSync(path.join(SCROLLBACK_DIR, `session-${session.id}.enc`), encryptJSON(getScrollback(session).toString("utf8")), "utf8");
+    rb.dirty = false;
+  } catch {}
 }
 function loadScrollback(id) {
   try { return Buffer.from(decryptJSON(fs.readFileSync(path.join(SCROLLBACK_DIR, `session-${id}.enc`), "utf8"))); } catch { return null; }
 }
 function clearScrollbackFile(id) { try { fs.unlinkSync(path.join(SCROLLBACK_DIR, `session-${id}.enc`)); } catch {} }
-function saveAllScrollback() { for (const s of sessions.values()) saveScrollback(s); }
+function saveAllScrollback(force) { for (const s of sessions.values()) saveScrollback(s, force); }
 
 // ---------------------------------------------------------------------------
 // Session archive (~/.agenv-archive.enc) — closed session history
@@ -170,7 +176,7 @@ function loadState() {
 
 let _workspaceLayout = null; // saved by client via API
 
-function saveState() {
+function saveStateNow() {
   const state = { sessions: [], workspaceLayout: _workspaceLayout || null };
   for (const [id, session] of sessions) {
     state.sessions.push({
@@ -183,7 +189,23 @@ function saveState() {
       lastActivity: session.lastActivity || Date.now(),
     });
   }
-  fs.writeFileSync(STATE_PATH, encryptJSON(state), "utf8");
+  try { fs.writeFileSync(STATE_PATH, encryptJSON(state), "utf8"); } catch {}
+}
+
+// Debounced: writes immediately, then coalesces anything that arrives in the
+// next second. Prompt/cwd detection can fire this many times a second, and each
+// call is an AES pass plus a synchronous write on the event loop.
+const STATE_SAVE_MS = 1000;
+let _stateTimer = null;
+let _statePending = false;
+function saveState() {
+  if (_stateTimer) { _statePending = true; return; }
+  saveStateNow();
+  _stateTimer = setTimeout(() => {
+    _stateTimer = null;
+    if (_statePending) { _statePending = false; saveState(); }
+  }, STATE_SAVE_MS);
+  if (_stateTimer.unref) _stateTimer.unref();
 }
 
 // ---------------------------------------------------------------------------
@@ -276,6 +298,7 @@ if (command === "help" || command === "--help" || command === "-h") {
     --qr                Show QR code (default: on)
     --no-qr             Hide QR code
     --name <name>       Session name (used with 'run')
+    --mirror            Echo session 0 into this terminal (off by default)
 
   Config:
     agenv set auth.username admin
@@ -392,6 +415,10 @@ const INITIAL_SESSIONS = Math.max(1, parseInt(flag("--sessions", "1"), 10));
 const MAX_SESSIONS = Math.max(1, parseInt(flag("--max-sessions", "20"), 10));
 const AUTO_OPEN = hasFlag("--open");
 const SHOW_QR = !hasFlag("--no-qr");
+// Off by default: mirroring session 0 into the launching terminal duplicates
+// every byte the browser already renders, and drags the parent tty along with
+// whatever a TUI is repainting. --mirror restores the old behaviour.
+const MIRROR_TO_STDOUT = hasFlag("--mirror");
 RUN_NAME = flag("--name", RUN_NAME);
 
 // ---------------------------------------------------------------------------
@@ -428,27 +455,64 @@ const MAX_SCROLLBACK = 100 * 1024;
 // Reset sequence prepended after truncation to neutralize any partial ANSI state:
 // \x1b[0m = reset attributes, \x1b[?25h = show cursor
 const SCROLLBACK_RESET = Buffer.from("\x1b[0m\x1b[?25h");
+// Cap the stored bytes so buffer + reset prefix still fits in MAX_SCROLLBACK.
+const SCROLLBACK_CAP = MAX_SCROLLBACK - SCROLLBACK_RESET.length;
+
+// The ring keeps the pty chunks as they arrive and only tracks a running byte
+// count. Appending is O(chunk); dropping from the front is a subarray view, not
+// a copy. Nothing is concatenated until something actually reads the buffer.
+//
+// This used to be a single Buffer that was rebuilt with two Buffer.concat calls
+// on every chunk, which copied the whole ~100KB ring per chunk of pty output —
+// ~2GB of memcpy for 3.4MB of terminal output, whether or not anyone was
+// watching the session.
+function newScrollback(initial) {
+  const rb = { chunks: [], bytes: 0, truncated: false, aligned: true, dirty: false };
+  if (initial && initial.length) { rb.chunks.push(initial); rb.bytes = initial.length; }
+  return rb;
+}
 
 function appendScrollback(session, data) {
-  const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
-  session.scrollback = Buffer.concat([session.scrollback, buf]);
-  if (session.scrollback.length > MAX_SCROLLBACK) {
-    let start = session.scrollback.length - MAX_SCROLLBACK;
-    // Skip any UTF-8 continuation bytes (10xxxxxx) so we don't start mid-character
-    while (start < session.scrollback.length && (session.scrollback[start] & 0xC0) === 0x80) {
-      start++;
-    }
-    // Try to find a newline within 2KB for a clean line boundary
-    const searchEnd = Math.min(start + 2048, session.scrollback.length);
-    for (let i = start; i < searchEnd; i++) {
-      if (session.scrollback[i] === 0x0A) { // \n
-        start = i + 1;
-        break;
-      }
-    }
-    // Prepend a reset sequence to neutralize any cut ANSI state (colors, modes, etc.)
-    session.scrollback = Buffer.concat([SCROLLBACK_RESET, session.scrollback.slice(start)]);
+  const buf = Buffer.isBuffer(data) ? data : Buffer.from(data, "utf8");
+  if (buf.length === 0) return;
+  const rb = session.scrollback || (session.scrollback = newScrollback());
+  rb.chunks.push(buf);
+  rb.bytes += buf.length;
+  rb.dirty = true;
+
+  while (rb.bytes > SCROLLBACK_CAP) {
+    const head = rb.chunks[0];
+    const excess = rb.bytes - SCROLLBACK_CAP;
+    if (head.length <= excess) { rb.chunks.shift(); rb.bytes -= head.length; }
+    else { rb.chunks[0] = head.subarray(excess); rb.bytes -= excess; }
+    rb.truncated = true;
+    rb.aligned = false;
   }
+}
+
+// Materializes the ring. Collapses the chunk list, and — only after a
+// truncation — realigns the head to a character/line boundary so a cut escape
+// sequence can't bleed into the client.
+function getScrollback(session) {
+  const rb = session.scrollback;
+  if (!rb || rb.bytes === 0) return Buffer.alloc(0);
+  if (rb.chunks.length > 1) rb.chunks = [Buffer.concat(rb.chunks, rb.bytes)];
+  let buf = rb.chunks[0];
+
+  if (!rb.aligned) {
+    let start = 0;
+    // Skip any UTF-8 continuation bytes (10xxxxxx) so we don't start mid-character
+    while (start < buf.length && (buf[start] & 0xC0) === 0x80) start++;
+    // Try to find a newline within 2KB for a clean line boundary
+    const searchEnd = Math.min(start + 2048, buf.length);
+    for (let i = start; i < searchEnd; i++) {
+      if (buf[i] === 0x0A) { start = i + 1; break; }
+    }
+    if (start > 0) { buf = buf.subarray(start); rb.chunks = [buf]; rb.bytes = buf.length; }
+    rb.aligned = true;
+  }
+
+  return rb.truncated ? Buffer.concat([SCROLLBACK_RESET, buf]) : buf;
 }
 
 // ---------------------------------------------------------------------------
@@ -605,17 +669,177 @@ function getSystemStats() {
   };
 }
 
-function spawnSession(id, opts) {
-  const o = typeof opts === "string" ? { cwd: opts } : (opts || {});
-  const sessionCwd = o.cwd || process.cwd();
-  const ptyProcess = pty.spawn(shellCmd, shellArgs, {
-    name: "xterm-256color", cols, rows, cwd: sessionCwd,
-    env: Object.assign({}, process.env, { TERM: "xterm-256color" }),
-  });
+// ---------------------------------------------------------------------------
+// Websocket fan-out
+//
+// Every send goes through here so three rules hold everywhere:
+//   1. serialize once per message, not once per client;
+//   2. a session with no clients serializes nothing at all;
+//   3. a client whose send buffer is running away gets cut loose instead of
+//      being buffered into indefinitely.
+// ---------------------------------------------------------------------------
+const WS_PING_MS = Math.max(1000, parseInt(process.env.AGENV_WS_PING_MS || "20000", 10));
+// A browser on the other end of a healthy connection never gets near this.
+// Anything that does has stopped reading: backgrounded tab, sleeping laptop,
+// dead renderer, dropped tunnel. readyState stays OPEN in all of those cases.
+const WS_MAX_BUFFERED = Math.max(64 * 1024, parseInt(process.env.AGENV_WS_MAX_BUFFERED || "", 10) || 4 * 1024 * 1024);
+// Coalescing window. A repainting TUI emits dozens of tiny chunks per frame;
+// sending each as its own message makes the browser parse thousands of
+// messages a second and starves its main thread.
+const OUTPUT_FLUSH_MS = 16;
+const OUTPUT_FLUSH_BYTES = 64 * 1024;
 
+function dropClient(session, ws, reason) {
+  session.clients.delete(ws);
+  try { ws.terminate(); } catch {}
+  console.log(`[agenv] Dropped client from session ${session.id} (${reason})`);
+}
+
+function sendToClient(session, ws, msg) {
+  if (ws.readyState !== 1) { session.clients.delete(ws); return; }
+  if (ws.bufferedAmount > WS_MAX_BUFFERED) { dropClient(session, ws, "not reading"); return; }
+  try { ws.send(msg); } catch { dropClient(session, ws, "send failed"); }
+}
+
+function broadcast(session, obj) {
+  if (session.clients.size === 0) return;
+  const msg = typeof obj === "string" ? obj : JSON.stringify(obj);
+  for (const ws of [...session.clients]) sendToClient(session, ws, msg);
+}
+
+function queueOutput(session, data) {
+  if (session.clients.size === 0) return; // nobody listening — don't even serialize
+  session.outQueue.push(data);
+  session.outBytes += data.length;
+  if (session.outBytes >= OUTPUT_FLUSH_BYTES) { flushOutput(session); return; }
+  if (!session.outTimer) session.outTimer = setTimeout(() => flushOutput(session), OUTPUT_FLUSH_MS);
+}
+
+function flushOutput(session) {
+  if (session.outTimer) { clearTimeout(session.outTimer); session.outTimer = null; }
+  if (session.outQueue.length === 0) return;
+  const data = session.outQueue.length === 1 ? session.outQueue[0] : session.outQueue.join("");
+  session.outQueue.length = 0;
+  session.outBytes = 0;
+  broadcast(session, { type: "output", data });
+}
+
+// Drop clients that have stopped answering. Without this a half-open socket
+// (laptop lid closed, network switched, renderer killed) stays in the client
+// set forever and keeps its buffer alive with it.
+const wsHeartbeat = setInterval(() => {
+  for (const session of sessions.values()) {
+    for (const ws of [...session.clients]) {
+      if (ws.isAlive === false) { dropClient(session, ws, "no pong"); continue; }
+      ws.isAlive = false;
+      try { ws.ping(); } catch { dropClient(session, ws, "ping failed"); }
+    }
+  }
+}, WS_PING_MS);
+if (wsHeartbeat.unref) wsHeartbeat.unref();
+
+// ---------------------------------------------------------------------------
+// Output analysis (cwd / status / cost)
+//
+// Runs on a timer over the accumulated tail rather than on every chunk. The
+// per-chunk version re-ran a strip-ANSI pass plus ~20 regexes — and a
+// synchronous existsSync+statSync — for every repaint frame of every session.
+// ---------------------------------------------------------------------------
+const DETECT_INTERVAL_MS = 250;
+const DETECT_TAIL_BYTES = 8192;
+const STRIP_ANSI = /\x1b\[[0-9;?]*[a-zA-Z~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][0-9A-Z]/g;
+const OSC7_CWD = /\x1b\]7;file:\/\/[^/]*([^\x07\x1b]*?)(?:\x07|\x1b\\)/;
+const CMD_PROMPT = /([a-zA-Z]:\\[^>\r\n]*?)>\s*$/m;
+const PS_PROMPT = /PS\s+([a-zA-Z]:\\[^\r\n>]*?)>\s*$/m;
+
+// Directories we've already confirmed exist, so a flapping prompt doesn't hit
+// the disk on every detection round.
+const _knownDirs = new Set();
+function isRealDir(p) {
+  if (_knownDirs.has(p)) return true;
+  try {
+    if (fs.existsSync(p) && fs.statSync(p).isDirectory()) {
+      if (_knownDirs.size > 500) _knownDirs.clear();
+      _knownDirs.add(p);
+      return true;
+    }
+  } catch {}
+  return false;
+}
+
+function setSessionCwd(session, newCwd) {
+  if (!newCwd || newCwd === session.cwd) return;
+  session.cwd = newCwd;
+  saveState();
+  broadcast(session, { type: "cwd", cwd: newCwd });
+}
+
+function noteForDetection(session, data) {
+  session.detectTail += data;
+  if (session.detectTail.length > DETECT_TAIL_BYTES) {
+    session.detectTail = session.detectTail.slice(-DETECT_TAIL_BYTES);
+  }
+  if (session.detectTimer) return;
+  session.detectTimer = setTimeout(() => {
+    session.detectTimer = null;
+    runDetection(session);
+  }, DETECT_INTERVAL_MS);
+}
+
+function runDetection(session) {
+  const raw = session.detectTail;
+  if (!raw) return;
+  session.detectTail = "";
+
+  const osc7 = raw.match(OSC7_CWD);
+  if (osc7) {
+    try { setSessionCwd(session, decodeURIComponent(osc7[1])); } catch {}
+  }
+
+  const plain = raw.replace(STRIP_ANSI, "");
+
+  // CWD from Windows/PowerShell prompts (no OSC7 there)
+  if (process.platform === "win32") {
+    const psMatch = plain.match(PS_PROMPT);
+    const cmdMatch = plain.match(CMD_PROMPT);
+    const detected = (psMatch && psMatch[1]) || (cmdMatch && cmdMatch[1]);
+    if (detected && detected !== session.cwd) {
+      try {
+        const resolved = path.resolve(detected);
+        if (isRealDir(resolved)) setSessionCwd(session, resolved);
+      } catch {}
+    }
+  }
+
+  const newStatus = detectSessionStatus(plain);
+  if (newStatus && newStatus !== session.status) {
+    session.status = newStatus;
+    broadcast(session, { type: "status", status: newStatus, sessionId: session.id });
+  }
+
+  if (session.detectedTool !== "terminal") {
+    const tokenInfo = parseTokenInfo(plain);
+    if (tokenInfo) {
+      if (tokenInfo.inputTokens) session.analytics.inputTokens += tokenInfo.inputTokens;
+      if (tokenInfo.outputTokens) session.analytics.outputTokens += tokenInfo.outputTokens;
+      if (tokenInfo.cost) session.analytics.estimatedCost += tokenInfo.cost;
+      session.analytics.turnCount++;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Session records
+//
+// A session record exists independently of its shell. `live: false` means the
+// tab is restored — name, cwd and scrollback are all there — but no pty has
+// been spawned for it yet. It wakes on first attach.
+// ---------------------------------------------------------------------------
+function createSession(id, opts) {
+  const o = typeof opts === "string" ? { cwd: opts } : (opts || {});
   const now = Date.now();
   const session = {
-    id, name: o.name || "", cwd: sessionCwd,
+    id, name: o.name || "", cwd: o.cwd || process.cwd(),
     created: o.created || now, lastActivity: o.lastActivity || now,
     detectedTool: o.tool || "terminal", lastCommand: o.lastCommand || "",
     launchCommand: o.runCommand || o.launchCommand || "",
@@ -628,21 +852,41 @@ function spawnSession(id, opts) {
       inputTokens: 0, outputTokens: 0, estimatedCost: 0,
       commandCount: 0, turnCount: 0, startTime: now,
     },
-    pty: ptyProcess, scrollback: Buffer.alloc(0), clients: new Set(),
+    pty: null, live: false,
+    scrollback: null, clients: new Set(),
     pendingCommand: o.runCommand || null,
+    cols: o.cols || cols, rows: o.rows || rows,
+    outQueue: [], outBytes: 0, outTimer: null,
+    detectTail: "", detectTimer: null,
   };
 
   if (o.restoreScrollback !== false) {
     const saved = loadScrollback(id);
-    if (saved) session.scrollback = saved;
+    if (saved) session.scrollback = newScrollback(saved);
   }
 
   sessions.set(id, session);
+  return session;
+}
+
+/** Spawn (or respawn) the shell for a session record. Idempotent. */
+function startSession(session) {
+  if (session.live && session.pty) return session;
+
+  const sessionCwd = session.cwd && isRealDir(session.cwd) ? session.cwd : process.cwd();
+  const ptyProcess = pty.spawn(shellCmd, shellArgs, {
+    name: "xterm-256color", cols: session.cols, rows: session.rows, cwd: sessionCwd,
+    env: Object.assign({}, process.env, { TERM: "xterm-256color" }),
+  });
+  session.pty = ptyProcess;
+  session.live = true;
+  session.cwd = sessionCwd;
+  session.lastActivity = Date.now();
 
   // Send pending command once the shell is ready (small delay for shell init)
   if (session.pendingCommand) {
     setTimeout(() => {
-      if (session.pty) {
+      if (session.pty && session.pendingCommand) {
         session.pty.write(session.pendingCommand + "\r");
         session.lastCommand = session.pendingCommand;
         const t = detectTool(session.pendingCommand);
@@ -654,84 +898,59 @@ function spawnSession(id, opts) {
   }
 
   ptyProcess.onData((data) => {
+    if (session.pty !== ptyProcess) return; // stale handler from a previous shell
     session.lastActivity = Date.now();
-    const osc7Match = data.match(/\x1b\]7;file:\/\/[^/]*([^\x07\x1b]*?)(?:\x07|\x1b\\)/);
-    if (osc7Match) { try { const newCwd = decodeURIComponent(osc7Match[1]); if (newCwd !== session.cwd) { session.cwd = newCwd; saveState(); const cwdMsg = JSON.stringify({ type: "cwd", cwd: newCwd }); for (const ws of session.clients) { if (ws.readyState === 1) ws.send(cwdMsg); } } } catch {} }
-    if (id === 0) process.stdout.write(data);
+    if (MIRROR_TO_STDOUT && session.id === 0) process.stdout.write(data);
     appendScrollback(session, data);
-
-    // CWD detection from Windows/PowerShell prompts
-    const plain = data.replace(/\x1b\[[0-9;?]*[a-zA-Z~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][0-9A-Z]/g, "");
-    if (process.platform === "win32") {
-      // cmd.exe prompt: ends with "C:\path>" at end of a line/string
-      const cmdMatch = plain.match(/([a-zA-Z]:\\[^>\r\n]*?)>\s*$/m);
-      // PowerShell prompt: "PS C:\path>" at end of a line/string
-      const psMatch = plain.match(/PS\s+([a-zA-Z]:\\[^\r\n>]*?)>\s*$/m);
-      const detected = (psMatch && psMatch[1]) || (cmdMatch && cmdMatch[1]);
-      if (detected && detected !== session.cwd) {
-        try {
-          const resolved = path.resolve(detected);
-          if (fs.existsSync(resolved) && fs.statSync(resolved).isDirectory()) {
-            session.cwd = resolved;
-            const cwdMsg = JSON.stringify({ type: "cwd", cwd: resolved });
-            for (const ws of session.clients) { if (ws.readyState === 1) ws.send(cwdMsg); }
-          }
-        } catch {}
-      }
-    }
-
-    // Status detection
-    const newStatus = detectSessionStatus(plain);
-    if (newStatus && newStatus !== session.status) {
-      session.status = newStatus;
-      const statusMsg = JSON.stringify({ type: "status", status: newStatus, sessionId: id });
-      for (const ws of session.clients) {
-        if (ws.readyState === 1) ws.send(statusMsg);
-      }
-    }
-
-    // Token/cost parsing for AI tools
-    if (session.detectedTool !== "terminal") {
-      const tokenInfo = parseTokenInfo(plain);
-      if (tokenInfo) {
-        if (tokenInfo.inputTokens) session.analytics.inputTokens += tokenInfo.inputTokens;
-        if (tokenInfo.outputTokens) session.analytics.outputTokens += tokenInfo.outputTokens;
-        if (tokenInfo.cost) session.analytics.estimatedCost += tokenInfo.cost;
-        session.analytics.turnCount++;
-      }
-    }
-
-    for (const ws of session.clients) {
-      if (ws.readyState === 1) ws.send(JSON.stringify({ type: "output", data }));
-    }
+    noteForDetection(session, data);
+    queueOutput(session, data);
   });
 
   ptyProcess.onExit(({ exitCode }) => {
+    if (session.pty !== ptyProcess) return; // superseded by a restart
     if (shuttingDown) return;
-    console.log(`\n[agenv] Session ${id} exited (code ${exitCode})`);
+    console.log(`[agenv] Session ${session.id} exited (code ${exitCode})`);
+    flushOutput(session);
     archiveSession(session);
-    for (const ws of session.clients) {
-      if (ws.readyState === 1) { ws.send(JSON.stringify({ type: "exit", code: exitCode })); ws.close(); }
-    }
-    sessions.delete(id);
-    clearScrollbackFile(id);
-    if (id === 0) { saveState(); saveAllScrollback(); process.exit(exitCode); }
+    destroySession(session, exitCode);
+    if (session.id === 0 && MIRROR_TO_STDOUT) { saveStateNow(); saveAllScrollback(); process.exit(exitCode); }
     saveState();
-    // Broadcast archive update to all connected clients
     broadcastEvent("archive-updated");
   });
 
   return session;
 }
 
-function broadcastEvent(event) {
-  for (const s of sessions.values()) {
-    for (const ws of s.clients) {
-      if (ws.readyState === 1) {
-        try { ws.send(JSON.stringify({ type: "event", event })); } catch {}
-      }
-    }
+function spawnSession(id, opts) {
+  return startSession(createSession(id, opts));
+}
+
+/** Tear a session down completely: timers, sockets, pty handle, saved scrollback. */
+function destroySession(session, exitCode) {
+  if (session.outTimer) { clearTimeout(session.outTimer); session.outTimer = null; }
+  if (session.detectTimer) { clearTimeout(session.detectTimer); session.detectTimer = null; }
+  session.outQueue.length = 0;
+  session.outBytes = 0;
+
+  const msg = JSON.stringify({ type: "exit", code: exitCode });
+  for (const ws of session.clients) {
+    try { if (ws.readyState === 1) ws.send(msg); } catch {}
+    try { ws.close(1000, "session closed"); } catch {}
+    // A client that never replies to the close frame would otherwise hold the
+    // socket (and its buffer) open until the protocol timeout.
+    const t = setTimeout(() => { try { ws.terminate(); } catch {} }, 500);
+    if (t.unref) t.unref();
   }
+  session.clients.clear();
+  session.pty = null;
+  session.live = false;
+  sessions.delete(session.id);
+  clearScrollbackFile(session.id);
+}
+
+function broadcastEvent(event) {
+  const msg = JSON.stringify({ type: "event", event });
+  for (const s of sessions.values()) broadcast(s, msg);
 }
 
 // Spawn sessions — restore previous state OR create from run command
@@ -744,35 +963,36 @@ if (RUN_COMMAND) {
     cwd: process.cwd(), name: runName, runCommand: RUN_COMMAND, restoreScrollback: false,
   });
 } else if (savedState && savedState.sessions && savedState.sessions.length > 0) {
-  // Only restore sessions that are in the workspace layout (visible tabs)
-  // This prevents spawning dozens of dead PTYs on restart
-  let neededIds = new Set();
+  // Restore every tab the workspace layout referenced, but as a record only —
+  // no shell is spawned until the tab is actually attached to. Startup stays
+  // instant and a restored window costs no processes until it's used.
+  const neededIds = new Set();
   if (_workspaceLayout && Array.isArray(_workspaceLayout)) {
     const collectIds = (node) => {
       if (!node) return;
       if (node.type === "leaf" && node.sessionId != null) neededIds.add(node.sessionId);
       if (node.children) node.children.forEach(collectIds);
     };
-    for (const ws of _workspaceLayout) { if (ws.rootNode) collectIds(ws.rootNode); }
+    for (const w of _workspaceLayout) { if (w.rootNode) collectIds(w.rootNode); }
   }
 
   let toRestore;
   if (neededIds.size > 0) {
-    // Restore only sessions referenced in workspace layout
     toRestore = savedState.sessions.filter(s => neededIds.has(s.id));
   } else {
-    // No layout saved — restore only the most recent session
-    const sorted = [...savedState.sessions].sort((a, b) => (b.lastActivity || 0) - (a.lastActivity || 0));
-    toRestore = sorted.slice(0, 1);
+    // No layout saved — keep the most recently used tabs so reopening the app
+    // doesn't silently throw the rest away.
+    toRestore = [...savedState.sessions]
+      .sort((a, b) => (b.lastActivity || 0) - (a.lastActivity || 0))
+      .slice(0, MAX_SESSIONS);
   }
 
-  console.log(`[agenv] Restoring ${toRestore.length} of ${savedState.sessions.length} saved sessions`);
+  console.log(`[agenv] Restoring ${toRestore.length} of ${savedState.sessions.length} saved tabs (shells start on open)`);
   for (const s of toRestore) {
-    const cwdOk = s.cwd && fs.existsSync(s.cwd);
     const id = s.id != null ? s.id : nextSessionId;
     if (id >= nextSessionId) nextSessionId = id + 1;
-    spawnSession(id, {
-      cwd: cwdOk ? s.cwd : process.cwd(),
+    createSession(id, {
+      cwd: s.cwd && fs.existsSync(s.cwd) ? s.cwd : process.cwd(),
       name: s.name || "", tool: s.tool || "terminal", lastCommand: s.lastCommand || "",
       launchCommand: s.launchCommand || "", userNamed: s.userNamed || false,
       created: s.created, lastActivity: s.lastActivity, restoreScrollback: true,
@@ -843,12 +1063,18 @@ const periodicSaveInterval = setInterval(() => { saveState(); saveAllScrollback(
 if (process.stdin.isTTY) process.stdin.setRawMode(true);
 process.stdin.resume();
 process.stdin.setEncoding("utf8");
-process.stdin.on("data", (data) => { const s = sessions.get(0); if (s) s.pty.write(data); });
+// Only forward keystrokes to session 0 when its output is mirrored back —
+// otherwise they'd land in a shell the user can't see.
+if (MIRROR_TO_STDOUT) {
+  process.stdin.on("data", (data) => { const s = sessions.get(0); if (s && s.pty) s.pty.write(data); });
+}
 process.stdout.on("resize", () => {
   const c = process.stdout.columns, r = process.stdout.rows, s = sessions.get(0);
   if (!s) return;
-  s.pty.resize(c, r);
-  for (const ws of s.clients) { if (ws.readyState === 1) ws.send(JSON.stringify({ type: "resize", cols: c, rows: r })); }
+  s.cols = c; s.rows = r;
+  if (!s.pty) return;
+  try { s.pty.resize(c, r); } catch {}
+  broadcast(s, { type: "resize", cols: c, rows: r });
 });
 
 // ---------------------------------------------------------------------------
@@ -940,6 +1166,8 @@ app.get("/api/sessions", apiAuth, (req, res) => {
       created: session.created, lastActivity: session.lastActivity, clients: session.clients.size,
       status: session.status || "idle", group: session.group || "",
       note: session.note || "", analytics: session.analytics || {},
+      // false = restored tab whose shell hasn't been started yet
+      live: !!session.live,
     });
   }
   res.json(list);
@@ -950,7 +1178,7 @@ app.post("/api/sessions", apiAuth, (req, res) => {
   const id = nextSessionId++;
   const b = req.body || {};
   spawnSession(id, { cwd: b.cwd, name: b.name || "", group: b.group || "", runCommand: b.command || null, restoreScrollback: false });
-  saveState();
+  saveStateNow();
   const s = sessions.get(id);
   console.log(`[agenv] Session ${id} created from browser in ${s.cwd} (${sessions.size} total)`);
   res.json({ id, name: s.name, cwd: s.cwd, tool: s.detectedTool, created: s.created, status: s.status, group: s.group });
@@ -972,13 +1200,12 @@ app.delete("/api/sessions/:id", apiAuth, (req, res) => {
   const id = parseInt(req.params.id, 10);
   const session = sessions.get(id);
   if (!session) return res.status(404).json({ error: "Session not found" });
-  try { session.pty.kill(); } catch {} // safe even if already exited
-  // Notify all connected clients
-  for (const ws of session.clients) {
-    try { ws.send(JSON.stringify({ type: "exit", code: -1 })); } catch {}
-  }
-  sessions.delete(id);
+  const p = session.pty;
+  session.pty = null; // stops the exit handler from archiving this twice
+  try { if (p) p.kill(); } catch {} // safe even if already exited
+  destroySession(session, -1);
   console.log(`[agenv] Session ${id} closed from browser`);
+  saveStateNow();
   res.json({ ok: true });
 });
 
@@ -986,51 +1213,25 @@ app.post("/api/sessions/:id/restart", apiAuth, (req, res) => {
   const id = parseInt(req.params.id, 10);
   const session = sessions.get(id);
   if (!session) return res.status(404).json({ error: "Session not found" });
-  // Kill the old PTY
-  try { session.pty.kill(); } catch {}
-  // Create a new PTY with the same settings
-  const cwd = session.cwd || process.cwd();
-  const shell = session.launchCommand || SHELL;
+  const oldPty = session.pty;
+  session.pty = null; // the old pty's handlers bail out once this no longer matches
+  try { if (oldPty) oldPty.kill(); } catch {}
+
   try {
-    const newPty = pty.spawn(shell, [], {
-      name: "xterm-256color",
-      cols: session.pty.cols || 80,
-      rows: session.pty.rows || 24,
-      cwd,
-      env: { ...process.env, TERM: "xterm-256color" },
-    });
-    // Replace the PTY
-    session.pty = newPty;
+    session.live = false;
     session.status = "idle";
-    session.scrollback = Buffer.alloc(0);
-    session.lastActivity = Date.now();
-    // Re-wire PTY output to clients
-    newPty.onData((data) => {
-      // Update scrollback
-      const buf = Buffer.from(data, "utf8");
-      session.scrollback = Buffer.concat([session.scrollback, buf]);
-      if (session.scrollback.length > 100 * 1024) {
-        session.scrollback = session.scrollback.slice(-80 * 1024);
-      }
-      session.lastActivity = Date.now();
-      // Broadcast to clients
-      const msg = JSON.stringify({ type: "output", data });
-      for (const ws of session.clients) {
-        try { if (ws.readyState === 1) ws.send(msg); } catch {}
-      }
-    });
-    newPty.onExit(({ exitCode }) => {
-      session.status = "exited";
-      const msg = JSON.stringify({ type: "exit", code: exitCode });
-      for (const ws of session.clients) {
-        try { if (ws.readyState === 1) ws.send(msg); } catch {}
-      }
-    });
+    session.scrollback = null;
+    clearScrollbackFile(id); // don't resurrect the pre-restart buffer later
+    session.detectTail = "";
+    session.outQueue.length = 0;
+    session.outBytes = 0;
+    // Re-run whatever launched this session (claude, a dev server, ...) in a
+    // fresh shell rather than replacing the shell with it.
+    session.pendingCommand = session.launchCommand || null;
+    startSession(session);
+
     // Clear scrollback on clients so they see a fresh terminal
-    const clearMsg = JSON.stringify({ type: "output", data: "\x1b[2J\x1b[H" });
-    for (const ws of session.clients) {
-      try { if (ws.readyState === 1) ws.send(clearMsg); } catch {}
-    }
+    broadcast(session, { type: "output", data: "\x1b[2J\x1b[H" });
     console.log(`[agenv] Session ${id} restarted`);
     res.json({ ok: true, id });
   } catch (e) {
@@ -1059,8 +1260,7 @@ app.get("/api/sessions/:id/cwd", apiAuth, (req, res) => {
           const cwd = r.stdout.trim();
           if (cwd !== session.cwd) {
             session.cwd = cwd;
-            const cwdMsg = JSON.stringify({ type: "cwd", cwd });
-            for (const ws of session.clients) { if (ws.readyState === 1) ws.send(cwdMsg); }
+            broadcast(session, { type: "cwd", cwd });
           }
         }
       }
@@ -1076,7 +1276,7 @@ app.get("/api/workspace-layout", apiAuth, (req, res) => {
 
 app.post("/api/workspace-layout", apiAuth, (req, res) => {
   _workspaceLayout = req.body.layout || null;
-  saveState();
+  saveStateNow();
   res.json({ ok: true });
 });
 
@@ -1116,8 +1316,7 @@ app.post("/api/history", apiAuth, (req, res) => {
               if (!s.userNamed && s.detectedTool === "terminal") {
                 s.name = path.basename(resolved);
               }
-              const cwdMsg = JSON.stringify({ type: "cwd", cwd: s.cwd });
-              for (const ws of s.clients) { if (ws.readyState === 1) ws.send(cwdMsg); }
+              broadcast(s, { type: "cwd", cwd: s.cwd });
             }
           } catch {}
         }
@@ -2766,24 +2965,47 @@ wss.on("connection", (ws, req) => {
   const session = sessions.get(sessionId);
   if (!session) { ws.close(4404, "Session not found"); return; }
 
+  // Opening a restored tab is what starts its shell.
+  if (!session.live) {
+    try {
+      startSession(session);
+      saveStateNow();
+      console.log(`[agenv] Session ${sessionId} woken on attach`);
+    } catch (e) {
+      console.error(`[agenv] Failed to start session ${sessionId}: ${e.message}`);
+      ws.close(4500, "Failed to start session");
+      return;
+    }
+  }
+  if (!session.pty) { ws.close(4500, "Session has no shell"); return; }
+
+  // Anything still queued belongs to the clients that were already attached;
+  // this one is about to receive it as part of the scrollback instead.
+  flushOutput(session);
+
   session.clients.add(ws);
+  ws.isAlive = true;
+  ws.on("pong", () => { ws.isAlive = true; });
+
   const rl = makeRateLimiter();
   console.log(`[agenv] Browser connected to session ${sessionId} (${session.clients.size} client(s))${wsReadOnly ? " [read-only]" : ""}`);
 
-  ws.send(JSON.stringify({ type: "resize", cols: session.pty.cols, rows: session.pty.rows }));
-  if (session.scrollback.length > 0) ws.send(JSON.stringify({ type: "output", data: session.scrollback.toString("utf8") }));
+  sendToClient(session, ws, JSON.stringify({ type: "resize", cols: session.pty.cols, rows: session.pty.rows }));
+  const backlog = getScrollback(session);
+  if (backlog.length > 0) sendToClient(session, ws, JSON.stringify({ type: "output", data: backlog.toString("utf8") }));
 
   ws.on("message", (raw) => {
     if (!rl()) { ws.close(4429, "Too Many Requests"); return; }
     let msg; try { msg = JSON.parse(raw); } catch { return; }
+    if (!session.pty) return;
     if (msg.type === "input" && typeof msg.data === "string") { if (wsReadOnly) return; if (msg.data.length <= 262144) session.pty.write(msg.data); }
     else if (msg.type === "resize") {
-      session.pty.resize(
-        Math.max(1, Math.min(Math.floor(Number(msg.cols)) || 80, 500)),
-        Math.max(1, Math.min(Math.floor(Number(msg.rows)) || 24, 200))
-      );
+      session.cols = Math.max(1, Math.min(Math.floor(Number(msg.cols)) || 80, 500));
+      session.rows = Math.max(1, Math.min(Math.floor(Number(msg.rows)) || 24, 200));
+      try { session.pty.resize(session.cols, session.rows); } catch {}
     }
   });
+  ws.on("error", () => { dropClient(session, ws, "socket error"); });
   ws.on("close", () => { session.clients.delete(ws); console.log(`[agenv] Browser disconnected from session ${sessionId} (${session.clients.size} client(s))`); });
 });
 
@@ -2805,13 +3027,14 @@ function gracefulShutdown(reason) {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`\n[agenv] ${reason} — saving state...`);
-  try { saveState(); } catch {}
-  try { saveAllScrollback(); } catch {}
+  try { saveStateNow(); } catch {}
+  try { saveAllScrollback(true); } catch {}
   clearInterval(periodicSaveInterval);
+  clearInterval(wsHeartbeat);
   // Clean up PID file
   try { fs.unlinkSync(PID_PATH); } catch {}
   // Kill all PTY processes
-  for (const s of sessions.values()) { try { s.pty.kill(); } catch {} }
+  for (const s of sessions.values()) { try { if (s.pty) s.pty.kill(); } catch {} }
   server.close(() => {
     console.log("[agenv] Server closed.");
     process.exit(0);
@@ -2839,7 +3062,7 @@ if (process.platform === "win32") {
   process.on("SIGBREAK", () => gracefulShutdown("Ctrl+Break"));
 }
 process.on("exit", () => {
-  if (!shuttingDown) { try { saveState(); } catch {} try { saveAllScrollback(); } catch {} }
+  if (!shuttingDown) { try { saveStateNow(); } catch {} try { saveAllScrollback(true); } catch {} }
   try { fs.unlinkSync(PID_PATH); } catch {}
 });
 

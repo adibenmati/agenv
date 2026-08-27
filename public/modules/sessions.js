@@ -282,8 +282,11 @@ function renderSessionCard(s) {
   const a = s.analytics || {};
   const uptime = s.created ? duration(Date.now() - s.created) : "";
 
+  // A restored tab whose shell has not been started yet.
+  const state = s.live === false ? "asleep" : (s.status || "idle");
+
   let h = `<div class="sp-session${isOpen ? " open" : ""}${isExpanded ? " expanded" : ""}" data-sid="${s.id}" draggable="true">`;
-  h += `<div class="sp-status ${s.status || "idle"}"></div>`;
+  h += `<div class="sp-status ${state}"></div>`;
   h += `<div class="sp-info">`;
   h += `<div class="sp-name-row">`;
   h += `<span class="sp-name">${esc(s.name || "Session " + s.id)}</span>`;
@@ -292,7 +295,7 @@ function renderSessionCard(s) {
   h += `<div class="sp-path">${esc(short(s.cwd))}</div>`;
   h += `<div class="sp-meta">`;
   if (toolClass) h += `<span class="sp-badge ${esc(toolClass)}">${esc(s.tool)}</span>`;
-  h += `<span class="sp-status-label ${s.status || "idle"}">${esc(s.status || "idle")}</span>`;
+  h += `<span class="sp-status-label ${state}" title="${state === "asleep" ? "Shell starts when you open this tab" : ""}">${esc(state)}</span>`;
   if (a.estimatedCost > 0) h += `<span class="sp-cost">${fmtCost(a.estimatedCost)}</span>`;
   if (a.turnCount > 0) h += `<span class="sp-turns" title="AI turns">${a.turnCount}T</span>`;
   if (uptime) h += `<span class="sp-uptime">${uptime}</span>`;

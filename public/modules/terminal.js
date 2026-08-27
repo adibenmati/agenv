@@ -542,13 +542,19 @@ function connectWs(entry) {
     } catch {}
   };
 
+  // Close codes there is no point retrying: unauthorized, blocked by the ngrok
+  // allowlist, or the session no longer exists. Retrying 4404 in particular
+  // spun a reconnect loop forever, once per pane, after a session was closed.
+  const FATAL_CLOSE_CODES = new Set([4401, 4403, 4404, 4500]);
+
   ws.onclose = (ev) => {
     if (entry.dead) return;
-    if (ev.code === 4401) {
-      if (_onPaneDisconnect) _onPaneDisconnect(paneId);
+    if (_onPaneDisconnect) _onPaneDisconnect(paneId);
+    if (FATAL_CLOSE_CODES.has(ev.code)) {
+      entry.dead = true;
+      if (ev.code === 4404 && _onPaneExit) _onPaneExit(paneId, -1);
       return;
     }
-    if (_onPaneDisconnect) _onPaneDisconnect(paneId);
     // Auto-reconnect
     setTimeout(() => {
       if (!entry.dead && paneTerminals.has(paneId)) connectWs(entry);

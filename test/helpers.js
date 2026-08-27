@@ -4,6 +4,9 @@
 const { spawn } = require("child_process");
 const net = require("net");
 const http = require("http");
+const os = require("os");
+const fs = require("fs");
+const path = require("path");
 
 const TOKEN = "test-token-" + Date.now();
 
@@ -33,54 +36,92 @@ function waitForServer(port, timeout = 10000) {
   });
 }
 
+/**
+ * Give the server its own HOME so tests never touch the developer's real
+ * ~/.agenv-state.enc, ~/.agenv-scrollback/, ~/.agenv-history.enc, etc.
+ */
+function makeTempHome() {
+  return fs.mkdtempSync(path.join(os.tmpdir(), "agenv-test-home-"));
+}
+
 let _serverProc = null;
 let _port = null;
 
-async function startServer() {
-  _port = await findFreePort();
-  _serverProc = spawn(process.execPath, [
-    require("path").join(__dirname, "..", "server.js"),
-    "--port", String(_port),
+/**
+ * Start a server instance.
+ *
+ * opts.home  — reuse an existing temp HOME (for restart/restore tests)
+ * opts.args  — extra CLI args
+ * opts.env   — extra environment variables
+ */
+async function startServer(opts = {}) {
+  const port = await findFreePort();
+  const home = opts.home || makeTempHome();
+
+  const proc = spawn(process.execPath, [
+    path.join(__dirname, "..", "server.js"),
+    "--port", String(port),
     "--host", "127.0.0.1",
     "--token", TOKEN,
     "--no-qr",
+    ...(opts.args || []),
   ], {
     stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env, NODE_ENV: "test" },
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+      HOME: home,
+      USERPROFILE: home,
+      ...(opts.env || {}),
+    },
     windowsHide: true,
   });
 
-  // Collect output for debugging
-  let output = "";
-  _serverProc.stdout.on("data", (d) => { output += d.toString(); });
-  _serverProc.stderr.on("data", (d) => { output += d.toString(); });
-  _serverProc.on("error", (err) => {
-    console.error("Server process error:", err.message);
-  });
+  let stdout = "";
+  let stderr = "";
+  proc.stdout.on("data", (d) => { stdout += d.toString(); });
+  proc.stderr.on("data", (d) => { stderr += d.toString(); });
+  proc.on("error", (err) => { console.error("Server process error:", err.message); });
 
-  await waitForServer(_port);
-  return { port: _port, token: TOKEN, baseUrl: `http://127.0.0.1:${_port}` };
+  await waitForServer(port);
+
+  const handle = {
+    port, home, token: TOKEN, proc,
+    baseUrl: `http://127.0.0.1:${port}`,
+    wsUrl: `ws://127.0.0.1:${port}/ws`,
+    getStdout: () => stdout,
+    getStderr: () => stderr,
+    stop: () => stopProcess(proc),
+  };
+
+  // Module-level singleton so the bare get/post/put/del helpers keep working.
+  _serverProc = proc;
+  _port = port;
+  return handle;
+}
+
+function stopProcess(proc) {
+  return new Promise((resolve) => {
+    if (!proc || proc.exitCode != null) return resolve();
+    const timer = setTimeout(() => { try { proc.kill("SIGKILL"); } catch {} }, 3000);
+    proc.on("exit", () => { clearTimeout(timer); resolve(); });
+    try { proc.kill("SIGTERM"); } catch { clearTimeout(timer); resolve(); }
+  });
 }
 
 function stopServer() {
-  if (_serverProc) {
-    _serverProc.kill("SIGTERM");
-    // Force kill after 3 seconds
-    const timer = setTimeout(() => {
-      try { _serverProc.kill("SIGKILL"); } catch {}
-    }, 3000);
-    _serverProc.on("exit", () => clearTimeout(timer));
-    _serverProc = null;
-  }
+  const proc = _serverProc;
+  _serverProc = null;
+  return stopProcess(proc);
 }
 
 /**
  * Simple HTTP request helper (no external deps).
  * Returns { status, headers, body (parsed JSON or string) }
  */
-function request(method, path, { body, headers: extraHeaders } = {}) {
+function request(method, reqPath, { body, headers: extraHeaders, port } = {}) {
   return new Promise((resolve, reject) => {
-    const url = new URL(path, `http://127.0.0.1:${_port}`);
+    const url = new URL(reqPath, `http://127.0.0.1:${port || _port}`);
     // Append token for auth
     if (!url.searchParams.has("token")) {
       url.searchParams.set("token", TOKEN);
@@ -119,9 +160,39 @@ function request(method, path, { body, headers: extraHeaders } = {}) {
 }
 
 // Shorthand methods
-const get = (path) => request("GET", path);
-const post = (path, body) => request("POST", path, { body });
-const put = (path, body) => request("PUT", path, { body });
-const del = (path) => request("DELETE", path);
+const get = (p, o) => request("GET", p, o);
+const post = (p, body, o) => request("POST", p, { ...o, body });
+const put = (p, body, o) => request("PUT", p, { ...o, body });
+const del = (p, o) => request("DELETE", p, o);
 
-module.exports = { startServer, stopServer, request, get, post, put, del, TOKEN };
+/** Poll `fn` until it returns truthy, or throw after `timeout` ms. */
+async function waitFor(fn, { timeout = 10000, interval = 100, message = "condition" } = {}) {
+  const start = Date.now();
+  for (;;) {
+    const v = await fn();
+    if (v) return v;
+    if (Date.now() - start > timeout) throw new Error(`Timed out waiting for ${message}`);
+    await new Promise((r) => setTimeout(r, interval));
+  }
+}
+
+/**
+ * Load the pure helpers out of server.js without booting it, by evaluating the
+ * slice of source between two markers. Keeps server.js a single runnable file.
+ */
+function loadInternals(startMarker, endMarker, exportNames) {
+  const src = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  const from = src.indexOf(startMarker);
+  const to = src.indexOf(endMarker, from);
+  if (from < 0 || to < 0) throw new Error(`markers not found: ${startMarker} .. ${endMarker}`);
+  const mod = { exports: {} };
+  const body = src.slice(from, to) + `\nmodule.exports={${exportNames.join(",")}};`;
+  new Function("module", "exports", "require", "Buffer", body)(mod, mod.exports, require, Buffer);
+  return mod.exports;
+}
+
+module.exports = {
+  startServer, stopServer, stopProcess, makeTempHome,
+  request, get, post, put, del,
+  waitFor, loadInternals, TOKEN,
+};

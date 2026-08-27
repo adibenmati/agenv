@@ -13,7 +13,7 @@
     "restart": "node scripts/manage.js stop && node server.js",
     "destroy": "node scripts/manage.js destroy",
     "status": "node scripts/manage.js status",
-    "test": "node --test test/api.test.js",
+    "test": "node --test test/api.test.js test/session.test.js",
     "watch": "nodemon --watch server.js --watch public/ --ext js,html,css --delay 500ms -- server.js",
     "electron": "electron .",
     "electron:dev": "nodemon --watch electron.js --watch server.js --watch public/ --ext js,html,css --delay 500ms --exec \"electron .\"",
