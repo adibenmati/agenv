@@ -1,6 +1,6 @@
 {
   "name": "@adibenmatdev/agenv",
-  "version": "1.1.4",
+  "version": "1.3.0",
   "description": "The agent development environment — build, run, and monitor AI agents from a full web IDE with split terminals, file editing, and session management",
   "main": "electron.js",
   "bin": {
@@ -13,7 +13,7 @@
     "restart": "node scripts/manage.js stop && node server.js",
     "destroy": "node scripts/manage.js destroy",
     "status": "node scripts/manage.js status",
-    "test": "node --test test/api.test.js test/session.test.js",
+    "test": "node --test test/api.test.js test/session.test.js test/cli.test.js",
     "watch": "nodemon --watch server.js --watch public/ --ext js,html,css --delay 500ms -- server.js",
     "electron": "electron .",
     "electron:dev": "nodemon --watch electron.js --watch server.js --watch public/ --ext js,html,css --delay 500ms --exec \"electron .\"",
@@ -40,7 +40,10 @@
       "node_modules/**/*"
     ],
     "win": {
-      "target": ["nsis", "portable"],
+      "target": [
+        "nsis",
+        "portable"
+      ],
       "icon": "assets/icon.svg"
     },
     "nsis": {
@@ -52,12 +55,17 @@
       "createStartMenuShortcut": true
     },
     "mac": {
-      "target": ["dmg"],
+      "target": [
+        "dmg"
+      ],
       "icon": "assets/icon.svg",
       "category": "public.app-category.developer-tools"
     },
     "linux": {
-      "target": ["AppImage", "deb"],
+      "target": [
+        "AppImage",
+        "deb"
+      ],
       "icon": "assets/icon.svg",
       "category": "Development"
     }
