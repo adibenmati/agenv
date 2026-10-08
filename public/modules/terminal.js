@@ -266,11 +266,30 @@ export function createTerminal(paneId, sessionId, mountEl) {
   // Load history on first terminal creation
   loadHistory();
 
+  const entry = {
+    paneId, sessionId, term: null, fitAddon: null, ws: null,
+    mountEl, dead: false, detached: false, reconnectDelay: 500, inputBuffer: "",
+    ghostEl: null, currentGhost: "", suppressResize: false, hibernateTimer: null,
+  };
+  paneTerminals.set(paneId, entry);
+  openTerm(entry, mountEl);
+
+  // Connect WebSocket
+  connectWs(entry);
+  return entry;
+}
+
+/** Build the xterm instance for an entry — on creation, and again when a hibernated pane wakes. */
+function openTerm(entry, mountEl) {
+  const paneId = entry.paneId;
   const term = new Terminal(TERM_OPTIONS);
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
   term.loadAddon(new WebLinksAddon.WebLinksAddon());
   term.open(mountEl);
+  entry.term = term;
+  entry.fitAddon = fit;
+  entry.mountEl = mountEl;
 
   // Clipboard keyboard shortcuts
   term.attachCustomKeyEventHandler((e) => {
@@ -325,7 +344,9 @@ export function createTerminal(paneId, sessionId, mountEl) {
   // Paste capture handler — intercepts paste events BEFORE xterm processes them.
   // For text-only clipboard: chunked paste with progress.
   // For images/files: let event propagate to document handler for upload.
-  mountEl.addEventListener("paste", (e) => {
+  // Bound to the xterm element, which moves with the terminal on tab switches
+  // (the original mount is thrown away on the first switch).
+  term.element.addEventListener("paste", (e) => {
     const items = e.clipboardData?.items;
     if (!items) return;
 
@@ -357,16 +378,8 @@ export function createTerminal(paneId, sessionId, mountEl) {
   ghostEl.className = "term-ghost";
   mountEl.style.position = "relative";
   mountEl.appendChild(ghostEl);
-
-  const entry = {
-    paneId, sessionId, term, fitAddon: fit, ws: null,
-    mountEl, dead: false, detached: false, reconnectDelay: 500, inputBuffer: "",
-    ghostEl, currentGhost: "", suppressResize: false,
-  };
-  paneTerminals.set(paneId, entry);
-
-  // Connect WebSocket
-  connectWs(entry);
+  entry.ghostEl = ghostEl;
+  entry.currentGhost = "";
 
   // Fit after DOM settles
   requestAnimationFrame(() => {
@@ -424,8 +437,6 @@ export function createTerminal(paneId, sessionId, mountEl) {
       entry.ws.send(JSON.stringify({ type: "resize", cols, rows }));
     }
   });
-
-  return entry;
 }
 
 function showGhost(entry) {
@@ -522,15 +533,16 @@ function connectWs(entry) {
           // Scrollback replayed on (re)connect. The terminal may already hold
           // it from before the drop — start clean rather than duplicate it, and
           // don't feed old output to notification detection.
+          if (!entry.term) return; // hibernated — it gets the replay again on wake
           if (entry.hasConnected) entry.term.reset();
           entry.hasConnected = true;
           entry.term.write(m.data);
           return;
         }
         entry.hasConnected = true;
-        entry.term.write(m.data);
+        if (entry.term) entry.term.write(m.data);
         if (_onPaneOutput) _onPaneOutput(paneId, m.data);
-      } else if (m.type === "resize" && m.cols && m.rows) {
+      } else if (m.type === "resize" && m.cols && m.rows && entry.term) {
         // Server tells us the current PTY size — resize terminal to match
         // This arrives before scrollback, ensuring scrollback renders at correct dimensions
         const cols = Math.max(2, Math.min(m.cols, 500));
@@ -541,7 +553,7 @@ function connectWs(entry) {
           entry.suppressResize = false;
         }
       } else if (m.type === "exit") {
-        entry.term.write("\r\n[exited " + m.code + "]\r\n");
+        if (entry.term) entry.term.write("\r\n[exited " + m.code + "]\r\n");
         entry.dead = true;
         if (_onPaneExit) _onPaneExit(paneId, m.code);
       } else if (m.type === "cwd" && m.cwd) {
@@ -569,7 +581,8 @@ function connectWs(entry) {
     }
     // Auto-reconnect
     setTimeout(() => {
-      if (!entry.dead && paneTerminals.has(paneId)) connectWs(entry);
+      // entry.ws !== ws: a wake already opened a fresh socket
+      if (!entry.dead && entry.ws === ws && paneTerminals.has(paneId)) connectWs(entry);
     }, entry.reconnectDelay);
     entry.reconnectDelay = Math.min(entry.reconnectDelay * 1.5, 5000);
   };
@@ -581,14 +594,15 @@ export function destroyTerminal(paneId) {
   const entry = paneTerminals.get(paneId);
   if (!entry) return;
   entry.dead = true;
+  clearTimeout(entry.hibernateTimer);
   if (entry.ws) { try { entry.ws.close(); } catch {} }
-  try { entry.term.dispose(); } catch {}
+  try { if (entry.term) entry.term.dispose(); } catch {}
   paneTerminals.delete(paneId);
 }
 
 export function focusTerminal(paneId) {
   const entry = paneTerminals.get(paneId);
-  if (!entry) return;
+  if (!entry || !entry.term) return;
   // Save scroll position — term.focus() scrolls viewport to the cursor
   const viewport = entry.term.element?.querySelector(".xterm-viewport");
   const scrollTop = viewport ? viewport.scrollTop : null;
@@ -642,6 +656,9 @@ export function detachTerminal(paneId, holderEl) {
   const entry = paneTerminals.get(paneId);
   if (!entry) return;
   entry.detached = true;
+  if (!entry.term) return; // already hibernated
+  clearTimeout(entry.hibernateTimer);
+  entry.hibernateTimer = setTimeout(() => hibernateTerminal(entry), HIBERNATE_AFTER_MS);
   // Save scroll position before detaching
   const viewport = entry.mountEl.querySelector(".xterm-viewport");
   entry.savedScrollTop = viewport ? viewport.scrollTop : null;
@@ -666,6 +683,9 @@ export function detachTerminal(paneId, holderEl) {
 export function reattachTerminal(paneId, mountEl) {
   const entry = paneTerminals.get(paneId);
   if (!entry) return;
+  clearTimeout(entry.hibernateTimer);
+  entry.hibernateTimer = null;
+  if (!entry.term) { wakeTerminal(entry, mountEl); return; }
   entry.mountEl = mountEl;
   entry.detached = false;
   if (entry.detachedEl) {
@@ -697,6 +717,46 @@ export function reattachTerminal(paneId, mountEl) {
       });
     }
   });
+}
+
+// ---------------------------------------------------------------------------
+// Hibernation
+//
+// A hidden tab kept its xterm buffer (up to 10k lines per pane) for as long as
+// it existed, so memory grew with every tab ever opened. After a while hidden,
+// the xterm instance is disposed but the socket stays open — status, exit and
+// notification detection keep working. Waking rebuilds the terminal and
+// reconnects, and the server replays the session's scrollback.
+// ---------------------------------------------------------------------------
+const HIBERNATE_AFTER_MS = (() => {
+  try { return Number(localStorage.getItem("agenv.hibernateMs")) || 10 * 60 * 1000; } catch { return 10 * 60 * 1000; }
+})();
+
+function hibernateTerminal(entry) {
+  entry.hibernateTimer = null;
+  if (!entry.detached || entry.dead || !entry.term) return;
+  try { entry.term.dispose(); } catch {}
+  if (entry.detachedEl) { entry.detachedEl.remove(); entry.detachedEl = null; }
+  if (entry.ghostEl) { entry.ghostEl.remove(); entry.ghostEl = null; }
+  entry.term = null;
+  entry.fitAddon = null;
+  entry.savedScrollTop = null;
+}
+
+function wakeTerminal(entry, mountEl) {
+  entry.detached = false;
+  openTerm(entry, mountEl);
+  if (entry.dead) { entry.term.write("\r\n[exited]\r\n"); return; } // session ended while hibernated
+  // A fresh socket is what triggers the scrollback replay.
+  const old = entry.ws;
+  if (old) {
+    old.onclose = null;
+    old.onmessage = null;
+    try { old.close(); } catch {}
+  }
+  entry.hasConnected = false;
+  entry.reconnectDelay = 500;
+  connectWs(entry);
 }
 
 export function isConnected(paneId) {
