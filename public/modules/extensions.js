@@ -214,6 +214,7 @@ function renderCostPanel() {
 }
 
 async function refreshCostData() {
+  if (document.hidden) return;
   const body = document.getElementById("cost-body");
   if (!body) return;
 

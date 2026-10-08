@@ -153,7 +153,9 @@ async function sendPaste(entry, text) {
       sent += chunk.length;
       if (progress) progress.update(sent / text.length);
       if (isLarge && sent < text.length) {
-        await new Promise(r => setTimeout(r, 5));
+        // ≤100 msgs/s — the server closes sockets that exceed 200/s, which
+        // would cut the paste off mid-way and force a reconnect.
+        await new Promise(r => setTimeout(r, 10));
       }
     }
 
@@ -516,6 +518,16 @@ function connectWs(entry) {
     try {
       const m = JSON.parse(ev.data);
       if (m.type === "output" && m.data) {
+        if (m.replay) {
+          // Scrollback replayed on (re)connect. The terminal may already hold
+          // it from before the drop — start clean rather than duplicate it, and
+          // don't feed old output to notification detection.
+          if (entry.hasConnected) entry.term.reset();
+          entry.hasConnected = true;
+          entry.term.write(m.data);
+          return;
+        }
+        entry.hasConnected = true;
         entry.term.write(m.data);
         if (_onPaneOutput) _onPaneOutput(paneId, m.data);
       } else if (m.type === "resize" && m.cols && m.rows) {

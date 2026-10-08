@@ -2033,16 +2033,116 @@ function extractTokens(usage) {
   return { input, output, cacheCreate, cacheRead };
 }
 
-const _usageCache = new Map(); // key → { data, ts }
-app.get("/api/claude-usage", apiAuth, (req, res) => {
-  const providerOverride = req.query.provider || ""; // "anthropic", "bedrock", "vertex", or "" (auto)
-  const cacheKey = (req.query.from || "") + "|" + (req.query.to || "") + "|" + providerOverride;
-  const cached = _usageCache.get(cacheKey);
-  if (cached && Date.now() - cached.ts < 30000) return res.json(cached.data);
+// ---- Claude transcript scanning (shared by usage + session index) ----
+// ~/.claude/projects easily holds hundreds of MB of JSONL. It used to be read
+// whole — synchronously, for the usage API — on every refresh, which froze
+// every terminal for seconds at a time and spiked memory by hundreds of MB.
+// Everything below streams the files in chunks and caches per file by
+// size+mtime, so a refresh only touches the transcripts that actually changed.
+const CLAUDE_HOME = path.join(os.homedir(), ".claude");
+const CLAUDE_PROJECTS_DIR = path.join(CLAUDE_HOME, "projects");
 
-  const claudeDir = path.join(os.homedir(), ".claude", "projects");
-  const fromDate = req.query.from ? new Date(req.query.from) : null;
-  const toDate = req.query.to ? new Date(req.query.to) : null;
+function parseJsonLine(line, onEntry) {
+  if (!line.trim()) return false;
+  let e; try { e = JSON.parse(line); } catch { return false; }
+  onEntry(e);
+  return true;
+}
+
+/** Stream JSON lines from byte `start`. Resolves to the offset just past the last line consumed. */
+async function scanJsonl(filePath, start, onEntry) {
+  let offset = start, carry = null;
+  const stream = fs.createReadStream(filePath, { start, highWaterMark: 1 << 20 });
+  for await (let chunk of stream) {
+    if (carry) { chunk = Buffer.concat([carry, chunk]); carry = null; }
+    let pos = 0, nl;
+    while ((nl = chunk.indexOf(0x0A, pos)) !== -1) {
+      parseJsonLine(chunk.toString("utf8", pos, nl), onEntry);
+      pos = nl + 1;
+    }
+    offset += pos;
+    if (pos < chunk.length) carry = chunk.subarray(pos);
+  }
+  // An unterminated last line is either complete or still being written —
+  // only consume it if it parses.
+  if (carry && parseJsonLine(carry.toString("utf8"), onEntry)) offset += carry.length;
+  return offset;
+}
+
+async function listClaudeTranscripts() {
+  const out = [];
+  async function walk(dir, depth) {
+    if (depth > 5) return;
+    let entries; try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) await walk(full, depth + 1);
+      else if (e.name.endsWith(".jsonl")) out.push(full);
+    }
+  }
+  await walk(CLAUDE_PROJECTS_DIR, 0);
+  return out;
+}
+
+// path → { size, mtimeMs, offset, usage: [{ t, model, provider, tokens }], stamps: [t] }
+// `stamps` are timestamps of entries without usage; they only feed firstSeen/lastSeen.
+const _usageFiles = new Map();
+const USAGE_REFRESH_MS = Math.max(0, parseInt(process.env.AGENV_USAGE_REFRESH_MS || "10000", 10));
+let _usageRefresh = null;
+let _usageRefreshedAt = 0;
+
+function noteUsageEntry(rec, entry) {
+  const ts = entry.timestamp || entry.created_at || entry.ts;
+  const t = ts ? new Date(ts).getTime() : null;
+  // Extract usage data — could be at top level or nested in response/message
+  const usage = entry.usage || entry.response?.usage || entry.message?.usage;
+  if (!usage) { if (t != null) rec.stamps.push(t); return; }
+  const msgId = entry.message?.id || entry.response?.id || entry.id || "";
+  rec.usage.push({
+    t,
+    model: entry.model || entry.response?.model || entry.message?.model || null,
+    provider: msgId ? detectProvider(msgId) : null,
+    tokens: extractTokens(usage),
+  });
+}
+
+/** Bring the per-file usage cache up to date. Concurrent callers share one pass. */
+function refreshUsageCache() {
+  if (_usageRefresh) return _usageRefresh;
+  if (Date.now() - _usageRefreshedAt < USAGE_REFRESH_MS) return Promise.resolve();
+  _usageRefresh = (async () => {
+    const files = await listClaudeTranscripts();
+    const present = new Set(files);
+    for (const p of _usageFiles.keys()) if (!present.has(p)) _usageFiles.delete(p);
+    for (const filePath of files) {
+      let st; try { st = await fs.promises.stat(filePath); } catch { continue; }
+      let rec = _usageFiles.get(filePath);
+      if (rec && rec.size === st.size && rec.mtimeMs === st.mtimeMs) continue;
+      // Transcripts are append-only, so a grown file only needs its new tail.
+      // A file that shrank was rewritten — start over.
+      if (!rec || st.size < rec.offset) {
+        rec = { size: 0, mtimeMs: 0, offset: 0, usage: [], stamps: [] };
+        _usageFiles.set(filePath, rec);
+      }
+      try {
+        rec.offset = await scanJsonl(filePath, rec.offset, (e) => noteUsageEntry(rec, e));
+        rec.size = st.size; rec.mtimeMs = st.mtimeMs;
+      } catch {
+        _usageFiles.delete(filePath); // partial read — re-read from scratch next time
+      }
+    }
+  })().finally(() => { _usageRefresh = null; _usageRefreshedAt = Date.now(); });
+  return _usageRefresh;
+}
+
+app.get("/api/claude-usage", apiAuth, async (req, res) => {
+  try { await refreshUsageCache(); } catch {}
+
+  const providerOverride = req.query.provider || ""; // "anthropic", "bedrock", "vertex", or "" (auto)
+  const from = req.query.from ? new Date(req.query.from).getTime() : null;
+  const to = req.query.to ? new Date(req.query.to).getTime() : null;
+  // Entries without a timestamp are never filtered out.
+  const inRange = (t) => t == null || ((from == null || !(t < from)) && (to == null || !(t >= to)));
 
   const result = {
     models: {},
@@ -2053,133 +2153,73 @@ app.get("/api/claude-usage", apiAuth, (req, res) => {
     firstSeen: null,
     lastSeen: null,
   };
+  let firstSeen = Infinity, lastSeen = -Infinity;
+  const seen = (t) => {
+    if (t == null || Number.isNaN(t)) return;
+    if (t < firstSeen) firstSeen = t;
+    if (t > lastSeen) lastSeen = t;
+  };
 
   try {
-    if (!fs.existsSync(claudeDir)) {
-      return res.json(result);
-    }
+    for (const [filePath, rec] of _usageFiles) {
+      for (const t of rec.stamps) if (inRange(t)) seen(t);
 
-    // Recursively find all .jsonl files
-    const jsonlFiles = [];
-    function findJsonl(dir, depth) {
-      if (depth > 5) return;
-      try {
-        const entries = fs.readdirSync(dir, { withFileTypes: true });
-        for (const e of entries) {
-          const full = path.join(dir, e.name);
-          if (e.isDirectory()) {
-            findJsonl(full, depth + 1);
-          } else if (e.name.endsWith(".jsonl")) {
-            jsonlFiles.push(full);
-          }
-        }
-      } catch {}
-    }
-    findJsonl(claudeDir, 0);
+      const sessionInfo = { file: path.basename(filePath), messages: 0, cost: 0 };
+      for (const u of rec.usage) {
+        if (!inRange(u.t)) continue;
+        seen(u.t);
+        if (u.provider) result.providers[u.provider] = (result.providers[u.provider] || 0) + 1;
 
-    // Parse each JSONL file
-    for (const filePath of jsonlFiles) {
-      try {
-        const content = fs.readFileSync(filePath, "utf8");
-        const lines = content.split("\n").filter(l => l.trim());
-        let sessionInfo = { file: path.basename(filePath), messages: 0, cost: 0 };
+        const tokens = u.tokens;
+        // Use override provider if set, otherwise auto-detected, otherwise anthropic
+        const pricing = getModelPricing(u.model, providerOverride || u.provider || "anthropic");
+        const cost =
+          (tokens.input * pricing.input / 1000000) +
+          (tokens.output * pricing.output / 1000000) +
+          (tokens.cacheCreate * pricing.cache_create / 1000000) +
+          (tokens.cacheRead * pricing.cache_read / 1000000);
 
-        for (const line of lines) {
-          try {
-            const entry = JSON.parse(line);
+        // Aggregate per model
+        const modelKey = u.model || "unknown";
+        const m = result.models[modelKey] || (result.models[modelKey] = { input: 0, output: 0, cacheCreate: 0, cacheRead: 0, cost: 0, messages: 0 });
+        m.input += tokens.input;
+        m.output += tokens.output;
+        m.cacheCreate += tokens.cacheCreate;
+        m.cacheRead += tokens.cacheRead;
+        m.cost += cost;
+        m.messages += 1;
 
-            // Track timestamps
-            const ts = entry.timestamp || entry.created_at || entry.ts;
-            let entryDate = null;
-            if (ts) {
-              entryDate = new Date(ts);
-              // Apply date filter
-              if (fromDate && entryDate < fromDate) continue;
-              if (toDate && entryDate >= toDate) continue;
-              if (!result.firstSeen || entryDate < result.firstSeen) result.firstSeen = entryDate;
-              if (!result.lastSeen || entryDate > result.lastSeen) result.lastSeen = entryDate;
-            }
+        // Aggregate totals
+        result.totals.input += tokens.input;
+        result.totals.output += tokens.output;
+        result.totals.cacheCreate += tokens.cacheCreate;
+        result.totals.cacheRead += tokens.cacheRead;
+        result.totals.cost += cost;
+        result.totals.messages += 1;
 
-            // Extract usage data — could be at top level or nested in response/message
-            let usage = entry.usage || entry.response?.usage || entry.message?.usage;
-            let model = entry.model || entry.response?.model || entry.message?.model;
-
-            // Auto-detect provider from message ID
-            const msgId = entry.message?.id || entry.response?.id || entry.id || "";
-            let entryProvider = null;
-            if (msgId) {
-              entryProvider = detectProvider(msgId);
-              if (entryProvider && usage) {
-                result.providers[entryProvider] = (result.providers[entryProvider] || 0) + 1;
-              }
-            }
-
-            if (usage) {
-              const tokens = extractTokens(usage);
-              if (tokens) {
-                // Use override provider if set, otherwise auto-detected, otherwise anthropic
-                const pricingProvider = providerOverride || entryProvider || "anthropic";
-                const pricing = getModelPricing(model, pricingProvider);
-                const cost =
-                  (tokens.input * pricing.input / 1000000) +
-                  (tokens.output * pricing.output / 1000000) +
-                  (tokens.cacheCreate * pricing.cache_create / 1000000) +
-                  (tokens.cacheRead * pricing.cache_read / 1000000);
-
-                // Aggregate per model
-                const modelKey = model || "unknown";
-                if (!result.models[modelKey]) {
-                  result.models[modelKey] = { input: 0, output: 0, cacheCreate: 0, cacheRead: 0, cost: 0, messages: 0 };
-                }
-                result.models[modelKey].input += tokens.input;
-                result.models[modelKey].output += tokens.output;
-                result.models[modelKey].cacheCreate += tokens.cacheCreate;
-                result.models[modelKey].cacheRead += tokens.cacheRead;
-                result.models[modelKey].cost += cost;
-                result.models[modelKey].messages += 1;
-
-                // Aggregate totals
-                result.totals.input += tokens.input;
-                result.totals.output += tokens.output;
-                result.totals.cacheCreate += tokens.cacheCreate;
-                result.totals.cacheRead += tokens.cacheRead;
-                result.totals.cost += cost;
-                result.totals.messages += 1;
-
-                // Daily breakdown
-                if (entryDate) {
-                  const dayKey = entryDate.toISOString().slice(0, 10);
-                  if (!result.daily[dayKey]) {
-                    result.daily[dayKey] = { input: 0, output: 0, cost: 0, messages: 0 };
-                  }
-                  result.daily[dayKey].input += tokens.input;
-                  result.daily[dayKey].output += tokens.output;
-                  result.daily[dayKey].cost += cost;
-                  result.daily[dayKey].messages += 1;
-                }
-
-                sessionInfo.messages += 1;
-                sessionInfo.cost += cost;
-              }
-            }
-          } catch {} // skip malformed lines
+        // Daily breakdown
+        if (u.t != null && !Number.isNaN(u.t)) {
+          const dayKey = new Date(u.t).toISOString().slice(0, 10);
+          const d = result.daily[dayKey] || (result.daily[dayKey] = { input: 0, output: 0, cost: 0, messages: 0 });
+          d.input += tokens.input;
+          d.output += tokens.output;
+          d.cost += cost;
+          d.messages += 1;
         }
 
-        if (sessionInfo.messages > 0) {
-          result.sessions.push(sessionInfo);
-        }
-      } catch {} // skip unreadable files
+        sessionInfo.messages += 1;
+        sessionInfo.cost += cost;
+      }
+      if (sessionInfo.messages > 0) result.sessions.push(sessionInfo);
     }
 
     // Sort sessions by cost descending
     result.sessions.sort((a, b) => b.cost - a.cost);
     result.sessions = result.sessions.slice(0, 20);
 
-    // Convert dates to ISO strings
-    if (result.firstSeen) result.firstSeen = result.firstSeen.toISOString();
-    if (result.lastSeen) result.lastSeen = result.lastSeen.toISOString();
+    if (firstSeen !== Infinity) result.firstSeen = new Date(firstSeen).toISOString();
+    if (lastSeen !== -Infinity) result.lastSeen = new Date(lastSeen).toISOString();
 
-    _usageCache.set(cacheKey, { data: result, ts: Date.now() });
     res.json(result);
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -2389,8 +2429,6 @@ app.post("/api/ai/ask", apiAuth, express.json({ limit: "2mb" }), (req, res) => {
 });
 
 // ---- Claude Session Index (search & reuse past agent conversations) ----
-const CLAUDE_HOME = path.join(os.homedir(), ".claude");
-const CLAUDE_PROJECTS_DIR = path.join(CLAUDE_HOME, "projects");
 const CLAUDE_INDEX_PATH = path.join(CLAUDE_HOME, "agenv-session-index.json");
 
 let claudeIndex = null;
@@ -2419,10 +2457,6 @@ function extractKeywords(text, bag) {
 }
 
 async function indexConversationFile(filePath, fileId, projDir) {
-  const content = await fs.promises.readFile(filePath, "utf8");
-  const lines = content.trim().split("\n");
-  if (!lines.length) return null;
-
   let firstTs = null, lastTs = null, slug = null, model = null, branch = null;
   let cwd = null, entrypoint = null, sessionId = null;
   let msgCount = 0, userMsgCount = 0, freshInTok = 0, cacheWriteTok = 0, cacheReadTok = 0, outTok = 0;
@@ -2431,10 +2465,7 @@ async function indexConversationFile(filePath, fileId, projDir) {
   const cmds = new Set();
   const userMsgs = [];
 
-  for (const line of lines) {
-    if (!line.trim()) continue;
-    let e; try { e = JSON.parse(line); } catch { continue; }
-
+  await scanJsonl(filePath, 0, (e) => {
     if (e.timestamp) { if (!firstTs) firstTs = e.timestamp; lastTs = e.timestamp; }
     if (!slug && e.slug) slug = e.slug;
     if (!branch && e.gitBranch && e.gitBranch !== "HEAD") branch = e.gitBranch;
@@ -2477,7 +2508,7 @@ async function indexConversationFile(filePath, fileId, projDir) {
         }
       }
     }
-  }
+  });
 
   if (userMsgCount === 0) return null;
 
@@ -2518,22 +2549,24 @@ async function indexConversationFile(filePath, fileId, projDir) {
   };
 }
 
-async function buildClaudeIndex(force) {
-  if (!force && claudeIndex && Date.now() - claudeIndexBuiltAt < 60000) return claudeIndex;
+// path → { size, mtimeMs, session } — a transcript is only re-indexed when it changes.
+// Persisted to CLAUDE_INDEX_PATH so a restart doesn't re-read every transcript either.
+const CLAUDE_INDEX_VERSION = 2;
+let _indexFiles = null;
+let _indexBuild = null;
 
-  // Try disk cache
-  if (!force) {
-    try {
-      const cached = JSON.parse(await fs.promises.readFile(CLAUDE_INDEX_PATH, "utf8"));
-      if (cached.timestamp && Date.now() - cached.timestamp < 300000) {
-        claudeIndex = cached.sessions;
-        claudeIndexBuiltAt = cached.timestamp;
-        return claudeIndex;
-      }
-    } catch {}
-  }
+async function loadIndexFileCache() {
+  try {
+    const cached = JSON.parse(await fs.promises.readFile(CLAUDE_INDEX_PATH, "utf8"));
+    if (cached.version === CLAUDE_INDEX_VERSION && cached.files) return new Map(Object.entries(cached.files));
+  } catch {}
+  return new Map();
+}
 
-  const result = [];
+async function buildClaudeIndexNow() {
+  if (!_indexFiles) _indexFiles = await loadIndexFileCache();
+  const present = new Set();
+  let changed = false;
   try {
     const dirs = await fs.promises.readdir(CLAUDE_PROJECTS_DIR);
     for (const d of dirs) {
@@ -2542,20 +2575,41 @@ async function buildClaudeIndex(force) {
       if (!stat.isDirectory()) continue;
       let files; try { files = await fs.promises.readdir(dp); } catch { continue; }
       for (const f of files.filter(x => x.endsWith(".jsonl"))) {
-        try {
-          const s = await indexConversationFile(path.join(dp, f), f.replace(".jsonl", ""), d);
-          if (s && s.messageCount > 0) result.push(s);
-        } catch {}
+        const fp = path.join(dp, f);
+        let st; try { st = await fs.promises.stat(fp); } catch { continue; }
+        present.add(fp);
+        const hit = _indexFiles.get(fp);
+        if (hit && hit.size === st.size && hit.mtimeMs === st.mtimeMs) continue;
+        let s = null;
+        try { s = await indexConversationFile(fp, f.replace(".jsonl", ""), d); } catch {}
+        _indexFiles.set(fp, { size: st.size, mtimeMs: st.mtimeMs, session: s && s.messageCount > 0 ? s : null });
+        changed = true;
       }
     }
   } catch {}
+  for (const fp of _indexFiles.keys()) if (!present.has(fp)) { _indexFiles.delete(fp); changed = true; }
 
+  const result = [];
+  for (const { session } of _indexFiles.values()) if (session) result.push(session);
   result.sort((a, b) => new Date(b.lastMessage) - new Date(a.lastMessage));
   claudeIndex = result;
   claudeIndexBuiltAt = Date.now();
 
-  try { await fs.promises.writeFile(CLAUDE_INDEX_PATH, JSON.stringify({ timestamp: Date.now(), sessions: result })); } catch {}
+  if (changed) {
+    try {
+      await fs.promises.writeFile(CLAUDE_INDEX_PATH, JSON.stringify({
+        version: CLAUDE_INDEX_VERSION, timestamp: Date.now(), files: Object.fromEntries(_indexFiles),
+      }));
+    } catch {}
+  }
   return result;
+}
+
+/** Concurrent callers (search, list, reindex) share one in-flight build. */
+function buildClaudeIndex(force) {
+  if (!force && claudeIndex && Date.now() - claudeIndexBuiltAt < 60000) return Promise.resolve(claudeIndex);
+  if (!_indexBuild) _indexBuild = buildClaudeIndexNow().finally(() => { _indexBuild = null; });
+  return _indexBuild;
 }
 
 app.get("/api/claude/sessions", apiAuth, async (_req, res) => {
@@ -2615,13 +2669,32 @@ app.post("/api/claude/reindex", apiAuth, async (_req, res) => {
 });
 
 // ---- CLAUDE.md Manager ----
+// Reads just the first line — transcripts run to tens of MB and this is called
+// once per project on the request path.
+function readFirstLine(filePath) {
+  const fd = fs.openSync(filePath, "r");
+  try {
+    const chunks = [];
+    const buf = Buffer.alloc(64 * 1024);
+    for (let total = 0; total < 8 * 1024 * 1024;) {
+      const n = fs.readSync(fd, buf, 0, buf.length, total);
+      if (n === 0) break;
+      const nl = buf.indexOf(0x0A);
+      if (nl !== -1 && nl < n) { chunks.push(Buffer.from(buf.subarray(0, nl))); break; }
+      chunks.push(Buffer.from(buf.subarray(0, n)));
+      total += n;
+    }
+    return Buffer.concat(chunks).toString("utf8");
+  } finally { fs.closeSync(fd); }
+}
+
 // Resolve real project path from encoded dir name by reading the first JSONL entry's cwd
 function resolveProjectPath(projDir) {
   try {
     const dp = path.join(CLAUDE_PROJECTS_DIR, projDir);
     const files = fs.readdirSync(dp).filter(f => f.endsWith(".jsonl"));
     for (const f of files) {
-      const first = fs.readFileSync(path.join(dp, f), "utf8").split("\n")[0];
+      const first = readFirstLine(path.join(dp, f));
       const e = JSON.parse(first);
       if (e.cwd) return e.cwd.replace(/\//g, path.sep);
     }
@@ -2992,7 +3065,9 @@ wss.on("connection", (ws, req) => {
 
   sendToClient(session, ws, JSON.stringify({ type: "resize", cols: session.pty.cols, rows: session.pty.rows }));
   const backlog = getScrollback(session);
-  if (backlog.length > 0) sendToClient(session, ws, JSON.stringify({ type: "output", data: backlog.toString("utf8") }));
+  // `replay` lets a reconnecting client clear its screen first instead of
+  // appending the whole backlog on top of what it already shows.
+  if (backlog.length > 0) sendToClient(session, ws, JSON.stringify({ type: "output", data: backlog.toString("utf8"), replay: true }));
 
   ws.on("message", (raw) => {
     if (!rl()) { ws.close(4429, "Too Many Requests"); return; }
