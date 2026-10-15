@@ -175,9 +175,12 @@ function loadState() {
 }
 
 let _workspaceLayout = null; // saved by client via API
+// Group folders that exist independently of sessions (empty folders, colors).
+// [{ path: "project1/marketing/seo", color }]
+let _sessionGroups = [];
 
 function saveStateNow() {
-  const state = { sessions: [], workspaceLayout: _workspaceLayout || null };
+  const state = { sessions: [], workspaceLayout: _workspaceLayout || null, sessionGroups: _sessionGroups };
   for (const [id, session] of sessions) {
     state.sessions.push({
       id, name: session.name || "", cwd: session.cwd,
@@ -185,6 +188,7 @@ function saveStateNow() {
       lastCommand: session.lastCommand || "",
       launchCommand: session.launchCommand || "",
       userNamed: session.userNamed || false,
+      group: session.group || "", note: session.note || "",
       created: session.created || Date.now(),
       lastActivity: session.lastActivity || Date.now(),
     });
@@ -956,6 +960,7 @@ function broadcastEvent(event) {
 // Spawn sessions — restore previous state OR create from run command
 const savedState = loadState();
 if (savedState && savedState.workspaceLayout) _workspaceLayout = savedState.workspaceLayout;
+if (savedState && Array.isArray(savedState.sessionGroups)) _sessionGroups = savedState.sessionGroups;
 if (RUN_COMMAND) {
   // "agenv run <cmd>" — start fresh with a single session running the command
   const runName = RUN_NAME || RUN_COMMAND.split(/\s+/)[0];
@@ -995,6 +1000,7 @@ if (RUN_COMMAND) {
       cwd: s.cwd && fs.existsSync(s.cwd) ? s.cwd : process.cwd(),
       name: s.name || "", tool: s.tool || "terminal", lastCommand: s.lastCommand || "",
       launchCommand: s.launchCommand || "", userNamed: s.userNamed || false,
+      group: s.group || "", note: s.note || "",
       created: s.created, lastActivity: s.lastActivity, restoreScrollback: true,
     });
   }
@@ -1146,7 +1152,7 @@ function apiAuth(req, res, next) {
     const method = req.method.toUpperCase();
     const writePaths = ["/api/sessions", "/api/git/stage", "/api/git/commit", "/api/git/push",
       "/api/git/checkout", "/api/git/unstage", "/api/git/discard", "/api/git/stash",
-      "/api/git/stash-pop", "/api/git/worktree-add",
+      "/api/git/stash-pop", "/api/git/worktree-add", "/api/session-groups",
       "/api/file", "/api/upload", "/api/clip", "/api/shutdown", "/api/quick-launch"];
     if ((method === "POST" || method === "PUT" || method === "DELETE") &&
         writePaths.some(p => req.path.startsWith(p))) {
@@ -1177,7 +1183,7 @@ app.post("/api/sessions", apiAuth, (req, res) => {
   if (sessions.size >= MAX_SESSIONS) return res.status(400).json({ error: "Maximum sessions reached (" + MAX_SESSIONS + ")" });
   const id = nextSessionId++;
   const b = req.body || {};
-  spawnSession(id, { cwd: b.cwd, name: b.name || "", group: b.group || "", runCommand: b.command || null, restoreScrollback: false });
+  spawnSession(id, { cwd: b.cwd, name: b.name || "", group: normalizeGroupPath(b.group), runCommand: b.command || null, restoreScrollback: false });
   saveStateNow();
   const s = sessions.get(id);
   console.log(`[agenv] Session ${id} created from browser in ${s.cwd} (${sessions.size} total)`);
@@ -1191,9 +1197,82 @@ app.put("/api/sessions/:id", apiAuth, (req, res) => {
   if (req.body.name != null) { session.name = String(req.body.name).slice(0, 64); session.userNamed = true; }
   if (req.body.tool) { session.detectedTool = String(req.body.tool); session.lastCommand = req.body.lastCommand || session.lastCommand; }
   if (req.body.note != null) session.note = String(req.body.note).slice(0, 2000);
-  if (req.body.group != null) session.group = String(req.body.group).slice(0, 64);
+  if (req.body.group != null) session.group = normalizeGroupPath(req.body.group);
   saveState();
   res.json({ ok: true });
+});
+
+// ---- Session group folders ----
+// A group is a "/"-separated path, so "project1/marketing/seo" nests three
+// folders deep. Sessions carry their own path; _sessionGroups adds folders
+// that have no sessions yet, plus colors.
+const MAX_GROUP_DEPTH = 8;
+const MAX_GROUP_SEGMENT = 64;
+const MAX_GROUPS = 500;
+
+function normalizeGroupPath(p) {
+  return String(p == null ? "" : p).split("/")
+    .map((seg) => seg.trim().slice(0, MAX_GROUP_SEGMENT)).filter(Boolean)
+    .slice(0, MAX_GROUP_DEPTH).join("/");
+}
+const isInGroup = (p, root) => p === root || p.startsWith(root + "/");
+const groupAncestors = (p) => p.split("/").map((_, i, a) => a.slice(0, i + 1).join("/"));
+
+/** Every folder: stored ones, the ones sessions sit in, and all their ancestors. */
+function listSessionGroups() {
+  const colors = new Map();
+  const all = new Set();
+  for (const g of _sessionGroups) {
+    for (const a of groupAncestors(g.path)) all.add(a);
+    if (g.color) colors.set(g.path, g.color);
+  }
+  for (const s of sessions.values()) if (s.group) for (const a of groupAncestors(s.group)) all.add(a);
+  return [...all].sort().map((path) => ({ path, color: colors.get(path) || "" }));
+}
+
+app.get("/api/session-groups", apiAuth, (req, res) => res.json(listSessionGroups()));
+
+app.put("/api/session-groups", apiAuth, (req, res) => {
+  const list = Array.isArray(req.body && req.body.groups) ? req.body.groups : null;
+  if (!list) return res.status(400).json({ error: "groups array required" });
+  const byPath = new Map();
+  for (const g of list.slice(0, MAX_GROUPS)) {
+    const p = normalizeGroupPath(g && g.path);
+    if (p) byPath.set(p, { path: p, color: typeof g.color === "string" ? g.color.slice(0, 32) : "" });
+  }
+  _sessionGroups = [...byPath.values()];
+  saveState();
+  res.json(listSessionGroups());
+});
+
+/** Rename or move a folder; everything under it follows. */
+app.post("/api/session-groups/rename", apiAuth, (req, res) => {
+  const from = normalizeGroupPath(req.body && req.body.from);
+  const to = normalizeGroupPath(req.body && req.body.to);
+  if (!from || !to) return res.status(400).json({ error: "from and to required" });
+  if (to !== from && isInGroup(to, from)) return res.status(400).json({ error: "Can't move a group into itself" });
+  const move = (p) => normalizeGroupPath(to + p.slice(from.length));
+  for (const s of sessions.values()) if (s.group && isInGroup(s.group, from)) s.group = move(s.group);
+  const byPath = new Map();
+  for (const g of _sessionGroups) {
+    const p = isInGroup(g.path, from) ? move(g.path) : g.path;
+    byPath.set(p, { path: p, color: g.color || (byPath.get(p) || {}).color || "" });
+  }
+  if (!byPath.has(to)) byPath.set(to, { path: to, color: "" });
+  _sessionGroups = [...byPath.values()];
+  saveState();
+  res.json(listSessionGroups());
+});
+
+/** Remove a folder and its subfolders. Its sessions move up to the parent folder. */
+app.post("/api/session-groups/delete", apiAuth, (req, res) => {
+  const path_ = normalizeGroupPath(req.body && req.body.path);
+  if (!path_) return res.status(400).json({ error: "path required" });
+  const parent = path_.split("/").slice(0, -1).join("/");
+  for (const s of sessions.values()) if (s.group && isInGroup(s.group, path_)) s.group = parent;
+  _sessionGroups = _sessionGroups.filter((g) => !isInGroup(g.path, path_));
+  saveState();
+  res.json(listSessionGroups());
 });
 
 app.delete("/api/sessions/:id", apiAuth, (req, res) => {

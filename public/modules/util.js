@@ -41,3 +41,42 @@ export function $(id) { return document.getElementById(id); }
 
 let _nextId = 1;
 export function uid(prefix) { return (prefix || "id") + "-" + (_nextId++); }
+
+/**
+ * In-app replacement for window.prompt(), which Electron doesn't implement
+ * (it returns nothing, so every prompt-driven action silently did nothing).
+ * Resolves to the entered string, or null if cancelled.
+ */
+export function askText(title, value = "", opts = {}) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "ask-overlay";
+    overlay.innerHTML = `<div class="ask-box" role="dialog" aria-modal="true">
+      <div class="ask-title">${esc(title)}</div>
+      ${opts.hint ? `<div class="ask-hint">${esc(opts.hint)}</div>` : ""}
+      <input class="ask-input" type="text" spellcheck="false" />
+      <div class="ask-actions">
+        <button class="ask-btn" data-r="cancel">Cancel</button>
+        <button class="ask-btn primary" data-r="ok">${esc(opts.okLabel || "OK")}</button>
+      </div>
+    </div>`;
+    const input = overlay.querySelector(".ask-input");
+    input.value = value || "";
+    if (opts.placeholder) input.placeholder = opts.placeholder;
+    const done = (v) => { overlay.remove(); resolve(v); };
+    overlay.addEventListener("mousedown", (e) => { if (e.target === overlay) done(null); });
+    overlay.addEventListener("click", (e) => {
+      const r = e.target.closest("[data-r]");
+      if (r) done(r.dataset.r === "ok" ? input.value : null);
+    });
+    // Keep keystrokes away from the terminal / global shortcuts underneath.
+    overlay.addEventListener("keydown", (e) => {
+      e.stopPropagation();
+      if (e.key === "Enter") { e.preventDefault(); done(input.value); }
+      else if (e.key === "Escape") { e.preventDefault(); done(null); }
+    });
+    document.body.appendChild(overlay);
+    input.focus();
+    input.select();
+  });
+}

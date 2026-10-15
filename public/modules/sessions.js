@@ -2,7 +2,7 @@
 // Shows all sessions grouped by user-defined groups, with live status,
 // agent badges, costs, durations, expandable details, and context menus.
 
-import { api, esc, ago, short, fname } from "./util.js";
+import { api, esc, ago, short, fname, askText } from "./util.js";
 
 let panelEl = null;
 let _onOpenSession = null;    // (sessionId, meta, opts?) => {}
@@ -15,7 +15,12 @@ let _isSessionOpen = null;    // (sessionId) => boolean
 let _showContextMenu = null;  // (x, y, items) => {}
 
 let sessions = [];
-let groups = [];          // [{ name, collapsed, color, sessions }]
+// Groups are "/"-separated paths ("project1/marketing/seo") forming a folder
+// tree. groupTree is the root node (its sessions are the ungrouped ones);
+// groups is every folder node, flat, for lookups.
+let groupDefs = [];       // [{ path, color }] from the server — includes empty folders
+let groupTree = null;     // { path, name, color, children: [node], sessions: [s] }
+let groups = [];
 let pollTimer = null;
 let filterQuery = "";
 let expandedSessions = new Set(); // session ids with detail row visible
@@ -29,13 +34,42 @@ let dragOverGroup = null;
 const GROUP_COLORS = ["", "#58a6ff", "#3fb950", "#d29922", "#f85149", "#bc8cff", "#39d2c0", "#f0883e"];
 const COLOR_NAMES = ["Default", "Blue", "Green", "Yellow", "Red", "Purple", "Cyan", "Orange"];
 
-function loadPersistedGroups() {
-  try { return JSON.parse(localStorage.getItem("tl-sp-groups") || "[]"); } catch { return []; }
+// Folder definitions live on the server (they used to be in localStorage,
+// which is per-origin — the desktop app on a different port saw none of them).
+async function saveGroupDefs() {
+  try {
+    const resp = await fetch(api("/api/session-groups"), {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ groups: groupDefs }),
+    });
+    if (resp.ok) groupDefs = await resp.json();
+  } catch {}
 }
-function savePersistedGroups() {
-  // Save user-created group names + colors (empty groups survive refresh)
-  const data = groups.filter(g => g.name).map(g => ({ name: g.name, color: g.color || "" }));
-  localStorage.setItem("tl-sp-groups", JSON.stringify(data));
+
+async function groupRequest(path, body) {
+  try {
+    const resp = await fetch(api(path), {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      alert(err.error || "Group update failed");
+    }
+  } catch {}
+  await refresh();
+}
+
+/** One-time move of groups created before they were stored on the server. */
+async function migrateLocalGroups() {
+  let legacy = [];
+  try {
+    if (localStorage.getItem("tl-sp-groups-migrated")) return;
+    legacy = JSON.parse(localStorage.getItem("tl-sp-groups") || "[]");
+  } catch { return; }
+  const known = new Set(groupDefs.map(g => g.path));
+  const add = legacy.filter(g => g && g.name && !known.has(g.name)).map(g => ({ path: g.name, color: g.color || "" }));
+  if (add.length) { groupDefs = groupDefs.concat(add); await saveGroupDefs(); }
+  try { localStorage.setItem("tl-sp-groups-migrated", "1"); } catch {}
 }
 
 const collapsedGroups = new Set(JSON.parse(localStorage.getItem("tl-sp-collapsed") || "[]"));
@@ -73,11 +107,14 @@ export function init(opts) {
 export function startPolling() { stopPolling(); pollTimer = setInterval(refresh, 5000); }
 export function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
 
+let _migrated = false;
 export async function refresh() {
   try {
-    const resp = await fetch(api("/api/sessions"));
+    const [resp, gResp] = await Promise.all([fetch(api("/api/sessions")), fetch(api("/api/session-groups"))]);
     if (!resp.ok) return;
     sessions = await resp.json();
+    if (gResp.ok) groupDefs = await gResp.json();
+    if (!_migrated) { _migrated = true; await migrateLocalGroups(); }
     buildGroups();
     renderSessions();
   } catch {}
@@ -93,49 +130,55 @@ export function updateSession(id, meta) {
 export function getSessions() { return sessions; }
 
 // ---------------------------------------------------------------------------
-// Group logic — merges server data with persisted empty groups
+// Group logic — builds the folder tree from server folders + session paths
 // ---------------------------------------------------------------------------
+const parentPath = (p) => p.split("/").slice(0, -1).join("/");
+const leafName = (p) => p.split("/").pop();
+const displayPath = (p) => p ? p.split("/").join(" › ") : "Ungrouped";
+const inGroup = (p, root) => p === root || p.startsWith(root + "/");
+
 function buildGroups() {
-  const groupMap = new Map(); // name -> [session]
-  for (const s of sessions) {
-    const g = s.group || "";
-    if (!groupMap.has(g)) groupMap.set(g, []);
-    groupMap.get(g).push(s);
-  }
+  const nodes = new Map(); // path -> node
+  const node = (path) => {
+    let n = nodes.get(path);
+    if (!n) {
+      n = { path, name: leafName(path), color: "", children: [], sessions: [] };
+      nodes.set(path, n);
+      if (path) node(parentPath(path)).children.push(n);
+    }
+    return n;
+  };
+  const root = node("");
+  for (const g of groupDefs) node(g.path).color = g.color || "";
+  for (const s of sessions) node(s.group || "").sessions.push(s);
 
-  // Merge persisted groups (keeps empty groups alive)
-  const persisted = loadPersistedGroups();
-  for (const pg of persisted) {
-    if (!groupMap.has(pg.name)) groupMap.set(pg.name, []);
-  }
-
-  // Build color map from persisted
-  const colorMap = new Map();
-  for (const pg of persisted) colorMap.set(pg.name, pg.color || "");
-
-  // Sort: named groups alphabetically, ungrouped ("") last
-  const names = [...groupMap.keys()].sort((a, b) => {
-    if (!a) return 1;
-    if (!b) return -1;
-    return a.localeCompare(b);
-  });
-
-  groups = [];
-  for (const name of names) {
-    const sArr = groupMap.get(name);
-    sArr.sort((a, b) => {
+  const sortTree = (n) => {
+    n.children.sort((a, b) => a.name.localeCompare(b.name));
+    n.sessions.sort((a, b) => {
       const aw = statusWeight(a.status);
       const bw = statusWeight(b.status);
       if (aw !== bw) return bw - aw;
       return (b.lastActivity || 0) - (a.lastActivity || 0);
     });
-    groups.push({
-      name,
-      collapsed: collapsedGroups.has(name),
-      color: colorMap.get(name) || "",
-      sessions: sArr,
-    });
-  }
+    n.children.forEach(sortTree);
+  };
+  sortTree(root);
+  groupTree = root;
+  groups = [...nodes.values()].filter(n => n.path);
+}
+
+/** Sessions in a folder and all of its subfolders. */
+function subtreeSessions(n) {
+  const out = [...n.sessions];
+  for (const c of n.children) out.push(...subtreeSessions(c));
+  return out;
+}
+
+/** Every folder in tree order, with depth — for menus. */
+function flatFolders(n = groupTree, depth = 0, out = []) {
+  if (!n) return out;
+  for (const c of n.children) { out.push({ path: c.path, name: c.name, depth }); flatFolders(c, depth + 1, out); }
+  return out;
 }
 
 function statusWeight(s) {
@@ -206,52 +249,14 @@ function renderSessions() {
   if (!body) return;
 
   let h = "";
-
-  for (const g of groups) {
-    const filtered = g.sessions.filter(matchesFilter);
-    if (filtered.length === 0 && filterQuery && !g.name) continue; // hide empty ungrouped when filtering
-
-    const groupName = g.name || "Ungrouped";
-    const groupKey = g.name;
-    const isCollapsed = g.collapsed;
-    const runningCount = filtered.filter(s => s.status === "running" || s.status === "waiting").length;
-    const groupCost = filtered.reduce((sum, s) => sum + (s.analytics?.estimatedCost || 0), 0);
-    const colorStyle = g.color ? ` style="border-left:2px solid ${g.color}"` : "";
-
-    h += `<div class="sp-group" data-group="${esc(groupKey)}">`;
-    h += `<div class="sp-group-header${isCollapsed ? " collapsed" : ""}" data-group-toggle="${esc(groupKey)}"${colorStyle}>`;
-    h += `<span class="sp-group-arrow">${isCollapsed ? "\u25B6" : "\u25BC"}</span>`;
-    h += `<span class="sp-group-name">${esc(groupName)}</span>`;
-    if (runningCount > 0) {
-      h += `<span class="sp-group-badge running">${runningCount}</span>`;
-    }
-    if (groupCost > 0) {
-      h += `<span class="sp-group-cost">${fmtCost(groupCost)}</span>`;
-    }
-    h += `<span class="sp-group-count">${filtered.length}</span>`;
-    if (g.name) {
-      h += `<button class="sp-group-action" data-act="rename-group" data-group="${esc(groupKey)}" title="Rename">&#9998;</button>`;
-      h += `<button class="sp-group-action" data-act="delete-group" data-group="${esc(groupKey)}" title="Ungroup all">&#10005;</button>`;
-    }
-    h += `</div>`;
-
-    if (!isCollapsed) {
-      h += `<div class="sp-group-body">`;
-      for (const s of filtered) {
-        h += renderSessionCard(s);
-        if (expandedSessions.has(s.id)) h += renderSessionDetail(s);
-      }
-      if (filtered.length === 0 && g.name) {
-        h += `<div class="sp-empty">Drag sessions here or <span class="sp-link" data-act="new-in-group" data-group="${esc(groupKey)}">create new</span></div>`;
-      } else if (filtered.length === 0) {
-        h += `<div class="sp-empty">No sessions</div>`;
-      }
-      h += `</div>`;
-    }
-    h += `</div>`;
+  if (groupTree) {
+    for (const c of groupTree.children) h += renderGroupNode(c);
+    // Ungrouped sessions \u2014 a pseudo-folder for the root
+    const loose = groupTree.sessions.filter(matchesFilter);
+    if (loose.length > 0) h += renderGroupNode({ path: "", name: "Ungrouped", color: "", children: [], sessions: groupTree.sessions });
   }
 
-  if (groups.length === 0 || (filterQuery && h === "")) {
+  if (sessions.length === 0 && groups.length === 0 || (filterQuery && h === "")) {
     h = `<div class="sp-empty-state">
       <div class="sp-empty-icon">&#9655;</div>
       <div class="sp-empty-text">No sessions${filterQuery ? " matching filter" : ""}</div>
@@ -273,6 +278,47 @@ function renderSessions() {
   if (totalCost > 0) ft += ` &middot; <span class="sp-ft-cost">${fmtCost(totalCost)}</span>`;
   if (totalTokens > 0) ft += ` &middot; ${fmtTokens(totalTokens)} tok`;
   footer.innerHTML = ft;
+}
+
+function renderGroupNode(n) {
+  const own = n.sessions.filter(matchesFilter);
+  const all = subtreeSessions(n).filter(matchesFilter);
+  if (filterQuery && all.length === 0) return ""; // folder has nothing matching
+
+  const key = esc(n.path);
+  // While filtering, open everything so matches are visible
+  const isCollapsed = !filterQuery && collapsedGroups.has(n.path);
+  const runningCount = all.filter(s => s.status === "running" || s.status === "waiting").length;
+  const groupCost = all.reduce((sum, s) => sum + (s.analytics?.estimatedCost || 0), 0);
+  const colorStyle = n.color ? ` style="border-left:2px solid ${esc(n.color)}"` : "";
+
+  let h = `<div class="sp-group" data-group="${key}">`;
+  h += `<div class="sp-group-header${isCollapsed ? " collapsed" : ""}" data-group-toggle="${key}"${colorStyle} title="${esc(displayPath(n.path))}">`;
+  h += `<span class="sp-group-arrow">${isCollapsed ? "▶" : "▼"}</span>`;
+  h += `<span class="sp-group-name">${esc(n.name)}</span>`;
+  if (runningCount > 0) h += `<span class="sp-group-badge running">${runningCount}</span>`;
+  if (groupCost > 0) h += `<span class="sp-group-cost">${fmtCost(groupCost)}</span>`;
+  h += `<span class="sp-group-count">${all.length}</span>`;
+  if (n.path) {
+    h += `<button class="sp-group-action" data-act="new-subgroup" data-group="${key}" title="New subgroup">+</button>`;
+    h += `<button class="sp-group-action" data-act="rename-group" data-group="${key}" title="Rename">&#9998;</button>`;
+    h += `<button class="sp-group-action" data-act="delete-group" data-group="${key}" title="Delete group">&#10005;</button>`;
+  }
+  h += `</div>`;
+
+  if (!isCollapsed) {
+    h += `<div class="sp-group-body">`;
+    for (const c of n.children) h += renderGroupNode(c);
+    for (const s of own) {
+      h += renderSessionCard(s);
+      if (expandedSessions.has(s.id)) h += renderSessionDetail(s);
+    }
+    if (all.length === 0 && n.children.length === 0 && n.path) {
+      h += `<div class="sp-empty">Drag sessions here or <span class="sp-link" data-act="new-in-group" data-group="${key}">create new</span></div>`;
+    }
+    h += `</div>`;
+  }
+  return h + `</div>`;
 }
 
 function renderSessionCard(s) {
@@ -366,28 +412,16 @@ function handleClick(e) {
     if (collapsedGroups.has(gName)) collapsedGroups.delete(gName);
     else collapsedGroups.add(gName);
     saveCollapsed();
-    const g = groups.find(g => g.name === gName);
-    if (g) g.collapsed = collapsedGroups.has(gName);
     renderSessions();
     return;
   }
 
-  // Group rename
-  const renameGroupBtn = e.target.closest("[data-act='rename-group']");
-  if (renameGroupBtn) {
-    const oldName = renameGroupBtn.dataset.group;
-    const newName = prompt("Rename group:", oldName);
-    if (newName != null && newName.trim() && newName.trim() !== oldName) {
-      renameGroup(oldName, newName.trim());
-    }
-    return;
-  }
-
-  // Group delete
-  const deleteGroupBtn = e.target.closest("[data-act='delete-group']");
-  if (deleteGroupBtn) {
-    const gName = deleteGroupBtn.dataset.group;
-    if (confirm(`Ungroup all sessions from "${gName}"?`)) dissolveGroup(gName);
+  const groupAct = e.target.closest("[data-act='rename-group'], [data-act='delete-group'], [data-act='new-subgroup']");
+  if (groupAct) {
+    const path = groupAct.dataset.group;
+    if (groupAct.dataset.act === "rename-group") askRenameGroup(path);
+    else if (groupAct.dataset.act === "delete-group") confirmDeleteGroup(path);
+    else askNewGroup(path);
     return;
   }
 
@@ -421,15 +455,7 @@ function handleClick(e) {
       else expandedSessions.add(sid);
       renderSessions();
     } else if (act === "rename-session") {
-      const s = sessions.find(s => s.id === sid);
-      const newName = prompt("Session name:", s?.name || "");
-      if (newName != null) {
-        fetch(api("/api/sessions/" + sid), {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name: newName.trim() }),
-        }).then(() => refresh()).catch(() => {});
-      }
+      askRenameSession(sid);
     }
     return;
   }
@@ -450,10 +476,7 @@ function handleClick(e) {
     if (act === "new-session") { if (_onCreateSession) _onCreateSession(); }
     else if (act === "new-agent") { if (_onLaunchAgent) _onLaunchAgent(); }
     else if (act === "refresh") { refresh(); }
-    else if (act === "new-group") {
-      const name = prompt("New group name:");
-      if (name && name.trim()) createGroup(name.trim());
-    }
+    else if (act === "new-group") { askNewGroup(""); }
   }
 }
 
@@ -463,17 +486,19 @@ function handleDblClick(e) {
   if (nameEl) {
     const card = nameEl.closest(".sp-session");
     if (!card) return;
-    const sid = parseInt(card.dataset.sid, 10);
-    const s = sessions.find(s => s.id === sid);
-    const newName = prompt("Session name:", s?.name || "");
-    if (newName != null) {
-      fetch(api("/api/sessions/" + sid), {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: newName.trim() }),
-      }).then(() => refresh()).catch(() => {});
-    }
+    askRenameSession(parseInt(card.dataset.sid, 10));
   }
+}
+
+async function askRenameSession(sid) {
+  const s = sessions.find(s => s.id === sid);
+  const newName = await askText("Session name", s?.name || "");
+  if (newName == null) return;
+  fetch(api("/api/sessions/" + sid), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: newName.trim() }),
+  }).then(() => refresh()).catch(() => {});
 }
 
 function handleInput(e) {
@@ -513,16 +538,6 @@ function handleContextMenu(e) {
     const s = sessions.find(s => s.id === sid);
     if (!s) return;
 
-    const groupNames = groups.filter(g => g.name).map(g => g.name);
-    const moveItems = groupNames
-      .filter(gn => gn !== (s.group || ""))
-      .map(gn => ({
-        label: gn, action: "move-to-" + gn, handler() { moveSessionToGroup(sid, gn); }
-      }));
-    if (s.group) {
-      moveItems.push({ label: "Ungrouped", action: "move-ungrouped", handler() { moveSessionToGroup(sid, ""); } });
-    }
-
     const items = [
       { label: "Open", action: "open", handler() { if (_onOpenSession) _onOpenSession(sid, s); } },
     ];
@@ -530,16 +545,8 @@ function handleContextMenu(e) {
       items.push({ label: "Continue Agent", action: "continue", handler() { if (_onOpenSession) _onOpenSession(sid, s, { continueAgent: true }); } });
     }
     items.push({ separator: true });
-    items.push({ label: "Rename", action: "rename", handler() {
-      const name = prompt("Session name:", s.name || "");
-      if (name != null) {
-        fetch(api("/api/sessions/" + sid), { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: name.trim() }) }).then(() => refresh()).catch(() => {});
-      }
-    }});
-    if (moveItems.length > 0) {
-      items.push({ separator: true });
-      for (const mi of moveItems) items.push(mi);
-    }
+    items.push({ label: "Rename", action: "rename", handler() { askRenameSession(sid); } });
+    items.push(moveToGroupItem([sid]));
     items.push({ separator: true });
     items.push({ label: "Restart", action: "restart", handler() {
       fetch(api("/api/sessions/" + sid + "/restart"), { method: "POST" }).then(() => refresh()).catch(() => {});
@@ -558,34 +565,26 @@ function handleContextMenu(e) {
   const groupHeader = e.target.closest(".sp-group-header");
   if (groupHeader) {
     e.preventDefault();
-    const gName = groupHeader.dataset.groupToggle;
-    const g = groups.find(g => g.name === gName);
-    if (!g) return;
+    const gPath = groupHeader.dataset.groupToggle;
+    const g = groups.find(g => g.path === gPath);
 
     const items = [];
-    if (g.name) {
-      items.push({ label: "Rename Group", action: "rename", handler() {
-        const n = prompt("Rename group:", g.name);
-        if (n != null && n.trim() && n.trim() !== g.name) renameGroup(g.name, n.trim());
-      }});
-
-      // Color submenu
+    if (g) {
+      const all = subtreeSessions(g);
+      items.push({ label: "New Terminal Here", action: "new", handler() { if (_onCreateSession) _onCreateSession({ group: g.path }); } });
+      items.push({ label: "New Subgroup\u2026", action: "subgroup", handler() { askNewGroup(g.path); } });
+      items.push({ label: "Rename\u2026", action: "rename", handler() { askRenameGroup(g.path); } });
+      items.push({ label: "Move To", action: "move", submenu: moveGroupItems(g.path) });
+      items.push({ label: "Color", action: "color", submenu: GROUP_COLORS.map((c, i) => ({
+        label: (c === (g.color || "") ? "\u2713 " : "") + COLOR_NAMES[i], action: "color-" + i, handler() { setGroupColor(g.path, c); },
+      })) });
       items.push({ separator: true });
-      for (let i = 0; i < GROUP_COLORS.length; i++) {
-        const c = GROUP_COLORS[i];
-        const label = (c === (g.color || "") ? "\u2713 " : "") + COLOR_NAMES[i];
-        items.push({ label, action: "color-" + i, handler() { setGroupColor(g.name, c); } });
-      }
-
-      items.push({ separator: true });
-      if (g.sessions.length > 0) {
-        items.push({ label: "Restart All (" + g.sessions.length + ")", action: "restart-all", handler() { batchRestart(g.name); } });
-        items.push({ label: "Delete All (" + g.sessions.length + ")", action: "delete-all", handler() { batchDelete(g.name); } });
+      if (all.length > 0) {
+        items.push({ label: "Restart All (" + all.length + ")", action: "restart-all", handler() { batchRestart(g.path); } });
+        items.push({ label: "Delete All Sessions (" + all.length + ")", action: "delete-all", handler() { batchDelete(g.path); } });
         items.push({ separator: true });
       }
-      items.push({ label: "Dissolve Group", action: "dissolve", handler() {
-        if (confirm(`Ungroup all sessions from "${g.name}"?`)) dissolveGroup(g.name);
-      }});
+      items.push({ label: "Delete Group", action: "dissolve", handler() { confirmDeleteGroup(g.path); } });
     } else {
       items.push({ label: "New Terminal Here", action: "new", handler() { if (_onCreateSession) _onCreateSession(); } });
       items.push({ label: "Launch Agent Here", action: "agent", handler() { if (_onLaunchAgent) _onLaunchAgent(); } });
@@ -638,7 +637,7 @@ function handleDrop(e) {
   panelEl.querySelectorAll(".sp-group-header.drag-over").forEach(el => el.classList.remove("drag-over"));
   panelEl.querySelectorAll(".sp-session.dragging").forEach(el => el.classList.remove("dragging"));
   if (dragSessionId != null && dragOverGroup != null) {
-    moveSessionToGroup(dragSessionId, dragOverGroup);
+    moveSessionsToGroup([dragSessionId], dragOverGroup);
   }
   dragSessionId = null;
   dragOverGroup = null;
@@ -654,92 +653,87 @@ function handleDragEnd() {
 // ---------------------------------------------------------------------------
 // Group CRUD
 // ---------------------------------------------------------------------------
-async function moveSessionToGroup(sessionId, groupName) {
-  try {
-    await fetch(api("/api/sessions/" + sessionId), {
-      method: "PUT", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ group: groupName }),
-    });
-    const s = sessions.find(s => s.id === sessionId);
-    if (s) s.group = groupName;
-    buildGroups();
-    savePersistedGroups();
-    renderSessions();
-  } catch {}
-}
-
-async function renameGroup(oldName, newName) {
-  const toUpdate = sessions.filter(s => (s.group || "") === oldName);
-  for (const s of toUpdate) {
+async function moveSessionsToGroup(sessionIds, path) {
+  for (const id of sessionIds) {
     try {
-      await fetch(api("/api/sessions/" + s.id), {
+      await fetch(api("/api/sessions/" + id), {
         method: "PUT", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ group: newName }),
+        body: JSON.stringify({ group: path }),
       });
-      s.group = newName;
+      const s = sessions.find(s => s.id === id);
+      if (s) s.group = path;
     } catch {}
   }
-  if (collapsedGroups.has(oldName)) {
-    collapsedGroups.delete(oldName);
-    collapsedGroups.add(newName);
-    saveCollapsed();
-  }
-  // Update persisted group entry
-  const persisted = loadPersistedGroups();
-  const pg = persisted.find(p => p.name === oldName);
-  if (pg) pg.name = newName;
-  else persisted.push({ name: newName, color: "" });
-  localStorage.setItem("tl-sp-groups", JSON.stringify(persisted));
-
-  buildGroups();
-  savePersistedGroups();
-  renderSessions();
+  await refresh();
 }
 
-async function dissolveGroup(groupName) {
-  const toUpdate = sessions.filter(s => (s.group || "") === groupName);
-  for (const s of toUpdate) {
-    try {
-      await fetch(api("/api/sessions/" + s.id), {
-        method: "PUT", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ group: "" }),
-      });
-      s.group = "";
-    } catch {}
+/** Asks for a name; "a/b/c" creates nested folders. Resolves to the new path or null. */
+async function askNewGroup(parent, title) {
+  const name = await askText(title || (parent ? `New group inside "${displayPath(parent)}"` : "New group"), "", {
+    hint: "Use / to nest, e.g. project1/marketing/seo", placeholder: "Group name", okLabel: "Create",
+  });
+  if (name == null) return null;
+  const rel = name.split("/").map(s => s.trim()).filter(Boolean).join("/");
+  if (!rel) return null;
+  const path = parent ? parent + "/" + rel : rel;
+  if (!groupDefs.some(g => g.path === path)) {
+    groupDefs = groupDefs.concat({ path, color: "" });
+    await saveGroupDefs();
   }
-  collapsedGroups.delete(groupName);
+  collapsedGroups.delete(parent);
   saveCollapsed();
-  // Remove from persisted
-  const persisted = loadPersistedGroups().filter(p => p.name !== groupName);
-  localStorage.setItem("tl-sp-groups", JSON.stringify(persisted));
-
-  buildGroups();
-  renderSessions();
+  await refresh();
+  return path;
 }
 
-function createGroup(name) {
-  if (groups.find(g => g.name === name)) return;
-  // Persist immediately so it survives poll refresh
-  const persisted = loadPersistedGroups();
-  if (!persisted.find(p => p.name === name)) {
-    persisted.push({ name, color: "" });
-    localStorage.setItem("tl-sp-groups", JSON.stringify(persisted));
+async function askRenameGroup(path) {
+  const parent = parentPath(path);
+  const name = await askText(`Rename "${displayPath(path)}"`, leafName(path), { okLabel: "Rename" });
+  if (name == null || !name.trim() || name.trim() === leafName(path)) return;
+  const to = parent ? parent + "/" + name.trim() : name.trim();
+  remapCollapsed(path, to);
+  await groupRequest("/api/session-groups/rename", { from: path, to });
+}
+
+function moveGroupTo(path, newParent) {
+  const to = newParent ? newParent + "/" + leafName(path) : leafName(path);
+  if (to === path) return;
+  remapCollapsed(path, to);
+  groupRequest("/api/session-groups/rename", { from: path, to });
+}
+
+function confirmDeleteGroup(path) {
+  const parent = parentPath(path);
+  const n = groups.find(g => g.path === path);
+  const count = n ? subtreeSessions(n).length : 0;
+  const where = parent ? `"${displayPath(parent)}"` : "Ungrouped";
+  const msg = count
+    ? `Delete group "${displayPath(path)}" and its subgroups? Its ${count} session(s) move to ${where}.`
+    : `Delete group "${displayPath(path)}"?`;
+  if (!confirm(msg)) return;
+  for (const p of [...collapsedGroups]) if (inGroup(p, path)) collapsedGroups.delete(p);
+  saveCollapsed();
+  groupRequest("/api/session-groups/delete", { path });
+}
+
+function remapCollapsed(from, to) {
+  for (const p of [...collapsedGroups]) {
+    if (inGroup(p, from)) { collapsedGroups.delete(p); collapsedGroups.add(to + p.slice(from.length)); }
   }
-  groups.push({ name, collapsed: false, color: "", sessions: [] });
-  savePersistedGroups();
-  renderSessions();
+  saveCollapsed();
 }
 
-function setGroupColor(groupName, color) {
-  const g = groups.find(g => g.name === groupName);
-  if (g) g.color = color;
-  savePersistedGroups();
-  renderSessions();
+function setGroupColor(path, color) {
+  const def = groupDefs.find(g => g.path === path);
+  if (def) def.color = color;
+  else groupDefs = groupDefs.concat({ path, color });
+  saveGroupDefs().then(() => { buildGroups(); renderSessions(); });
 }
 
-async function batchRestart(groupName) {
-  const toRestart = sessions.filter(s => (s.group || "") === groupName);
-  if (!confirm(`Restart ${toRestart.length} sessions in "${groupName}"?`)) return;
+async function batchRestart(path) {
+  const n = groups.find(g => g.path === path);
+  const toRestart = n ? subtreeSessions(n) : [];
+  if (!confirm(`Restart ${toRestart.length} sessions in "${displayPath(path)}"?`)) return;
   for (const s of toRestart) {
     try {
       await fetch(api("/api/sessions/" + s.id + "/restart"), { method: "POST" });
@@ -748,9 +742,10 @@ async function batchRestart(groupName) {
   refresh();
 }
 
-async function batchDelete(groupName) {
-  const toDelete = sessions.filter(s => (s.group || "") === groupName);
-  if (!confirm(`Delete ${toDelete.length} sessions in "${groupName}"? This cannot be undone.`)) return;
+async function batchDelete(path) {
+  const n = groups.find(g => g.path === path);
+  const toDelete = n ? subtreeSessions(n) : [];
+  if (!confirm(`Delete ${toDelete.length} sessions in "${displayPath(path)}"? This cannot be undone.`)) return;
   for (const s of toDelete) {
     if (_onDeleteSession) _onDeleteSession(s.id);
     try {
@@ -758,4 +753,43 @@ async function batchDelete(groupName) {
     } catch {}
   }
   refresh();
+}
+
+// ---------------------------------------------------------------------------
+// Menus shared with the pane and tab context menus (app.js)
+// ---------------------------------------------------------------------------
+const indent = (depth) => "&nbsp;".repeat(depth * 3);
+
+/** Submenu items that move the given sessions into a folder. */
+function moveToGroupItems(sessionIds) {
+  const current = new Set(sessionIds.map(id => sessions.find(s => s.id === id)?.group || ""));
+  const mark = (p) => current.size === 1 && current.has(p) ? "✓ " : "";
+  const items = [{ label: mark("") + "Ungrouped", action: "ungrouped", handler() { moveSessionsToGroup(sessionIds, ""); } }];
+  const folders = flatFolders();
+  if (folders.length) items.push({ separator: true });
+  for (const f of folders) {
+    items.push({ label: indent(f.depth) + mark(f.path) + esc(f.name), action: "g:" + f.path, handler() { moveSessionsToGroup(sessionIds, f.path); } });
+  }
+  items.push({ separator: true });
+  items.push({ label: "New Group…", action: "new-group", async handler() {
+    const path = await askNewGroup("", "Move to new group");
+    if (path) moveSessionsToGroup(sessionIds, path);
+  }});
+  return items;
+}
+
+/** A complete "Move to Group" menu entry for one or more sessions. */
+export function moveToGroupItem(sessionIds) {
+  return { label: sessionIds.length > 1 ? `Move ${sessionIds.length} Sessions to Group` : "Move to Group", action: "move-to-group", submenu: moveToGroupItems(sessionIds) };
+}
+
+/** Submenu for moving a folder under another folder (or to the top level). */
+function moveGroupItems(path) {
+  const items = [{ label: "Top Level", action: "top", disabled: !parentPath(path), handler() { moveGroupTo(path, ""); } }];
+  const targets = flatFolders().filter(f => !inGroup(f.path, path));
+  if (targets.length) items.push({ separator: true });
+  for (const f of targets) {
+    items.push({ label: indent(f.depth) + esc(f.name), action: "t:" + f.path, disabled: f.path === parentPath(path), handler() { moveGroupTo(path, f.path); } });
+  }
+  return items;
 }

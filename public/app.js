@@ -1,5 +1,6 @@
 // app.js — main application orchestrator
-import { $, setToken, api, esc, short, tIcon, ago, fname } from "./modules/util.js";
+import { $, setToken, api, esc, short, tIcon, ago, fname, askText } from "./modules/util.js";
+import { allLeaves } from "./modules/layout.js";
 import { setCallbacks, getTerminal, sendInput, pasteText, smartPaste, createTerminal as createTerm, fitAllTerminals, destroyTerminal, getCommandHistory } from "./modules/terminal.js";
 import * as tabs from "./modules/tabs.js";
 import * as sidebar from "./modules/sidebar.js";
@@ -902,7 +903,7 @@ async function launchAgentInDir(dir, command) {
 
 // Start a git worktree in a directory — prompts for branch name
 async function startWorktreeDialog(dir) {
-  const name = prompt("New worktree branch name:");
+  const name = await askText("New worktree branch name", "", { okLabel: "Create" });
   if (!name || !name.trim()) return;
   const branch = name.trim();
   try {
@@ -1366,6 +1367,14 @@ tabs.initPaneClick();
 // ---------------------------------------------------------------------------
 ctxmenu.init();
 
+// "Move to Group" for every session shown in a tab (a split tab holds several)
+function tabGroupItems(wsId) {
+  const ws = tabs.getWorkspaces().find((w) => w.id === wsId);
+  if (!ws || ws.type === "editor" || !ws.rootNode) return [];
+  const ids = [...new Set(allLeaves(ws.rootNode).map((l) => l.sessionId).filter((id) => id != null))];
+  return ids.length ? [{ separator: true }, sessionsPanel.moveToGroupItem(ids)] : [];
+}
+
 // Tab bar right-click
 tabBar.addEventListener("contextmenu", (e) => {
   const tabEl = e.target.closest(".tab");
@@ -1393,6 +1402,7 @@ tabBar.addEventListener("contextmenu", (e) => {
       setTimeout(() => tabs.splitActivePane("v"), 50);
     }},
     { label: "Duplicate Tab", action: "dup", handler() { tabs.duplicateWorkspace(wsId); }},
+    ...tabGroupItems(wsId),
     { separator: true },
     { label: "Close", action: "close", disabled: !hasMultiple, handler() { tabs.closeWorkspace(wsId); }},
     { label: "Close Others", action: "close-others", disabled: !hasMultiple, handler() { tabs.closeOtherWorkspaces(wsId); }},
@@ -1440,6 +1450,8 @@ workspaceArea.addEventListener("contextmenu", (e) => {
     { label: "Select All", action: "select-all", handler() { term.selectAll(); }},
     { separator: true },
     { label: "Clear Terminal", action: "clear", handler() { term.clear(); }},
+    { separator: true },
+    sessionsPanel.moveToGroupItem([entry.sessionId]),
     { separator: true },
     { label: "Continue Agent", action: "continue-agent", handler() {
       const cmd = buildAgentCommand({ continue: true });
