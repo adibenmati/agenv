@@ -52,14 +52,19 @@ function buildAgentCommand(opts) {
   return parts.join(" ");
 }
 
-/** "Continue Agent" for an agenv session — resumes its linked Claude conversation when there is one. */
+/**
+ * "Continue Agent" for an agenv session — resumes its linked Claude
+ * conversation when there is one. Null when claude is already running there
+ * (typing a command would land in claude's own prompt).
+ */
 async function continueAgentCommand(sessionId) {
-  let resumeId = null;
+  let s = {};
   try {
     const list = await (await fetch(api("/api/sessions"))).json();
-    resumeId = (list.find((s) => s.id === sessionId) || {}).claudeSessionId || null;
+    s = list.find((x) => x.id === sessionId) || {};
   } catch {}
-  return buildAgentCommand({ continue: true, resumeId });
+  if (s.claudeRunning) return null;
+  return buildAgentCommand({ continue: true, resumeId: s.claudeSessionId || null });
 }
 
 function saveSetting(key, val) {
@@ -296,7 +301,7 @@ sessionsPanel.init({
         const paneId = tabs.getActivePaneId();
         if (paneId) {
           const cmd = await continueAgentCommand(sid);
-          sendInput(paneId, cmd + "\r");
+          if (cmd) sendInput(paneId, cmd + "\r");
         }
       }, 800);
     }
@@ -1502,7 +1507,7 @@ workspaceArea.addEventListener("contextmenu", (e) => {
     { separator: true },
     { label: "Continue Agent", action: "continue-agent", async handler() {
       const cmd = await continueAgentCommand(entry.sessionId);
-      if (entry.ws && entry.ws.readyState === 1) {
+      if (cmd && entry.ws && entry.ws.readyState === 1) {
         entry.ws.send(JSON.stringify({ type: "input", data: cmd + "\r" }));
       }
     }},
@@ -1719,7 +1724,7 @@ $("dash-inner").addEventListener("contextmenu", (e) => {
         const paneId = tabs.getActivePaneId();
         if (paneId) {
           const cmd = await continueAgentCommand(sid);
-          sendInput(paneId, cmd + "\r");
+          if (cmd) sendInput(paneId, cmd + "\r");
         }
       }, 800);
     }},

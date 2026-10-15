@@ -385,6 +385,10 @@ async function forgetClosed(closed) {
   } catch {}
 }
 
+const continueTitle = (s) => s.claudeSessionId
+  ? "Resume Claude conversation " + s.claudeSessionId.slice(0, 8)
+  : "Continue the latest agent conversation in this folder";
+
 function renderSessionCard(s) {
   const isOpen = _isSessionOpen ? _isSessionOpen(s.id) : false;
   const isExpanded = expandedSessions.has(s.id);
@@ -415,9 +419,9 @@ function renderSessionCard(s) {
   h += `<div class="sp-right">`;
   h += `<span class="sp-time">${ago(s.lastActivity)}</span>`;
   h += `<div class="sp-session-actions">`;
-  if (s.tool && s.tool !== "terminal") {
-    h += `<button class="sp-s-btn agent-btn" data-act="continue-agent" data-sid="${s.id}" title="Continue Agent">&#9654;</button>`;
-  }
+  // Every session can continue an agent: its linked Claude conversation when
+  // there is one, otherwise the latest conversation in its folder.
+  h += `<button class="sp-s-btn agent-btn" data-act="continue-agent" data-sid="${s.id}" title="${esc(continueTitle(s))}">&#9654;</button>`;
   h += `<button class="sp-s-btn" data-act="toggle-detail" data-sid="${s.id}" title="Details">${isExpanded ? "\u25B2" : "\u25BC"}</button>`;
   h += `</div>`;
   h += `</div>`;
@@ -459,6 +463,7 @@ function renderSessionDetail(s) {
 
   // Action buttons
   h += `<div class="sp-detail-actions">`;
+  h += `<button class="sp-d-btn agent" data-act="continue-agent" data-sid="${s.id}" title="${esc(continueTitle(s))}">Continue</button>`;
   h += `<button class="sp-d-btn" data-act="rename-session" data-sid="${s.id}">Rename</button>`;
   h += `<button class="sp-d-btn" data-act="restart-session" data-sid="${s.id}">Restart</button>`;
   h += `<button class="sp-d-btn danger" data-act="delete-session" data-sid="${s.id}">Delete</button>`;
@@ -640,9 +645,8 @@ function handleContextMenu(e) {
     const items = [
       { label: "Open", action: "open", handler() { if (_onOpenSession) _onOpenSession(sid, s); } },
     ];
-    if (s.tool && s.tool !== "terminal") {
-      items.push({ label: "Continue Agent", action: "continue", handler() { if (_onOpenSession) _onOpenSession(sid, s, { continueAgent: true }); } });
-    }
+    items.push({ label: s.claudeSessionId ? "Resume Claude Conversation" : "Continue Agent", action: "continue", handler() { if (_onOpenSession) _onOpenSession(sid, s, { continueAgent: true }); } });
+    if (s.claudeSessionId) items.push({ label: "Copy Claude Session ID", action: "copy-claude", handler() { navigator.clipboard.writeText(s.claudeSessionId).catch(() => {}); } });
     items.push({ separator: true });
     items.push({ label: "Rename", action: "rename", handler() { askRenameSession(sid); } });
     items.push(moveToGroupItem([sid]));

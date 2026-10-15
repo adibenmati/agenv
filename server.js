@@ -1176,7 +1176,7 @@ app.get("/api/sessions", apiAuth, (req, res) => {
       created: session.created, lastActivity: session.lastActivity, clients: session.clients.size,
       status: session.status || "idle", group: session.group || "",
       note: session.note || "", analytics: session.analytics || {},
-      claudeSessionId: session.claudeSessionId || null,
+      claudeSessionId: session.claudeSessionId || null, claudeRunning: !!session.claudeRunning,
       // false = restored tab whose shell hasn't been started yet
       live: !!session.live,
     });
@@ -2302,6 +2302,11 @@ function linkClaudeSessions() {
         if (owner != null) known.set(e.pid, owner);
       }
     }
+    // Whether claude is running right now — "Continue" then just opens the tab
+    // instead of typing a resume command into claude's own prompt.
+    const running = new Set(known.values());
+    for (const s of sessions.values()) s.claudeRunning = running.has(s.id);
+
     // Several conversations in one terminal (nested claude): the newest wins.
     const latest = new Map();
     for (const e of registry) {
