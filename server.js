@@ -138,6 +138,8 @@ function archiveSession(session) {
     tool: session.detectedTool || "terminal",
     lastCommand: session.lastCommand || "",
     launchCommand: session.launchCommand || "",
+    group: session.group || "",
+    claudeSessionId: session.claudeSessionId || null,
     created: session.created,
     lastActivity: session.lastActivity,
     closed: Date.now(),
@@ -188,7 +190,7 @@ function saveStateNow() {
       lastCommand: session.lastCommand || "",
       launchCommand: session.launchCommand || "",
       userNamed: session.userNamed || false,
-      group: session.group || "", note: session.note || "",
+      group: session.group || "", note: session.note || "", claudeSessionId: session.claudeSessionId || null,
       created: session.created || Date.now(),
       lastActivity: session.lastActivity || Date.now(),
     });
@@ -852,6 +854,7 @@ function createSession(id, opts) {
     status: "idle",           // idle | running | waiting | error
     group: o.group || "",     // session group name
     note: o.note || "",       // session notes
+    claudeSessionId: o.claudeSessionId || null, // linked Claude Code conversation
     analytics: {
       inputTokens: 0, outputTokens: 0, estimatedCost: 0,
       commandCount: 0, turnCount: 0, startTime: now,
@@ -895,6 +898,7 @@ function startSession(session) {
         session.lastCommand = session.pendingCommand;
         const t = detectTool(session.pendingCommand);
         if (t) session.detectedTool = t;
+        noteClaudeCommand(session, session.pendingCommand);
         session.pendingCommand = null;
         saveState();
       }
@@ -1000,7 +1004,7 @@ if (RUN_COMMAND) {
       cwd: s.cwd && fs.existsSync(s.cwd) ? s.cwd : process.cwd(),
       name: s.name || "", tool: s.tool || "terminal", lastCommand: s.lastCommand || "",
       launchCommand: s.launchCommand || "", userNamed: s.userNamed || false,
-      group: s.group || "", note: s.note || "",
+      group: s.group || "", note: s.note || "", claudeSessionId: s.claudeSessionId || null,
       created: s.created, lastActivity: s.lastActivity, restoreScrollback: true,
     });
   }
@@ -1172,6 +1176,7 @@ app.get("/api/sessions", apiAuth, (req, res) => {
       created: session.created, lastActivity: session.lastActivity, clients: session.clients.size,
       status: session.status || "idle", group: session.group || "",
       note: session.note || "", analytics: session.analytics || {},
+      claudeSessionId: session.claudeSessionId || null,
       // false = restored tab whose shell hasn't been started yet
       live: !!session.live,
     });
@@ -1190,16 +1195,31 @@ app.post("/api/sessions", apiAuth, (req, res) => {
   res.json({ id, name: s.name, cwd: s.cwd, tool: s.detectedTool, created: s.created, status: s.status, group: s.group });
 });
 
-app.put("/api/sessions/:id", apiAuth, (req, res) => {
+app.put("/api/sessions/:id", apiAuth, async (req, res) => {
   const id = parseInt(req.params.id, 10);
   const session = sessions.get(id);
   if (!session) return res.status(404).json({ error: "Session not found" });
-  if (req.body.name != null) { session.name = String(req.body.name).slice(0, 64); session.userNamed = true; }
+  let renamed = null;
+  if (req.body.name != null) {
+    const name = String(req.body.name).slice(0, 64);
+    if (name !== session.name) renamed = name;
+    session.name = name; session.userNamed = true;
+  }
   if (req.body.tool) { session.detectedTool = String(req.body.tool); session.lastCommand = req.body.lastCommand || session.lastCommand; }
   if (req.body.note != null) session.note = String(req.body.note).slice(0, 2000);
   if (req.body.group != null) session.group = normalizeGroupPath(req.body.group);
   saveState();
-  res.json({ ok: true });
+
+  // Carry a rename over to the Claude conversation running in this session,
+  // so /resume and "Continue Agent" show the same name.
+  let claudeRenamed = false;
+  if (renamed && renamed.trim()) {
+    if (!session.claudeSessionId && session.detectedTool === "claude") await linkClaudeSessions();
+    if (session.claudeSessionId) {
+      try { claudeRenamed = await renameClaudeConversation(session.claudeSessionId, renamed.trim()); } catch {}
+    }
+  }
+  res.json({ ok: true, claudeRenamed });
 });
 
 // ---- Session group folders ----
@@ -1282,9 +1302,11 @@ app.delete("/api/sessions/:id", apiAuth, (req, res) => {
   const p = session.pty;
   session.pty = null; // stops the exit handler from archiving this twice
   try { if (p) p.kill(); } catch {} // safe even if already exited
+  archiveSession(session); // listed under "Recently Closed" so it can be resumed
   destroySession(session, -1);
   console.log(`[agenv] Session ${id} closed from browser`);
   saveStateNow();
+  broadcastEvent("archive-updated");
   res.json({ ok: true });
 });
 
@@ -1376,6 +1398,7 @@ app.post("/api/history", apiAuth, (req, res) => {
     const s = sessions.get(parseInt(sessionId, 10));
     if (s) {
       s.lastCommand = trimmed;
+      noteClaudeCommand(s, trimmed);
       const t = detectTool(trimmed);
       if (t) {
         s.detectedTool = t;
@@ -1408,6 +1431,14 @@ app.post("/api/history", apiAuth, (req, res) => {
 
 // ---- Archive API ----
 app.get("/api/archive", apiAuth, (req, res) => res.json(loadArchive()));
+
+// Drop one closed session from the list (after resuming it, or by hand).
+app.post("/api/archive/remove", apiAuth, (req, res) => {
+  const closed = Number(req.body && req.body.closed);
+  if (!closed) return res.status(400).json({ error: "closed timestamp required" });
+  saveArchive(loadArchive().filter((a) => a.closed !== closed));
+  res.json({ ok: true });
+});
 
 // ---- Favorites API ----
 app.get("/api/favorites", apiAuth, (req, res) => res.json(loadFavorites()));
@@ -2147,6 +2178,192 @@ async function scanJsonl(filePath, start, onEntry) {
   if (carry && parseJsonLine(carry.toString("utf8"), onEntry)) offset += carry.length;
   return offset;
 }
+
+// ---- Linking agenv sessions to Claude Code conversations ----
+// Claude Code registers every running interactive session in
+// ~/.claude/sessions/<pid>.json ({ pid, sessionId, cwd, startedAt, ... }).
+// Walking each registered pid up the process table to a session's shell pid
+// tells us which conversation runs in which terminal — whether agenv launched
+// claude or the user typed it. The link is what lets "Continue Agent" resume
+// that exact conversation, and a rename reach Claude too.
+// <claude-link-internals>
+const CLAUDE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** The conversation id a claude command line resumes or starts, if it names one. */
+function claudeIdFromCommand(cmd) {
+  const m = String(cmd || "").match(/^\s*claude(?:\.exe|\.cmd)?\s.*?(?:--resume|-r|--session-id)(?:=|\s+)([0-9a-f-]{36})(?![0-9a-f-])/i);
+  return m && CLAUDE_UUID.test(m[1]) ? m[1].toLowerCase() : null;
+}
+
+/**
+ * registry: [{ pid, sessionId, startedAt }], parentOf: Map(pid → ppid),
+ * roots: Map(shell pid → agenv session id). Returns Map(agenv id → conversation id);
+ * when several conversations run under one terminal, the newest wins.
+ */
+function resolveClaudeLinks(registry, parentOf, roots) {
+  const best = new Map();
+  for (const e of registry) {
+    const seen = new Set();
+    for (let pid = e.pid; pid != null && !seen.has(pid); pid = parentOf.get(pid)) {
+      seen.add(pid);
+      if (!roots.has(pid)) continue;
+      const id = roots.get(pid);
+      const cur = best.get(id);
+      if (!cur || (e.startedAt || 0) >= cur.startedAt) best.set(id, { sessionId: e.sessionId, startedAt: e.startedAt || 0 });
+      break;
+    }
+  }
+  return new Map([...best].map(([id, v]) => [id, v.sessionId]));
+}
+// </claude-link-internals>
+
+const CLAUDE_SESSIONS_DIR = path.join(CLAUDE_HOME, "sessions");
+const CLAUDE_LINK_MS = 15000;
+// claude pid → agenv session id it runs under (-1: not under any of ours).
+// Tracing a pid needs a full process listing, so each pid is traced once.
+const _claudePidOwner = new Map();
+let _linking = null;
+
+async function readClaudeRegistry() {
+  let files; try { files = await fs.promises.readdir(CLAUDE_SESSIONS_DIR); } catch { return []; }
+  const out = [];
+  for (const f of files) {
+    if (!f.endsWith(".json")) continue;
+    try {
+      const e = JSON.parse(await fs.promises.readFile(path.join(CLAUDE_SESSIONS_DIR, f), "utf8"));
+      if (e && Number.isInteger(e.pid) && typeof e.sessionId === "string" && CLAUDE_UUID.test(e.sessionId)) out.push(e);
+    } catch {}
+  }
+  return out;
+}
+
+/** Map(pid → ppid) for every process on the machine. */
+function listProcesses() {
+  return new Promise((resolve) => {
+    const { execFile } = require("child_process");
+    const [cmd, args] = process.platform === "win32"
+      ? ["powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+        "Get-CimInstance Win32_Process | ForEach-Object { '{0} {1}' -f $_.ProcessId,$_.ParentProcessId }"]]
+      : ["ps", ["-A", "-o", "pid=,ppid="]];
+    execFile(cmd, args, { timeout: 15000, windowsHide: true, maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => {
+      const map = new Map();
+      for (const line of String(stdout || "").split(/\r?\n/)) {
+        const m = line.trim().match(/^(\d+)\s+(\d+)$/);
+        if (m) map.set(Number(m[1]), Number(m[2]));
+      }
+      resolve(map);
+    });
+  });
+}
+
+function setClaudeLink(session, id) {
+  if (!id || session.claudeSessionId === id) return;
+  session.claudeSessionId = id;
+  saveState();
+}
+
+/**
+ * A claude command typed or launched in a session: link right away when it
+ * names a conversation, otherwise look it up once claude has registered itself.
+ */
+function noteClaudeCommand(session, cmd) {
+  const id = claudeIdFromCommand(cmd);
+  if (id) { setClaudeLink(session, id); return; }
+  if (!/^\s*claude(?:\.exe|\.cmd)?(\s|$)/i.test(cmd)) return;
+  for (const ms of [3000, 10000]) {
+    const t = setTimeout(linkClaudeSessions, ms);
+    if (t.unref) t.unref();
+  }
+}
+
+/** Refresh every session's Claude link. Cheap unless a new claude process appeared. */
+function linkClaudeSessions() {
+  if (_linking) return _linking;
+  _linking = (async () => {
+    const registry = await readClaudeRegistry();
+    const live = new Set(registry.map((e) => e.pid));
+    for (const pid of _claudePidOwner.keys()) if (!live.has(pid)) _claudePidOwner.delete(pid);
+
+    // Known pids only need their current conversation id (it changes on /clear).
+    const known = new Map(), unknown = [];
+    for (const e of registry) {
+      const owner = _claudePidOwner.get(e.pid);
+      if (owner == null) unknown.push(e);
+      else if (owner >= 0) known.set(e.pid, owner);
+    }
+    const roots = new Map();
+    for (const s of sessions.values()) if (s.pty && s.pty.pid) roots.set(s.pty.pid, s.id);
+
+    if (unknown.length && roots.size) {
+      const parentOf = await listProcesses();
+      for (const e of unknown) {
+        const [owner] = resolveClaudeLinks([e], parentOf, roots).keys();
+        _claudePidOwner.set(e.pid, owner == null ? -1 : owner);
+        if (owner != null) known.set(e.pid, owner);
+      }
+    }
+    // Several conversations in one terminal (nested claude): the newest wins.
+    const latest = new Map();
+    for (const e of registry) {
+      const owner = known.get(e.pid);
+      if (owner == null) continue;
+      const cur = latest.get(owner);
+      if (!cur || (e.startedAt || 0) >= (cur.startedAt || 0)) latest.set(owner, e);
+    }
+    for (const [owner, e] of latest) {
+      const s = sessions.get(owner);
+      if (s) setClaudeLink(s, e.sessionId);
+    }
+  })().catch(() => {}).finally(() => { _linking = null; });
+  return _linking;
+}
+const claudeLinkTimer = setInterval(linkClaudeSessions, CLAUDE_LINK_MS);
+if (claudeLinkTimer.unref) claudeLinkTimer.unref();
+
+/** Name a Claude conversation the way /rename does: a custom-title record in its transcript. */
+async function renameClaudeConversation(id, title) {
+  let dirs; try { dirs = await fs.promises.readdir(CLAUDE_PROJECTS_DIR); } catch { return false; }
+  for (const d of dirs) {
+    const p = path.join(CLAUDE_PROJECTS_DIR, d, id + ".jsonl");
+    let st; try { st = await fs.promises.stat(p); } catch { continue; }
+    // Don't glue our record onto a line claude is halfway through writing.
+    let lead = "";
+    if (st.size > 0) {
+      const fh = await fs.promises.open(p, "r");
+      try {
+        const b = Buffer.alloc(1);
+        await fh.read(b, 0, 1, st.size - 1);
+        if (b[0] !== 0x0A) lead = "\n";
+      } finally { await fh.close(); }
+    }
+    await fs.promises.appendFile(p, lead + JSON.stringify({ type: "custom-title", customTitle: title, sessionId: id }) + "\n");
+    return true;
+  }
+  return false;
+}
+
+/** The folder a conversation ran in — `claude --resume <id>` has to start there. */
+async function claudeConversationCwd(id) {
+  let dirs; try { dirs = await fs.promises.readdir(CLAUDE_PROJECTS_DIR); } catch { return null; }
+  for (const d of dirs) {
+    const p = path.join(CLAUDE_PROJECTS_DIR, d, id + ".jsonl");
+    try { await fs.promises.access(p); } catch { continue; }
+    let cwd = null;
+    const FOUND = {};
+    try { await scanJsonl(p, 0, (e) => { if (e.cwd) { cwd = e.cwd; throw FOUND; } }); }
+    catch (e) { if (e !== FOUND) return null; }
+    return cwd;
+  }
+  return null;
+}
+
+app.get("/api/claude/conversation/:id", apiAuth, async (req, res) => {
+  const id = String(req.params.id || "");
+  if (!CLAUDE_UUID.test(id)) return res.status(400).json({ error: "invalid id" });
+  const cwd = await claudeConversationCwd(id);
+  if (!cwd) return res.status(404).json({ error: "Conversation not found" });
+  res.json({ id, cwd: cwd.replace(/\//g, path.sep) });
+});
 
 async function listClaudeTranscripts() {
   const out = [];
@@ -3264,7 +3481,7 @@ if (process.env.NODE_ENV !== "production") {
 
 function buildPage(token) {
   const sessionList = Array.from(sessions.entries()).sort((a, b) => a[0] - b[0])
-    .map(([id, s]) => ({ id, name: s.name || "", cwd: s.cwd, tool: s.detectedTool || "terminal", lastCommand: s.lastCommand || "", launchCommand: s.launchCommand || "", created: s.created, lastActivity: s.lastActivity, status: s.status || "idle", group: s.group || "", note: s.note || "", analytics: s.analytics || {} }));
+    .map(([id, s]) => ({ id, name: s.name || "", cwd: s.cwd, tool: s.detectedTool || "terminal", lastCommand: s.lastCommand || "", launchCommand: s.launchCommand || "", created: s.created, lastActivity: s.lastActivity, status: s.status || "idle", group: s.group || "", note: s.note || "", analytics: s.analytics || {}, claudeSessionId: s.claudeSessionId || null }));
   const archive = loadArchive().reverse().slice(0, 30);
   const favorites = loadFavorites();
   const recentFolders = [];

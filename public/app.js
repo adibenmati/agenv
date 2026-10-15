@@ -42,11 +42,24 @@ function buildAgentCommand(opts) {
   const agent = (opts && opts.agent) || settings.defaultAgent || "claude";
   const parts = [agent];
   if (agent === "claude") {
-    if ((opts && opts.continue) || settings.agentContinue) parts.push("--continue");
+    // A known conversation id resumes that exact conversation; --continue
+    // would pick whichever ran last in this folder.
+    if (opts && opts.resumeId) parts.push("--resume", opts.resumeId);
+    else if ((opts && opts.continue) || settings.agentContinue) parts.push("--continue");
     if (settings.defaultModel) parts.push("--model", settings.defaultModel);
     if (settings.agentSkipPerms) parts.push("--dangerously-skip-permissions");
   }
   return parts.join(" ");
+}
+
+/** "Continue Agent" for an agenv session — resumes its linked Claude conversation when there is one. */
+async function continueAgentCommand(sessionId) {
+  let resumeId = null;
+  try {
+    const list = await (await fetch(api("/api/sessions"))).json();
+    resumeId = (list.find((s) => s.id === sessionId) || {}).claudeSessionId || null;
+  } catch {}
+  return buildAgentCommand({ continue: true, resumeId });
 }
 
 function saveSetting(key, val) {
@@ -279,10 +292,10 @@ sessionsPanel.init({
     }
     // If continue-agent requested, send the command after connection
     if (opts && opts.continueAgent) {
-      setTimeout(() => {
+      setTimeout(async () => {
         const paneId = tabs.getActivePaneId();
         if (paneId) {
-          const cmd = buildAgentCommand({ continue: true });
+          const cmd = await continueAgentCommand(sid);
           sendInput(paneId, cmd + "\r");
         }
       }, 800);
@@ -326,6 +339,40 @@ sessionsPanel.init({
   },
   getAgentCommand() { return buildAgentCommand(); },
   isSessionOpen(sid) { return !!tabs.findWorkspaceBySession(sid); },
+  // Bring a closed session back: same name and group, and — for an agent
+  // session — the exact Claude conversation it was running.
+  async onResumeClosed(entry, opts) {
+    showTerminals();
+    let cwd = entry.cwd;
+    let command = null;
+    if (opts && opts.agent) {
+      if (entry.claudeSessionId) {
+        // `claude --resume <id>` only finds the conversation from its own folder
+        try {
+          const r = await fetch(api("/api/claude/conversation/" + entry.claudeSessionId));
+          if (r.ok) cwd = (await r.json()).cwd || cwd;
+        } catch {}
+      }
+      command = buildAgentCommand({ continue: true, resumeId: entry.claudeSessionId || null });
+    }
+    try {
+      const resp = await fetch(api("/api/sessions"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cwd, name: entry.name || "", group: entry.group || "", command }),
+      });
+      if (!resp.ok) { notif.showToast(null, "Could not reopen session", "error"); return; }
+      const data = await resp.json();
+      await fetch(api("/api/archive/remove"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ closed: entry.closed }),
+      }).catch(() => {});
+      tabs.setSessionMeta(data.id, data);
+      tabs.createWorkspace(entry.name || data.name || "Session " + data.id, data.id, data);
+      sessionsPanel.refresh();
+    } catch {}
+  },
 });
 
 // ---------------------------------------------------------------------------
@@ -1453,8 +1500,8 @@ workspaceArea.addEventListener("contextmenu", (e) => {
     { separator: true },
     sessionsPanel.moveToGroupItem([entry.sessionId]),
     { separator: true },
-    { label: "Continue Agent", action: "continue-agent", handler() {
-      const cmd = buildAgentCommand({ continue: true });
+    { label: "Continue Agent", action: "continue-agent", async handler() {
+      const cmd = await continueAgentCommand(entry.sessionId);
       if (entry.ws && entry.ws.readyState === 1) {
         entry.ws.send(JSON.stringify({ type: "input", data: cmd + "\r" }));
       }
@@ -1668,10 +1715,10 @@ $("dash-inner").addEventListener("contextmenu", (e) => {
         tabs.createWorkspace(meta?.name || "Session " + sid, sid, meta);
       }
       // Send the command after a short delay to let the terminal connect
-      setTimeout(() => {
+      setTimeout(async () => {
         const paneId = tabs.getActivePaneId();
         if (paneId) {
-          const cmd = buildAgentCommand({ continue: true });
+          const cmd = await continueAgentCommand(sid);
           sendInput(paneId, cmd + "\r");
         }
       }, 800);

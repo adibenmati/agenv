@@ -13,6 +13,7 @@ let _onRestartSession = null; // (sessionId) => {}
 let _getAgentCommand = null;  // () => string
 let _isSessionOpen = null;    // (sessionId) => boolean
 let _showContextMenu = null;  // (x, y, items) => {}
+let _onResumeClosed = null;   // (archiveEntry, { agent }) => {}
 
 let sessions = [];
 // Groups are "/"-separated paths ("project1/marketing/seo") forming a folder
@@ -21,6 +22,10 @@ let sessions = [];
 let groupDefs = [];       // [{ path, color }] from the server — includes empty folders
 let groupTree = null;     // { path, name, color, children: [node], sessions: [s] }
 let groups = [];
+let closedSessions = [];  // archive entries, newest first
+let closedOpen = false;
+try { closedOpen = localStorage.getItem("tl-sp-closed-open") === "1"; } catch {}
+const MAX_CLOSED_SHOWN = 25;
 let pollTimer = null;
 let filterQuery = "";
 let expandedSessions = new Set(); // session ids with detail row visible
@@ -88,6 +93,7 @@ export function init(opts) {
   _getAgentCommand = opts.getAgentCommand || (() => "claude");
   _isSessionOpen = opts.isSessionOpen || (() => false);
   _showContextMenu = opts.showContextMenu || null;
+  _onResumeClosed = opts.onResumeClosed || null;
 
   if (!panelEl) return;
   renderShell();
@@ -110,10 +116,13 @@ export function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollT
 let _migrated = false;
 export async function refresh() {
   try {
-    const [resp, gResp] = await Promise.all([fetch(api("/api/sessions")), fetch(api("/api/session-groups"))]);
+    const [resp, gResp, aResp] = await Promise.all([
+      fetch(api("/api/sessions")), fetch(api("/api/session-groups")), fetch(api("/api/archive")),
+    ]);
     if (!resp.ok) return;
     sessions = await resp.json();
     if (gResp.ok) groupDefs = await gResp.json();
+    if (aResp.ok) closedSessions = (await aResp.json()).slice().reverse();
     if (!_migrated) { _migrated = true; await migrateLocalGroups(); }
     buildGroups();
     renderSessions();
@@ -256,7 +265,9 @@ function renderSessions() {
     if (loose.length > 0) h += renderGroupNode({ path: "", name: "Ungrouped", color: "", children: [], sessions: groupTree.sessions });
   }
 
-  if (sessions.length === 0 && groups.length === 0 || (filterQuery && h === "")) {
+  h += renderClosed();
+
+  if (sessions.length === 0 && groups.length === 0 && closedSessions.length === 0 || (filterQuery && h === "")) {
     h = `<div class="sp-empty-state">
       <div class="sp-empty-icon">&#9655;</div>
       <div class="sp-empty-text">No sessions${filterQuery ? " matching filter" : ""}</div>
@@ -319,6 +330,59 @@ function renderGroupNode(n) {
     h += `</div>`;
   }
   return h + `</div>`;
+}
+
+function closedMatches(a) {
+  if (!filterQuery) return true;
+  const q = filterQuery.toLowerCase();
+  return [a.name, a.cwd, a.tool, a.group].some((v) => (v || "").toLowerCase().includes(q));
+}
+const isAgentEntry = (a) => !!a.claudeSessionId || (a.tool && a.tool !== "terminal");
+
+function renderClosed() {
+  const list = closedSessions.filter(closedMatches).slice(0, MAX_CLOSED_SHOWN);
+  if (list.length === 0) return "";
+  const open = closedOpen || !!filterQuery;
+  let h = `<div class="sp-group sp-closed">`;
+  h += `<div class="sp-group-header${open ? "" : " collapsed"}" data-act="toggle-closed">`;
+  h += `<span class="sp-group-arrow">${open ? "▼" : "▶"}</span>`;
+  h += `<span class="sp-group-name">Recently Closed</span>`;
+  h += `<span class="sp-group-count">${list.length}</span></div>`;
+  if (open) {
+    h += `<div class="sp-group-body">`;
+    for (const a of list) {
+      const agent = isAgentEntry(a);
+      h += `<div class="sp-session closed" data-closed="${a.closed}">`;
+      h += `<div class="sp-status asleep"></div><div class="sp-info">`;
+      h += `<div class="sp-name-row"><span class="sp-name">${esc(a.name || "Session")}</span></div>`;
+      h += `<div class="sp-path">${esc(short(a.cwd))}${a.group ? " &middot; " + esc(displayPath(a.group)) : ""}</div>`;
+      h += `<div class="sp-meta">`;
+      if (a.tool && a.tool !== "terminal") h += `<span class="sp-badge ${esc(a.tool)}">${esc(a.tool)}</span>`;
+      if (a.claudeSessionId) h += `<span class="sp-status-label" title="Claude conversation ${esc(a.claudeSessionId)}">${esc(a.claudeSessionId.slice(0, 8))}</span>`;
+      h += `</div></div><div class="sp-right"><span class="sp-time">${ago(a.closed)}</span><div class="sp-session-actions">`;
+      if (agent) h += `<button class="sp-c-btn agent-btn" data-act="resume-closed" data-closed="${a.closed}" title="${a.claudeSessionId ? "Resume this Claude conversation" : "Continue agent in this folder"}">&#9654;</button>`;
+      h += `<button class="sp-c-btn" data-act="reopen-closed" data-closed="${a.closed}" title="Reopen terminal">&#8635;</button>`;
+      h += `<button class="sp-c-btn" data-act="forget-closed" data-closed="${a.closed}" title="Remove from list">&#10005;</button>`;
+      h += `</div></div></div>`;
+    }
+    h += `</div>`;
+  }
+  return h + `</div>`;
+}
+
+function resumeClosed(closed, agent) {
+  const a = closedSessions.find((x) => x.closed === closed);
+  if (a && _onResumeClosed) _onResumeClosed(a, { agent });
+}
+
+async function forgetClosed(closed) {
+  closedSessions = closedSessions.filter((x) => x.closed !== closed);
+  renderSessions();
+  try {
+    await fetch(api("/api/archive/remove"), {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ closed }),
+    });
+  } catch {}
 }
 
 function renderSessionCard(s) {
@@ -384,6 +448,9 @@ function renderSessionDetail(s) {
   if (s.launchCommand) {
     h += `<div class="sp-detail-row"><span class="sp-dl">Launch</span><span class="sp-dv sp-cmd">${esc(s.launchCommand.slice(0, 80))}</span></div>`;
   }
+  if (s.claudeSessionId) {
+    h += `<div class="sp-detail-row" title="Continue Agent resumes this conversation; renaming the session renames it in Claude Code too"><span class="sp-dl">Claude</span><span class="sp-dv sp-cmd">${esc(s.claudeSessionId)}</span></div>`;
+  }
 
   // Note (editable)
   h += `<div class="sp-detail-note">`;
@@ -405,6 +472,22 @@ function renderSessionDetail(s) {
 // Event handlers
 // ---------------------------------------------------------------------------
 function handleClick(e) {
+  // Recently Closed section
+  if (e.target.closest("[data-act='toggle-closed']")) {
+    closedOpen = !closedOpen;
+    try { localStorage.setItem("tl-sp-closed-open", closedOpen ? "1" : "0"); } catch {}
+    renderSessions();
+    return;
+  }
+  const closedBtn = e.target.closest(".sp-c-btn");
+  if (closedBtn) {
+    const closed = Number(closedBtn.dataset.closed);
+    if (closedBtn.dataset.act === "forget-closed") forgetClosed(closed);
+    else resumeClosed(closed, closedBtn.dataset.act === "resume-closed");
+    return;
+  }
+  if (e.target.closest(".sp-session.closed")) return;
+
   // Group toggle (but not on action buttons)
   const groupToggle = e.target.closest("[data-group-toggle]");
   if (groupToggle && !e.target.closest(".sp-group-action")) {
@@ -530,6 +613,22 @@ function handleInput(e) {
 function handleContextMenu(e) {
   if (!_showContextMenu) return;
 
+  const closedCard = e.target.closest(".sp-session.closed");
+  if (closedCard) {
+    e.preventDefault();
+    const closed = Number(closedCard.dataset.closed);
+    const a = closedSessions.find((x) => x.closed === closed);
+    if (!a) return;
+    const items = [];
+    if (isAgentEntry(a)) items.push({ label: a.claudeSessionId ? "Resume Claude Conversation" : "Continue Agent", action: "resume", handler() { resumeClosed(closed, true); } });
+    items.push({ label: "Reopen Terminal", action: "reopen", handler() { resumeClosed(closed, false); } });
+    if (a.claudeSessionId) items.push({ label: "Copy Claude Session ID", action: "copy", handler() { navigator.clipboard.writeText(a.claudeSessionId).catch(() => {}); } });
+    items.push({ separator: true });
+    items.push({ label: "Remove from List", action: "forget", handler() { forgetClosed(closed); } });
+    _showContextMenu(e.clientX, e.clientY, items);
+    return;
+  }
+
   // Session card
   const sessionCard = e.target.closest(".sp-session");
   if (sessionCard) {
@@ -614,7 +713,7 @@ function handleDragStart(e) {
 
 function handleDragOver(e) {
   const groupEl = e.target.closest(".sp-group");
-  if (!groupEl || dragSessionId == null) return;
+  if (!groupEl || groupEl.classList.contains("sp-closed") || dragSessionId == null) return;
   e.preventDefault();
   e.dataTransfer.dropEffect = "move";
   const header = groupEl.querySelector(".sp-group-header");
