@@ -1,0 +1,286 @@
+[
+ {
+  "method": "GET",
+  "path": "/api/sessions"
+ },
+ {
+  "method": "POST",
+  "path": "/api/sessions"
+ },
+ {
+  "method": "PUT",
+  "path": "/api/sessions/:id"
+ },
+ {
+  "method": "GET",
+  "path": "/api/session-groups"
+ },
+ {
+  "method": "PUT",
+  "path": "/api/session-groups"
+ },
+ {
+  "method": "POST",
+  "path": "/api/session-groups/rename"
+ },
+ {
+  "method": "POST",
+  "path": "/api/session-groups/delete"
+ },
+ {
+  "method": "DELETE",
+  "path": "/api/sessions/:id"
+ },
+ {
+  "method": "POST",
+  "path": "/api/sessions/:id/restart"
+ },
+ {
+  "method": "GET",
+  "path": "/api/sessions/:id/cwd"
+ },
+ {
+  "method": "GET",
+  "path": "/api/workspace-layout"
+ },
+ {
+  "method": "POST",
+  "path": "/api/workspace-layout"
+ },
+ {
+  "method": "GET",
+  "path": "/api/history"
+ },
+ {
+  "method": "POST",
+  "path": "/api/history"
+ },
+ {
+  "method": "GET",
+  "path": "/api/archive"
+ },
+ {
+  "method": "POST",
+  "path": "/api/archive/remove"
+ },
+ {
+  "method": "GET",
+  "path": "/api/favorites"
+ },
+ {
+  "method": "POST",
+  "path": "/api/favorites"
+ },
+ {
+  "method": "DELETE",
+  "path": "/api/favorites/:index"
+ },
+ {
+  "method": "POST",
+  "path": "/api/quick-launch"
+ },
+ {
+  "method": "GET",
+  "path": "/api/recent-folders"
+ },
+ {
+  "method": "GET",
+  "path": "/api/git/repos"
+ },
+ {
+  "method": "GET",
+  "path": "/api/git/diff-file"
+ },
+ {
+  "method": "GET",
+  "path": "/api/git/diff-for-ai"
+ },
+ {
+  "method": "GET",
+  "path": "/api/git/:action"
+ },
+ {
+  "method": "POST",
+  "path": "/api/git/stage"
+ },
+ {
+  "method": "POST",
+  "path": "/api/git/commit"
+ },
+ {
+  "method": "POST",
+  "path": "/api/git/push"
+ },
+ {
+  "method": "POST",
+  "path": "/api/git/checkout"
+ },
+ {
+  "method": "POST",
+  "path": "/api/git/unstage"
+ },
+ {
+  "method": "POST",
+  "path": "/api/git/discard"
+ },
+ {
+  "method": "POST",
+  "path": "/api/git/stash"
+ },
+ {
+  "method": "POST",
+  "path": "/api/git/stash-pop"
+ },
+ {
+  "method": "POST",
+  "path": "/api/git/worktree-add"
+ },
+ {
+  "method": "GET",
+  "path": "/api/files"
+ },
+ {
+  "method": "GET",
+  "path": "/api/file"
+ },
+ {
+  "method": "PUT",
+  "path": "/api/file"
+ },
+ {
+  "method": "GET",
+  "path": "/api/search/files"
+ },
+ {
+  "method": "GET",
+  "path": "/api/search/text"
+ },
+ {
+  "method": "POST",
+  "path": "/api/upload"
+ },
+ {
+  "method": "POST",
+  "path": "/api/clip"
+ },
+ {
+  "method": "GET",
+  "path": "/api/stats"
+ },
+ {
+  "method": "POST",
+  "path": "/api/shutdown"
+ },
+ {
+  "method": "GET",
+  "path": "/api/analytics"
+ },
+ {
+  "method": "GET",
+  "path": "/api/claude/conversation/:id"
+ },
+ {
+  "method": "GET",
+  "path": "/api/claude-usage"
+ },
+ {
+  "method": "POST",
+  "path": "/api/ngrok/start"
+ },
+ {
+  "method": "POST",
+  "path": "/api/ngrok/stop"
+ },
+ {
+  "method": "GET",
+  "path": "/api/ngrok/status"
+ },
+ {
+  "method": "POST",
+  "path": "/api/ngrok/settings"
+ },
+ {
+  "method": "GET",
+  "path": "/api/ngrok/settings"
+ },
+ {
+  "method": "POST",
+  "path": "/api/token/rotate"
+ },
+ {
+  "method": "GET",
+  "path": "/api/groups"
+ },
+ {
+  "method": "POST",
+  "path": "/api/ai/ask"
+ },
+ {
+  "method": "GET",
+  "path": "/api/claude/sessions"
+ },
+ {
+  "method": "GET",
+  "path": "/api/claude/search"
+ },
+ {
+  "method": "GET",
+  "path": "/api/claude/sessions/:id"
+ },
+ {
+  "method": "POST",
+  "path": "/api/claude/reindex"
+ },
+ {
+  "method": "GET",
+  "path": "/api/claudemd/list"
+ },
+ {
+  "method": "GET",
+  "path": "/api/claudemd/read"
+ },
+ {
+  "method": "PUT",
+  "path": "/api/claudemd/write"
+ },
+ {
+  "method": "GET",
+  "path": "/api/claudemd/templates"
+ },
+ {
+  "method": "GET",
+  "path": "/api/claudemd/memory"
+ },
+ {
+  "method": "GET",
+  "path": "/api/prompts"
+ },
+ {
+  "method": "POST",
+  "path": "/api/prompts"
+ },
+ {
+  "method": "PUT",
+  "path": "/api/prompts/:id"
+ },
+ {
+  "method": "DELETE",
+  "path": "/api/prompts/:id"
+ },
+ {
+  "method": "POST",
+  "path": "/api/prompts/:id/use"
+ },
+ {
+  "method": "GET",
+  "path": "/login"
+ },
+ {
+  "method": "POST",
+  "path": "/login"
+ },
+ {
+  "method": "GET",
+  "path": "/"
+ }
+]

@@ -59,7 +59,7 @@ async function startServer(opts = {}) {
   const home = opts.home || makeTempHome();
 
   const proc = spawn(process.execPath, [
-    path.join(__dirname, "..", "server.js"),
+    path.join(__dirname, "..", process.env.AGENV_ENTRY || "server.js"),
     "--port", String(port),
     "--host", "127.0.0.1",
     "--token", TOKEN,
