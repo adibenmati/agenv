@@ -29,3 +29,10 @@ being silently changed. Each entry: where it is in the baseline (`git show pre-t
    spaces could not be staged; and a commit message such as `"; echo x > f; "` was executed as shell syntax. `GitService`
    runs git directly (no shell), so arguments reach git verbatim. Also hardened: `--` before user-supplied paths, and
    option-looking branch/remote names (`--mirror`, `--orphan`, …) are rejected with 400.
+8. **The file API has no path restriction** (`GET/PUT /api/file`, `GET /api/files`, search, L1801–1976): any authenticated
+   client can read or overwrite any file the server's user can. The baseline comment on `PUT /api/file` says "don't write
+   outside of known directories" but no check exists. Ported as-is (`FileService`). For an IDE with a built-in terminal the
+   practical exposure matches what a terminal already allows, but over an ngrok tunnel in read-only mode the write block
+   (`/api/file` is on the read-only list) is the only guard — consider confining file routes to session folders.
+9. **Session 0 clips are saved in the upload folder, not its `.clips`** (`POST /api/clip`: `if (sessionId)` is false for 0).
+   Ported as-is.
