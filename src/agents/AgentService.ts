@@ -11,7 +11,7 @@ export type CreationMode = "fork" | "fork-compact" | "distill-briefing" | "disti
 
 const DEFAULT_BUDGET_USD = 2;
 const DEFAULT_TIMEOUT_MS = 20 * 60 * 1000;
-const ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
+const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 
 interface Runner { run(spec: RunSpec): RunHandle }
 
@@ -31,6 +31,8 @@ export function adoptionPrompt(name: string, specialty: string): string {
 export class AgentService {
   private readonly chains = new Map<string, Promise<void>>();
   private readonly handles = new Set<RunHandle>();
+  /** Bumped by cancelAll(); jobs queued before the bump do not spawn. */
+  private epoch = 0;
 
   constructor(private readonly d: AgentServiceDeps) {}
 
@@ -46,6 +48,7 @@ export class AgentService {
     return this.d.store.add(input as AgentInput, { kind: "blank" }, "");
   }
 
+  /** No "session" origin kind exists, so a bound session is recorded as blank. */
   createFromSession(o: { sessionId: number; name: string; specialty: string }): Agent {
     const s = this.d.sessions.get(o.sessionId);
     if (!s) throw new HttpError(404, "session not found");
@@ -122,31 +125,47 @@ export class AgentService {
     const first = this.get(id);
     if (typeof prompt !== "string" || !prompt.trim()) throw new HttpError(400, "prompt is required");
     if (!this.d.isDir(first.cwd)) throw new HttpError(409, `the agent's folder no longer exists: ${first.cwd}`);
-    const key = first.conversationId || `agent:${first.id}`;
-    return await this.enqueue(key, async () => {
-      const a = this.get(id);
-      if (!this.d.isDir(a.cwd)) throw new HttpError(409, `the agent's folder no longer exists: ${a.cwd}`);
-      if (a.conversationId && this.inUse(a.conversationId)) {
-        throw new HttpError(409, "the conversation is open in a running terminal session; close it or wait before running the agent");
-      }
-      const handle = this.d.runner.run({
-        cwd: a.cwd, prompt, resume: a.conversationId || undefined, permission: a.permission,
-        model: a.model, instructions: a.instructions, briefingFile: a.briefingFile, addDirs: a.addDirs, mcpConfig: a.mcpConfig,
-        maxBudgetUsd: overrides.maxBudgetUsd ?? DEFAULT_BUDGET_USD,
-        timeoutMs: overrides.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-        logPath: overrides.logPath,
-      });
-      this.handles.add(handle);
-      let r: RunResult;
-      try { r = await handle.done; } finally { this.handles.delete(handle); }
-      try {
-        this.d.store.update(id, { lastRunAt: Date.now(), ...(r.conversationId ? { conversationId: r.conversationId } : {}) });
-      } catch {}   // the agent may have been removed while it ran
-      return r;
+    const epoch = this.epoch;
+    // One writer per agent (outer chain, fixed key) and per conversation (inner chain, key resolved when the job starts,
+    // so a conversation bound by an earlier run is still honoured).
+    return await this.enqueue(`agent:${first.id}`, async () => {
+      const cur = this.get(id);
+      const exec = (): Promise<RunResult> => this.execute(id, prompt, overrides, epoch);
+      return cur.conversationId ? this.enqueue(cur.conversationId, exec) : exec();
     });
   }
 
-  cancelAll(): void { for (const h of [...this.handles]) h.cancel(); }
+  private async execute(id: string, prompt: string, overrides: Partial<RunSpec>, epoch: number): Promise<RunResult> {
+    if (epoch !== this.epoch) {
+      return { status: "cancelled", conversationId: "", text: "", costUsd: 0, numTurns: 0, durationMs: 0, exitCode: null, error: "Cancelled before it started" };
+    }
+    const a = this.get(id);
+    if (!this.d.isDir(a.cwd)) throw new HttpError(409, `the agent's folder no longer exists: ${a.cwd}`);
+    if (a.conversationId && this.inUse(a.conversationId)) {
+      throw new HttpError(409, "the conversation is open in a running terminal session; close it or wait before running the agent");
+    }
+    const handle = this.d.runner.run({
+      cwd: a.cwd, prompt, resume: a.conversationId || undefined, permission: a.permission,
+      model: a.model, instructions: a.instructions, briefingFile: a.briefingFile, addDirs: a.addDirs, mcpConfig: a.mcpConfig,
+      maxBudgetUsd: overrides.maxBudgetUsd ?? DEFAULT_BUDGET_USD,
+      timeoutMs: overrides.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      logPath: overrides.logPath,
+    });
+    this.handles.add(handle);
+    let r: RunResult;
+    try { r = await handle.done; } finally { this.handles.delete(handle); }
+    try {
+      // Bind a conversation only the first time, and only from a successful run.
+      const bind = !a.conversationId && r.status === "succeeded" && r.conversationId;
+      this.d.store.update(id, { lastRunAt: Date.now(), ...(bind ? { conversationId: r.conversationId } : {}) });
+    } catch {}   // the agent may have been removed while it ran
+    return r;
+  }
+
+  /** Runs queued or running. */
+  pendingRuns(): number { return this.chains.size; }
+
+  cancelAll(): void { this.epoch++; for (const h of [...this.handles]) h.cancel(); }
 
   private inUse(conversationId: string): boolean {
     return this.d.sessions.all().some((s) => s.claudeSessionId === conversationId && s.claudeRunning);

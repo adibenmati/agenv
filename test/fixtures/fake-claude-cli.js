@@ -13,6 +13,8 @@ if (state) {
   fs.appendFileSync(path.join(state, "calls.jsonl"), JSON.stringify({ argv, cwd: process.cwd() }) + "\n");
 }
 
+const event = (ev) => { if (state) fs.appendFileSync(path.join(state, "events.jsonl"), JSON.stringify({ ev, prompt: argv[argv.length - 1] }) + "\n"); };
+event("start");
 const dd = argv.indexOf("--");
 const prompt = dd >= 0 ? argv[dd + 1] : argv[argv.length - 1];
 const opt = (name) => { const i = argv.indexOf(name); return i >= 0 && i < (dd < 0 ? argv.length : dd) ? argv[i + 1] : undefined; };
@@ -22,7 +24,7 @@ const out = (o) => process.stdout.write((typeof o === "string" ? o : JSON.string
 
 if (mode === "fail") { process.stderr.write("fake claude exploded\n"); process.exit(1); }
 
-const sessionId = resume && !fork ? resume : crypto.randomUUID();
+const sessionId = resume && !fork && !process.env.FAKE_CLAUDE_NEWID ? resume : crypto.randomUUID();
 if (tdir) {
   const target = path.join(tdir, sessionId + ".jsonl");
   const src = resume ? path.join(tdir, resume + ".jsonl") : null;
@@ -48,6 +50,7 @@ if (mode === "hang") {
 }
 
 function finishOk() {
+  event("end");
   if (mode === "garbage") { out("not json at all"); out("{broken"); }
   if (mode === "noisy") {
     out("FIRST-MARKER");

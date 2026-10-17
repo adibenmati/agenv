@@ -35,7 +35,8 @@ const withSource = (state, id = "src-1") => {
 };
 const input = (cwd, o = {}) => ({ name: "Bob", specialty: "reviews code", cwd, ...o });
 const conv = (r, o = {}) => ({ name: "Bob", specialty: "reviews code", sourceConversationId: "src-1", cwd: r.cwd, mode: "fork", ...o });
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const events = (state) => { const f = path.join(state, "events.jsonl"); return fs.existsSync(f) ? fs.readFileSync(f, "utf8").trim().split(/\r?\n/).filter(Boolean).map((l) => JSON.parse(l)) : []; };
+const until = async (fn) => { for (let i = 0; i < 400; i++) { if (fn()) return; await new Promise((r) => setTimeout(r, 25)); } assert.fail("timed out waiting"); };
 
 describe("AgentService creation", () => {
   it("createBlank stores origin blank with empty conversationId", () => {
@@ -117,6 +118,9 @@ describe("AgentService terminals", () => {
     const r = rig(); const a = r.svc.createBlank(input(r.cwd)); r.store.update(a.id, { conversationId: "x & calc" });
     assert.throws(() => r.svc.openTerminal(a.id), (e) => e.status === 400); assert.equal(r.created.length, 0);
   });
+  it("forkConversationTerminal refuses ids that look like flags", () => {
+    const r = rig(); assert.throws(() => r.svc.forkConversationTerminal("--foo", r.cwd), (e) => e.status === 400); assert.equal(r.created.length, 0);
+  });
   it('forkConversationTerminal runs "claude --resume <id> --fork-session"', () => {
     const r = rig(); r.svc.forkConversationTerminal("c-2", r.cwd);
     assert.equal(r.created[0].runCommand, "claude --resume c-2 --fork-session"); assert.equal(r.created[0].cwd, r.cwd);
@@ -163,27 +167,53 @@ describe("AgentService.run", () => {
     assert.equal(at("--permission-mode"), "dontAsk"); assert.equal(at("--allowedTools"), "Read,Bash(ls)");
     assert.equal(at("--max-budget-usd"), "3"); assert.equal(v.at(-1), "-x go");
   });
-  it("two runs on one conversation never overlap", async () => {
-    const r = rig("slow"); const a = r.svc.createBlank(input(r.cwd)); r.store.update(a.id, { conversationId: "c-1" });
-    const t0 = Date.now();
-    const p1 = r.svc.run(a.id, "one"), p2 = r.svc.run(a.id, "two");
-    await sleep(500);
-    assert.equal(calls(r.state).length, 1, "second must wait");
-    const [r1, r2] = await Promise.all([p1, p2]);
-    assert.equal(r1.status, "succeeded"); assert.equal(r2.status, "succeeded");
-    assert.equal(calls(r.state).length, 2); assert.ok(Date.now() - t0 >= 2800);
+  it("runs of one agent never overlap, even when the first run binds the conversation", async () => {
+    const r = rig("slow"); const a = r.svc.createBlank(input(r.cwd));
+    const pA = r.svc.run(a.id, "A"), pB = r.svc.run(a.id, "B");
+    await pA;                                     // B is now running
+    await until(() => events(r.state).some((e) => e.prompt === "B"));
+    const pC = r.svc.run(a.id, "C");              // conversation id is bound now
+    await Promise.all([pB, pC]);
+    const ev = events(r.state);
+    assert.deepEqual(ev.map((e) => e.ev + e.prompt), ["startA", "endA", "startB", "endB", "startC", "endC"]);
+    assert.equal(r.svc.pendingRuns(), 0);
   });
-  it("a failed earlier run does not block the next, and the chain map drains", async () => {
+  it("two agents sharing one conversation do not overlap", async () => {
+    const r = rig("slow");
+    const a = r.svc.createBlank(input(r.cwd)), b = r.svc.createBlank(input(r.cwd, { name: "Sue" }));
+    r.store.update(a.id, { conversationId: "c-1" }); r.store.update(b.id, { conversationId: "c-1" });
+    await Promise.all([r.svc.run(a.id, "A"), r.svc.run(b.id, "B")]);
+    assert.deepEqual(events(r.state).map((e) => e.ev + e.prompt), ["startA", "endA", "startB", "endB"]);
+  });
+  it("a failed earlier run does not block the next, and the queue drains", async () => {
     const r = rig("fail"); const a = r.svc.createBlank(input(r.cwd));
     const p1 = r.svc.run(a.id, "one"), p2 = r.svc.run(a.id, "two");
     assert.equal((await p1).status, "failed"); assert.equal((await p2).status, "failed");
     assert.equal(calls(r.state).length, 2);
-    await sleep(10); assert.equal(r.svc.chains.size, 0);
+    await until(() => r.svc.pendingRuns() === 0);
   });
-  it("cancelAll cancels a running run", async () => {
+  it("a failed first run does not bind a conversation but still records lastRunAt", async () => {
+    const r = rig("fail"); const a = r.svc.createBlank(input(r.cwd));
+    await r.svc.run(a.id, "x");
+    const cur = r.store.get(a.id); assert.equal(cur.conversationId, ""); assert.equal(typeof cur.lastRunAt, "number");
+  });
+  it("a later run returning a different session_id does not change the stored id", async () => {
+    const r = rig(); const a = r.svc.createBlank(input(r.cwd));
+    const first = await r.svc.run(a.id, "one");
+    const r2 = new ClaudeRunner({ bin: FAKE, env: { FAKE_CLAUDE_MODE: "ok", FAKE_CLAUDE_STATE: r.state, FAKE_CLAUDE_NEWID: "1" } });
+    const svc2 = new AgentService({ store: r.store, forker: new ConversationForker({ runner: r2 }), runner: r2, sessions: { create() {}, get() {}, all: () => [] }, isDir: () => true });
+    const second = await svc2.run(a.id, "two");
+    assert.notEqual(second.conversationId, first.conversationId);
+    assert.equal(r.store.get(a.id).conversationId, first.conversationId);
+  });
+  it("cancelAll cancels a running run and stops queued ones from spawning", async () => {
     const r = rig("hang"); const a = r.svc.createBlank(input(r.cwd));
-    const p = r.svc.run(a.id, "x"); await sleep(600); r.svc.cancelAll();
+    const p = r.svc.run(a.id, "x"), q = r.svc.run(a.id, "y");
+    await until(() => events(r.state).length > 0);
+    r.svc.cancelAll();
     assert.equal((await p).status, "cancelled");
+    assert.equal((await q).status, "cancelled");
+    assert.equal(calls(r.state).length, 1);
   });
 });
 
