@@ -7,6 +7,16 @@ import { AgentStore } from "./agents/AgentStore";
 import { ClaudeRunner } from "./agents/ClaudeRunner";
 import { TrackedRunner } from "./agents/TrackedRunner";
 import { ConversationForker } from "./agents/ConversationForker";
+import { AutomationGuards } from "./automation/AutomationGuards";
+import { AutomationService } from "./automation/AutomationService";
+import { AutomationSettings } from "./automation/AutomationSettings";
+import type { AutomationSettingsData } from "./automation/AutomationSettings";
+import type { Routine } from "./automation/Routine";
+import { RoutineScheduler, createRunQueue, makePreflight } from "./automation/RoutineScheduler";
+import { RoutineStore } from "./automation/RoutineStore";
+import { AgentRunExecutor } from "./automation/RunExecutor";
+import { RunStore } from "./automation/RunStore";
+import type { Run } from "./automation/RunStore";
 import { ClaudeLinker } from "./claude/ClaudeLinker";
 import { ClaudeMdService } from "./claude/ClaudeMdService";
 import { claudePaths } from "./claude/paths";
@@ -59,6 +69,8 @@ export interface Runtime extends AppDeps {
   app: Express;
   server: http.Server;
   bus: TypedEmitter<SessionEvents>;
+  /** The routine tick. Not started by buildRuntime: index.ts calls startup() then start() once the server listens. */
+  scheduler: RoutineScheduler;
   /** What was saved by the previous run, for index.ts to restore from. */
   savedState: PersistedState | null;
   /** Stop timers, watchers and sockets owned by the runtime and resolve once the server has closed. Does not touch shells or saved state. */
@@ -86,6 +98,10 @@ export function buildRuntime(o: RuntimeOptions): Runtime {
   const archive = new ArchiveStore(file<ArchiveEntry[]>(".agenv-archive.enc", () => []));
   const favorites = new FavoritesStore(file<Favorite[]>(".agenv-favorites.enc", () => []));
   const agentStore = new AgentStore(file<Agent[]>(".agenv-agents.enc", () => []), createRealDirChecker());
+  const routineStore = new RoutineStore(
+    file<Routine[]>(".agenv-routines.enc", () => []), createRealDirChecker(), (id) => agentStore.get(id) !== undefined);
+  const runStore = new RunStore({ store: file<Run[]>(".agenv-runs.enc", () => []), logDir: path.join(homedir, ".agenv-runs") });
+  const automationSettings = new AutomationSettings(file<Partial<AutomationSettingsData>>(".agenv-automation.enc", () => ({})));
   const scrollbackStore = new ScrollbackStore(path.join(homedir, ".agenv-scrollback"), crypto);
   const savedState = stateFile.load();
 
@@ -119,6 +135,21 @@ export function buildRuntime(o: RuntimeOptions): Runtime {
   const server = http.createServer();
   const gateway = new WsGateway({ server, sessions, auth, policy: ngrok, bus });
 
+  // ---- automation (routines): the tick is started by index.ts once the server listens, never here ----
+  const runsChanged = (): void => gateway.broadcastEvent("runs-updated");
+  const clock = (): number => Date.now();
+  const guards = new AutomationGuards({ settings: automationSettings, runs: runStore, now: clock });
+  const executor = new AgentRunExecutor({
+    agents, runs: runStore, now: clock,
+    preflight: makePreflight({ runs: runStore, routines: routineStore, guards, now: clock }),
+  });
+  const runQueue = createRunQueue({ limit: 2, routines: routineStore, runs: runStore, executor, now: clock, onChange: runsChanged });
+  const scheduler = new RoutineScheduler({ routines: routineStore, runs: runStore, guards, queue: runQueue, now: clock, onChange: runsChanged });
+  const automation = new AutomationService({
+    routines: routineStore, runs: runStore, settings: automationSettings, scheduler, queue: runQueue, agents,
+    isDir: isRealDir, agentExists: (id) => agentStore.get(id) !== undefined, now: clock, onChange: runsChanged,
+  });
+
   // ---- Claude integration ----
   const scanner = new TranscriptScanner(claude.projects);
   const linker = new ClaudeLinker({ bus, sessions, scanner, paths: claude });
@@ -134,7 +165,7 @@ export function buildRuntime(o: RuntimeOptions): Runtime {
   });
 
   const deps: AppDeps = {
-    config, auth, sessions, agents, groups, layout, stateStore, history, archive, favorites, gateway, linker,
+    config, auth, sessions, agents, automation, groups, layout, stateStore, history, archive, favorites, gateway, linker,
     usage: new UsageService(scanner),
     sessionIndex: new SessionIndex(scanner, { projects: claude.projects, indexFile: claude.indexFile }),
     claudeMd: new ClaudeMdService({ projects: claude.projects, scanner }),
@@ -151,8 +182,10 @@ export function buildRuntime(o: RuntimeOptions): Runtime {
   server.on("request", app);
 
   return {
-    ...deps, app, server, bus, savedState,
+    ...deps, app, server, bus, savedState, scheduler,
     dispose(): Promise<void> {
+      // Stop the tick and cancel queued/running routine runs first; agents.cancelAll() then sweeps whatever is left.
+      const automationStopped = automation.dispose().catch(() => {});
       agents.cancelAll();
       linker.stop();
       gateway.dispose();
@@ -160,11 +193,11 @@ export function buildRuntime(o: RuntimeOptions): Runtime {
       analyzer.dispose();
       ngrok.dispose();
       pages.dispose();
-      if (!server.listening) return Promise.resolve();
-      return new Promise((resolve) => {
+      const serverClosed = !server.listening ? Promise.resolve() : new Promise<void>((resolve) => {
         server.close(() => resolve());
         (server as any).closeAllConnections?.();   // open WebSockets would otherwise keep the server from closing
       });
+      return Promise.all([automationStopped, serverClosed]).then(() => undefined);
     },
   };
 }

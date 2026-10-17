@@ -157,6 +157,8 @@ function main(): void {
   runtime.server.listen(config.port, config.host, () => {
     console.log(`[agenv] Listening on ${config.host}:${config.port}`);
     stateStore.release();   // the port is ours: save the restored/initial sessions now
+    // Routines only run in the process that owns the port: close runs a dead server left active, apply catch-up, then tick.
+    try { runtime.scheduler.startup(); runtime.scheduler.start(); } catch (e) { console.error(`[agenv] Routine scheduler failed to start: ${(e as Error).message}`); }
     // Write PID file so 'agenv stop/kill' can find us
     try { fs.writeFileSync(pidPath, JSON.stringify({ pid: process.pid, port: config.port, host: config.host, started: Date.now() })); } catch {}
   });

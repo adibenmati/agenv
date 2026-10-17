@@ -90,7 +90,7 @@ function int(v: unknown, field: string, min: number, max: number, fallback: numb
   return v;
 }
 
-function resolveCron(v: unknown): string {
+export function resolveCron(v: unknown): string {
   if (typeof v !== "string" || !v.trim()) return bad("cron is required");
   const src = v.trim();
   if (!src.startsWith("preset:")) return src;

@@ -1,4 +1,5 @@
 import type { AgentService } from "../agents/AgentService";
+import type { AutomationService } from "../automation/AutomationService";
 import type { ClaudeLinker } from "../claude/ClaudeLinker";
 import type { ClaudeMdService } from "../claude/ClaudeMdService";
 import type { SessionIndex } from "../claude/SessionIndex";
@@ -28,6 +29,7 @@ export interface AppDeps {
   auth: AuthService;
   sessions: SessionManager;
   agents: AgentService;
+  automation: AutomationService;
   groups: GroupRegistry;
   layout: WorkspaceLayout;
   stateStore: StateStore;
