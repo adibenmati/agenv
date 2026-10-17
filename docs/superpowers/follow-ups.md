@@ -9,3 +9,10 @@ being silently changed. Each entry: where it is in the baseline (`git show pre-t
    Suggested: only create a key when the file does not exist; refuse to overwrite a malformed one.
 2. **`agenv help` documents the wrong default** for `--max-sessions` ("default: 10"; the code default is 20)
    (`src/cli/commands.ts` HELP text, baseline L289).
+3. **The shell executable kept its quotes** (L521–523): `agenv --shell '"C:\Program Files\...\pwsh.exe" -NoLogo'` passed
+   `"C:\Program Files\...\pwsh.exe"` (quotes included) as the file to node-pty, while the arguments were unquoted. The port
+   (`src/sessions/shell.ts`) strips quotes from the executable too, which is what node-pty expects. Behavior changed only for
+   quoted executable paths (previously likely broken). Verify with a real quoted shell path on Windows.
+4. **A failed shell spawn leaves a sleeping session record** (`createSession` then `startSession`, L844/880): if
+   `pty.spawn` throws (shell not found), `POST /api/sessions` answers 500 but the session stays in the list as a tab that can
+   never start. Ported as-is in `SessionManager.create`. Suggested: remove the record when the first spawn fails.

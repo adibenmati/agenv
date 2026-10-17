@@ -12,11 +12,13 @@ export class ScrollbackStore {
     try { return Buffer.from(this.crypto.decryptJSON<string>(fs.readFileSync(this.file(id), "utf8"))); } catch { return null; }
   }
 
-  save(id: number, data: Buffer): void {
+  /** Returns false when the write failed, so the caller can leave the buffer marked unsaved. */
+  save(id: number, data: Buffer): boolean {
     try {
       fs.mkdirSync(this.dir, { recursive: true });
       fs.writeFileSync(this.file(id), this.crypto.encryptJSON(data.toString("utf8")), "utf8");
-    } catch {}
+      return true;
+    } catch { return false; }
   }
 
   clear(id: number): void {
