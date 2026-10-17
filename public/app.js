@@ -435,7 +435,9 @@ agentsPanel.init({
   async onOpenSession(session) {
     showTerminals();
     tabs.setSessionMeta(session.id, session);
-    await tabs.createWorkspace(session.name || "Session " + session.id, session.id, session);
+    const existing = tabs.findWorkspaceBySession(session.id);
+    if (existing) tabs.switchToWorkspace(existing);
+    else await tabs.createWorkspace(session.name || "Session " + session.id, session.id, session);
     sessionsPanel.refresh();
   },
 });

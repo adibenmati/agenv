@@ -32,8 +32,10 @@ async function boot(mode, work) {
     env: { ...process.env, HOME: home, USERPROFILE: home, AGENV_CLAUDE_BIN: FAKE, FAKE_CLAUDE_STATE: state, FAKE_CLAUDE_MODE: mode, PATH: stub + path.delimiter + process.env.PATH },
     stdio: "ignore", windowsHide: true,
   });
-  const get = (p) => new Promise((res) => http.get(`http://127.0.0.1:${port}${p}?token=T`, (r) => { let b = ""; r.on("data", (d) => (b += d)); r.on("end", () => res(JSON.parse(b))); }));
-  await sleep(1500);
+  const get = (p) => new Promise((res, rej) => http.get(`http://127.0.0.1:${port}${p}?token=T`, (r) => { let b = ""; r.on("data", (d) => (b += d)); r.on("end", () => { try { res(JSON.parse(b)); } catch (e) { rej(e); } }); }).on("error", rej));
+  for (let i = 0; ; i++) {
+    try { await get("/api/agents"); break; } catch { if (i > 60) throw new Error("server did not start"); await sleep(250); }
+  }
   return { port, proc, get, dirs: [home, state, stub] };
 }
 
@@ -70,6 +72,7 @@ async function boot(mode, work) {
     // 1. The panel exists and starts empty
     await page.click("#ab-agents");
     await page.waitForSelector("#agents-panel.active .ag-new");
+    await page.waitForFunction(() => /No agents yet/.test(document.querySelector("#agents-panel .ag-empty-text")?.textContent || ""));
     ok((await rowNames(page)).length === 0, "Agents panel opens with an empty list");
 
     // 2. Blank agent
@@ -127,6 +130,14 @@ async function boot(mode, work) {
     await waitFor(async () => (await page.$$eval(".tab", (e) => e.length)) > tabsBefore, 10000, "tab");
     ok(true, "Open terminal adds a session tab");
     ok((await A.get("/api/sessions")).some((s) => s.name === "blank-one"), "the session carries the agent name");
+    // Opening again (also a double click) reuses the open session and tab: no second session, no second tab
+    const openBtn = '#agents-panel .ag-row[data-name="blank-one"] [data-act="open"]';
+    const sessCount = (await A.get("/api/sessions")).length;
+    await page.click(openBtn);
+    await page.click(openBtn, { clickCount: 2 }).catch(() => {});
+    await sleep(1500);
+    ok((await A.get("/api/sessions")).filter((x) => x.name === "blank-one").length === 1 && (await A.get("/api/sessions")).length === sessCount, "Open terminal again creates no second session");
+    ok((await page.$$eval(".tab", (e) => e.length)) === tabsBefore + 1, "Open terminal again creates no second tab");
 
     // 6. Edit, duplicate, delete with in-app dialogs
     await page.click('#agents-panel .ag-row[data-name="blank-one"] [data-act="edit"]');
@@ -162,6 +173,31 @@ async function boot(mode, work) {
     ok((await rowNames(page)).filter((n) => n === "blank-one").length === 1, "duplicate name: toast shown and no second row");
     await page.keyboard.press("Escape");
 
+    // 7b. Overwrite: an existing briefing is only replaced after an explicit overwrite confirm
+    const brief = path.join(work, ".claude", "agenv-briefings", "brief.md");
+    fs.mkdirSync(path.dirname(brief), { recursive: true });
+    fs.writeFileSync(brief, "mine");
+    await page.click("#agents-panel .ag-new");
+    await page.click('.ag-dialog [data-kind="conversation"]');
+    await page.selectOption(".ag-dialog .ag-source", SMALL);
+    await fillDialog(page, { name: "brief", specialty: "b", cwd: work });
+    await page.selectOption(".ag-dialog .ag-mode", "distill-briefing");
+    await page.check(".ag-dialog .ag-confirm");
+    await page.click(".ag-dialog .ag-create");
+    await page.waitForSelector(".ag-dialog .ag-overwrite-row:not([hidden])");
+    ok(fs.readFileSync(brief, "utf8") === "mine" && !(await agentsOf(A)).some((a) => a.name === "brief"), "existing file: refused, file untouched, overwrite option shown");
+    ok(await page.isDisabled(".ag-dialog .ag-create"), "Create stays disabled until overwrite is ticked");
+    await page.selectOption(".ag-dialog .ag-mode", "distill-skill");
+    ok(await page.isHidden(".ag-dialog .ag-overwrite-row"), "changing the target resets the overwrite option");
+    await page.selectOption(".ag-dialog .ag-mode", "distill-briefing");
+    await page.check(".ag-dialog .ag-confirm");
+    await page.click(".ag-dialog .ag-create");
+    await page.waitForSelector(".ag-dialog .ag-overwrite-row:not([hidden])");
+    await page.check(".ag-dialog .ag-overwrite");
+    await page.click(".ag-dialog .ag-create");
+    await page.waitForSelector('#agents-panel .ag-row[data-name="brief"]', { timeout: 20000 });
+    ok(fs.readFileSync(brief, "utf8") !== "mine", "overwrite confirmed: file replaced and agent listed");
+
     // 8. Claude search: Fork conversation opens a terminal, Make agent prefills the dialog
     await page.click("#ab-claude");
     await page.waitForSelector(`#claude-search-panel .cs-card[data-id="${SMALL}"]`);
@@ -170,9 +206,10 @@ async function boot(mode, work) {
       && await page.locator(".ctx-menu .ctx-item", { hasText: "Make agent from this" }).count() > 0, "search card context menu has both actions");
     await page.keyboard.press("Escape");
     const sess0 = (await A.get("/api/sessions")).length;
-    await page.click(`#claude-search-panel .cs-card[data-id="${SMALL}"] [data-act="fork"]`);
+    await page.click(`#claude-search-panel .cs-card[data-id="${SMALL}"] [data-act="fork"]`, { clickCount: 2 });
     await waitFor(async () => (await A.get("/api/sessions")).length > sess0, 10000, "fork session");
-    ok(true, "Fork conversation opens a new terminal session");
+    await sleep(1500);
+    ok((await A.get("/api/sessions")).length === sess0 + 1, "double-clicking Fork creates exactly one session");
     await page.click(`#claude-search-panel .cs-card[data-id="${SMALL}"] [data-act="make-agent"]`);
     await page.waitForSelector(".ag-dialog");
     await page.waitForFunction((id) => document.querySelector(".ag-dialog .ag-source")?.value === id, SMALL).catch(() => {});

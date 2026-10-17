@@ -111,7 +111,7 @@ function assertInside(cwd: string, target: string): void {
 function assertAbsent(file: string): void {
   let exists = true;
   try { fs.lstatSync(file); } catch { exists = false; }
-  if (exists) throw new HttpError(409, `${file} already exists`);
+  if (exists) throw new HttpError(409, `${file} already exists`, { error: `${file} already exists`, code: "exists" });
 }
 
 function skillFile(name: string, specialty: string, body: string): string {
@@ -143,7 +143,7 @@ function publishNew(tmp: string, file: string): void {
   try {
     fs.linkSync(tmp, file);
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "EEXIST") throw new HttpError(409, `${file} already exists`);
+    if ((e as NodeJS.ErrnoException).code === "EEXIST") throw new HttpError(409, `${file} already exists`, { error: `${file} already exists`, code: "exists" });
     assertAbsent(file);   // file system without hard links: best effort
     fs.renameSync(tmp, file);
     return;

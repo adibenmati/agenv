@@ -10,6 +10,8 @@ let _toast = null;         // (message, type) => {}
 let pollTimer = null;
 let agents = [];
 let loaded = false;
+const pending = new Set(); // in-flight actions, keyed "open:<agent id>" / "fork:<conversation id>"
+const openedSessions = new Map(); // agent id -> id of the session its terminal was last opened in
 
 const json = (method, body) => ({ method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
 
@@ -18,7 +20,7 @@ async function request(path, opts) {
   try { resp = await fetch(api(path), opts); } catch (e) { throw new Error("Network error: " + e.message); }
   let data = null;
   try { data = await resp.json(); } catch {}
-  if (!resp.ok) { const err = new Error((data && data.error) || "Request failed (" + resp.status + ")"); err.status = resp.status; throw err; }
+  if (!resp.ok) { const err = new Error((data && data.error) || "Request failed (" + resp.status + ")"); err.status = resp.status; err.code = data && data.code; throw err; }
   return data;
 }
 
@@ -82,7 +84,7 @@ function renderRow(a) {
   h += `<div class="ag-meta"><span class="ag-conv" title="${esc(a.conversationId || "")}">${esc(conv)}</span><span class="ag-last">${esc(last)}</span></div>`;
   h += `</div>`;
   h += `<div class="ag-actions">`;
-  h += `<button class="ag-btn open" data-act="open" title="Open terminal">&#9654;</button>`;
+  h += `<button class="ag-btn open" data-act="open" title="Open terminal"${pending.has("open:" + a.id) ? " disabled" : ""}>&#9654;</button>`;
   h += `<button class="ag-btn" data-act="edit" title="Edit">&#9998;</button>`;
   h += `<button class="ag-btn" data-act="duplicate" title="Duplicate">&#10064;</button>`;
   h += `<button class="ag-btn danger" data-act="delete" title="Delete">&#10005;</button>`;
@@ -123,20 +125,41 @@ function rowAction(act, a) {
   else if (act === "delete") openDeleteDialog(a);
 }
 
+/** Runs fn once per key at a time: a second call while the first is pending is ignored. */
+async function guarded(key, fn) {
+  if (pending.has(key)) return;
+  pending.add(key); renderList();
+  try { await fn(); } finally { pending.delete(key); renderList(); }
+}
+
+/** An agent's terminal that is still open is shown again instead of starting a second session. */
 async function openTerminal(a) {
-  try {
-    const session = await request("/api/agents/" + encodeURIComponent(a.id) + "/open", json("POST"));
-    if (_onOpenSession) _onOpenSession(session);
-    refresh();
-  } catch (e) { toast("Could not open " + a.name + ": " + e.message, "error"); }
+  await guarded("open:" + a.id, async () => {
+    try {
+      let session = null;
+      const known = openedSessions.get(a.id);
+      if (known != null) {
+        try {
+          const r = await fetch(api("/api/sessions"));
+          if (r.ok) session = (await r.json()).find((s) => s.id === known) || null;
+        } catch {}
+      }
+      if (!session) session = await request("/api/agents/" + encodeURIComponent(a.id) + "/open", json("POST"));
+      openedSessions.set(a.id, session.id);
+      if (_onOpenSession) await _onOpenSession(session);
+      refresh();
+    } catch (e) { toast("Could not open " + a.name + ": " + e.message, "error"); }
+  });
 }
 
 /** Open a terminal that forks a conversation (claude --resume <id> --fork-session) in its folder. */
 export async function forkConversation(conversationId, cwd) {
-  try {
-    const session = await request("/api/claude/conversations/" + encodeURIComponent(conversationId) + "/fork", json("POST", { cwd }));
-    if (_onOpenSession) _onOpenSession(session);
-  } catch (e) { toast("Could not fork the conversation: " + e.message, "error"); }
+  await guarded("fork:" + conversationId, async () => {
+    try {
+      const session = await request("/api/claude/conversations/" + encodeURIComponent(conversationId) + "/fork", json("POST", { cwd }));
+      if (_onOpenSession) await _onOpenSession(session);
+    } catch (e) { toast("Could not fork the conversation: " + e.message, "error"); }
+  });
 }
 
 // ---- Dialog plumbing ----
@@ -244,7 +267,7 @@ export async function openCreateDialog(prefill) {
       <label class="ag-label">Name<input class="ask-input ag-name" type="text" spellcheck="false" placeholder="letters, digits, - and _" /></label>
       <label class="ag-label">Specialty<input class="ask-input ag-specialty" type="text" spellcheck="false" placeholder="what this agent is good at" /></label>
     </div>
-    <div data-sec="cwd"><label class="ag-label">Folder<input class="ask-input ag-cwd" type="text" spellcheck="false" placeholder="absolute path of the project folder" /></label></div>
+    <div data-sec="cwd"><label class="ag-label">Folder<input class="ask-input ag-cwd" type="text" spellcheck="false" placeholder="absolute path of the project folder" /></label><div class="ag-kind-hint ag-cwd-hint" hidden>This conversation does not record a folder. Enter the project folder.</div></div>
     <div data-sec="blank"><label class="ag-label">Instructions (optional)<textarea class="ask-input ag-instructions" rows="2" spellcheck="false"></textarea></label></div>
     <div data-sec="session"><label class="ag-label">Session<select class="ask-input ag-session"></select></label></div>
     <div data-sec="conversation">
@@ -268,7 +291,7 @@ export async function openCreateDialog(prefill) {
   const q = (s) => ov.querySelector(s);
 
   let conversations = [], sessions = [];
-  let est = null, estState = "idle", estSeq = 0, busy = false, needOverwrite = false, cwdTouched = false;
+  let est = null, estState = "idle", estSeq = 0, busy = false, needOverwrite = false, overwriteKey = "", cwdTouched = false;
   const hints = {
     blank: "An empty agent. Its conversation starts the first time it runs or its terminal is opened.",
     session: "Binds the conversation a session is running. No Claude call, no cost; the session keeps using that conversation.",
@@ -302,7 +325,11 @@ export async function openCreateDialog(prefill) {
       pathEl.textContent = t || "(enter a name and a folder first)";
       pathEl.classList.toggle("empty", !t);
     }
+    const key = distill ? mode() + "|" + curTarget() : "";
+    if (key !== overwriteKey) { needOverwrite = false; overwriteKey = key; }
     q(".ag-overwrite-row").hidden = !(distill && needOverwrite);
+    const sel = conversations.find((x) => x.id === q(".ag-source").value);
+    q(".ag-cwd-hint").hidden = !(kind === "conversation" && sel && !(sel.cwd || sel.projectPath) && !q(".ag-cwd").value.trim());
     renderEstimate();
     const okToSend = !busy
       && !(kind === "conversation" && estState === "loading")
@@ -375,7 +402,7 @@ export async function openCreateDialog(prefill) {
       refresh();
     } catch (e) {
       busy = false;
-      if (isDistill() && e.status === 409 && /already exists/.test(e.message) && !/agent named/.test(e.message)) needOverwrite = true;
+      if (isDistill() && e.status === 409 && e.code === "exists") needOverwrite = true;
       toast("Could not create the agent: " + e.message, "error");
       const el = q(".ag-err"); el.textContent = e.message; el.hidden = false;
       sync();
@@ -386,7 +413,7 @@ export async function openCreateDialog(prefill) {
   fillSelect(q(".ag-mode"), MODES);
   ov.addEventListener("click", (e) => {
     const k = e.target.closest(".ag-kind");
-    if (k) { kind = k.dataset.kind; if (kind === "conversation" && estState === "idle") loadEstimate(); else sync(); return; }
+    if (k) { kind = k.dataset.kind; if (kind === "conversation") onSourceChange(); else sync(); return; }
     if (e.target.closest(".ag-use-compact")) { q(".ag-mode").value = "fork-compact"; sync(); return; }
     const r = e.target.closest("[data-r]");
     if (!r) return;
@@ -394,7 +421,6 @@ export async function openCreateDialog(prefill) {
   });
   ov.addEventListener("input", (e) => {
     if (e.target.classList.contains("ag-cwd")) cwdTouched = true;
-    needOverwrite = needOverwrite && e.target.classList.contains("ag-overwrite");
     sync();
   });
   ov.addEventListener("change", (e) => {
@@ -408,10 +434,10 @@ export async function openCreateDialog(prefill) {
   const [convs, sess, ags] = await Promise.all([
     fetch(api("/api/claude/sessions")).then((r) => (r.ok ? r.json() : [])).catch(() => []),
     fetch(api("/api/sessions")).then((r) => (r.ok ? r.json() : [])).catch(() => []),
-    fetch(api("/api/agents")).then((r) => (r.ok ? r.json() : [])).catch(() => []),
+    fetch(api("/api/agents")).then((r) => (r.ok ? r.json() : null)).catch(() => null),
   ]);
   if (!ov.isConnected) return;
-  agents = ags; renderList();
+  if (ags) { agents = ags; renderList(); }
   conversations = convs.slice().sort((a, b) => (b.lastMessage || 0) - (a.lastMessage || 0));
   const convItems = conversations.map((c) => [c.id, `${c.slug || c.id.slice(0, 8)} · ${projectShort(c.project)} · ${c.id.slice(0, 8)}`]);
   const want = prefill.sourceConversationId;
@@ -424,7 +450,7 @@ export async function openCreateDialog(prefill) {
   if (!sessItems.length) sessItems.push(["", "No session is linked to a Claude conversation"]);
   fillSelect(q(".ag-session"), sessItems, prefill.sessionId != null ? String(prefill.sessionId) : null);
 
-  const dupItems = ags.map((a) => [a.id, a.name]);
+  const dupItems = agents.map((a) => [a.id, a.name]);
   if (!dupItems.length) dupItems.push(["", "No agents to duplicate"]);
   fillSelect(q(".ag-dup-agent"), dupItems, prefill.agentId);
 

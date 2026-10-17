@@ -70,7 +70,9 @@ describe("agents API", () => {
 
   it("duplicate name is a 409", async () => {
     assert.equal((await post("/api/agents", agent("twin"))).status, 200);
-    assert.equal((await post("/api/agents", agent("twin"))).status, 409);
+    const dup = await post("/api/agents", agent("twin"));
+    assert.equal(dup.status, 409);
+    assert.equal(dup.body.code, undefined);
   });
 
   it("unknown agent id is a 404", async () => {
@@ -107,6 +109,7 @@ describe("agents API", () => {
     const body = { name: "brief", specialty: "b", sourceConversationId: sourceId, mode: "distill-briefing", cwd: ctx.work };
     const r = await post("/api/agents/from-conversation", body);
     assert.equal(r.status, 409, JSON.stringify(r.body));
+    assert.equal(r.body.code, "exists");
     assert.equal(fs.readFileSync(file, "utf8"), "mine");
     const ok = await post("/api/agents/from-conversation", { ...body, overwrite: true });
     assert.equal(ok.status, 200, JSON.stringify(ok.body));
