@@ -1,7 +1,7 @@
 import * as crypto from "crypto";
 import { HttpError } from "../core/HttpError";
 import type { JsonStore } from "../core/JsonStore";
-import { Agent, AgentInput, AgentOrigin, validateAgentInput } from "./Agent";
+import { Agent, AgentInput, AgentOrigin, validateAgentInput, validateOrigin } from "./Agent";
 
 /** Named agents (~/.agenv-agents.enc). Names are unique case-insensitively; every mutation is persisted. */
 export class AgentStore {
@@ -35,10 +35,17 @@ export class AgentStore {
     const agents = this.list();
     const cur = agents.find((a) => a.id === id);
     if (!cur) throw new HttpError(404, "agent not found");
-    const { conversationId, lastRunAt, origin, ...editable } = patch;
-    const v = validateAgentInput({ ...cur, ...editable }, { isDir: this.isDir });
-    this.assertNameFree(agents, v.name, id);
-    Object.assign(cur, v, { updated: Date.now() });
+    const defined = Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)) as Partial<Agent>;
+    const { conversationId, lastRunAt, origin, ...editable } = defined;
+    if (conversationId !== undefined && typeof conversationId !== "string") throw new HttpError(400, "conversationId must be a string");
+    if (lastRunAt !== undefined && lastRunAt !== null && !(typeof lastRunAt === "number" && Number.isFinite(lastRunAt))) throw new HttpError(400, "lastRunAt must be a number or null");
+    if (origin !== undefined) validateOrigin(origin);
+    if (Object.keys(editable).length) {
+      // The folder is only checked when the patch changes it, so recording a run never depends on the folder still existing.
+      const v = validateAgentInput({ ...cur, ...editable }, { isDir: "cwd" in editable ? this.isDir : () => true });
+      this.assertNameFree(agents, v.name, id);
+      Object.assign(cur, v, { updated: Date.now() });
+    }
     if (conversationId !== undefined) cur.conversationId = conversationId;
     if (lastRunAt !== undefined) cur.lastRunAt = lastRunAt;
     if (origin !== undefined) cur.origin = origin;

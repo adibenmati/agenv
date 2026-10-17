@@ -60,7 +60,7 @@ export function validateName(v: unknown): string {
 
 export function validatePermission(v: unknown): Permission {
   if (v === undefined || v === null) return { mode: "acceptEdits", allowedTools: [] };
-  if (typeof v !== "object") return bad("permission must be an object");
+  if (typeof v !== "object" || Array.isArray(v)) return bad("permission must be an object");
   const p = v as { mode?: unknown; allowedTools?: unknown };
   const mode = p.mode === undefined ? "acceptEdits" : p.mode;
   if (!PERMISSION_MODES.includes(mode as PermissionMode)) bad("permission.mode is not valid");
@@ -88,4 +88,22 @@ export function validateAgentInput(input: unknown, opts: { isDir: (p: string) =>
     model: str(o.model, "model"),
     permission: validatePermission(o.permission),
   };
+}
+
+export function validateOrigin(v: unknown): AgentOrigin {
+  const o = v as Record<string, unknown> | null;
+  if (!o || typeof o !== "object") return bad("origin must be an object");
+  switch (o.kind) {
+    case "blank": return { kind: "blank" };
+    case "fork":
+      if (typeof o.sourceConversationId === "string" && typeof o.compacted === "boolean") return { kind: "fork", sourceConversationId: o.sourceConversationId, compacted: o.compacted };
+      break;
+    case "distilled":
+      if (typeof o.sourceConversationId === "string" && (o.artifact === "briefing" || o.artifact === "skill")) return { kind: "distilled", sourceConversationId: o.sourceConversationId, artifact: o.artifact };
+      break;
+    case "duplicate":
+      if (typeof o.sourceAgentId === "string") return { kind: "duplicate", sourceAgentId: o.sourceAgentId };
+      break;
+  }
+  return bad("origin is not valid");
 }

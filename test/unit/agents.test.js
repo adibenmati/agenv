@@ -77,4 +77,36 @@ describe("AgentStore", () => {
     assert.equal(store.get(a.id), undefined);
     assert.equal(status(() => store.remove(a.id)), 404);
   });
+  it("bookkeeping patches succeed even when the folder has been removed", () => {
+    const dirs = new Set(["/ok"]);
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agenv-a-"));
+    const js = new JsonStore({ path: path.join(dir, "agents.enc"), crypto: new Crypto(path.join(dir, "key")), fallback: () => [] });
+    const store = new AgentStore(js, (p) => dirs.has(p));
+    const a = store.add(input(), blank);
+    dirs.delete("/ok");
+    const u = store.update(a.id, { lastRunAt: 5, conversationId: "c1" });
+    assert.equal(u.lastRunAt, 5); assert.equal(u.conversationId, "c1"); assert.equal(u.cwd, "/ok");
+    assert.equal(status(() => store.update(a.id, { cwd: "/nope" })), 400);
+  });
+  it("validates bookkeeping fields", () => {
+    const { store } = mkStore();
+    const a = store.add(input(), blank);
+    for (const patch of [{ conversationId: 5 }, { lastRunAt: "x" }, { lastRunAt: NaN }, { lastRunAt: Infinity }, { origin: null }, { origin: { kind: "x" } },
+      { origin: { kind: "fork", sourceConversationId: "s" } }, { origin: { kind: "fork", sourceConversationId: 1, compacted: true } },
+      { origin: { kind: "distilled", sourceConversationId: "s", artifact: "other" } }, { origin: { kind: "duplicate" } }]) {
+      assert.equal(status(() => store.update(a.id, patch)), 400, JSON.stringify(patch));
+    }
+    const origins = [blank, { kind: "fork", sourceConversationId: "s", compacted: false },
+      { kind: "distilled", sourceConversationId: "s", artifact: "skill" }, { kind: "duplicate", sourceAgentId: "q" }];
+    for (const origin of origins) assert.deepEqual(store.update(a.id, { origin }).origin, origin);
+    assert.equal(store.update(a.id, { lastRunAt: null }).lastRunAt, null);
+    assert.equal(store.update(a.id, { lastRunAt: 7 }).lastRunAt, 7);
+    assert.equal(store.update(a.id, { conversationId: "" }).conversationId, "");
+  });
+  it("update ignores undefined values; permission rejects arrays", () => {
+    const { store } = mkStore();
+    const a = store.add(input(), blank);
+    assert.equal(store.update(a.id, { name: undefined, specialty: undefined }).name, "Foo");
+    assert.equal(status(() => store.update(a.id, { permission: [] })), 400);
+  });
 });
