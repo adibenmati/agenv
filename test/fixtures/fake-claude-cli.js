@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Fake `claude` for tests. Driven by env FAKE_CLAUDE_MODE (ok|fail|hang|budget|garbage|noisy) and FAKE_CLAUDE_STATE (dir).
+// Fake `claude` for tests. Driven by env FAKE_CLAUDE_MODE (ok|fail|hang|budget|garbage|noisy|slow|maxturns|longline) and FAKE_CLAUDE_STATE (dir).
 "use strict";
 const fs = require("fs"), path = require("path"), crypto = require("crypto");
 const { spawn } = require("child_process");
@@ -38,7 +38,14 @@ if (mode === "hang") {
   const child = spawn(process.execPath, ["-e", "setInterval(()=>{},1000)"], { stdio: "ignore" });
   if (state) fs.writeFileSync(path.join(state, "child.pid"), String(child.pid));
   setInterval(() => {}, 1000);
+} else if (mode === "slow") {
+  out("SLOW-FIRST-LINE");
+  setTimeout(finishOk, 1500);
 } else {
+  finishOk();
+}
+
+function finishOk() {
   if (mode === "garbage") { out("not json at all"); out("{broken"); }
   if (mode === "noisy") {
     out("FIRST-MARKER");
@@ -46,11 +53,12 @@ if (mode === "hang") {
     for (let i = 0; i < 6 * 1024; i++) out(line);
     out("LAST-MARKER");
   }
+  if (mode === "longline") process.stdout.write("y".repeat(2 * 1024 * 1024) + "\n");
   const compact = prompt === "/compact";
   const budget = mode === "budget";
   out({
     type: "result",
-    subtype: budget ? "error_max_budget_usd" : "success",
+    subtype: budget ? "error_max_budget_usd" : mode === "maxturns" ? "error_max_turns" : "success",
     result: compact || budget ? "" : "reply to: " + prompt,
     session_id: sessionId,
     total_cost_usd: budget ? 1.02 : 0.0123,

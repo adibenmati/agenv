@@ -118,7 +118,7 @@ describe("ClaudeRunner", () => {
     assert.equal(r.status, "cancelled");
     await until(() => !alive(childPid(state)));
   });
-  it("log file is capped at 5 MB keeping the tail", async () => {
+  it("log file is capped at 5 MB keeping the tail, starting on a line boundary", async () => {
     const logPath = path.join(mkdir(), "run.log");
     const r = await runner("noisy", mkdir()).run(spec({ logPath })).done;
     assert.equal(r.status, "succeeded");
@@ -126,6 +126,34 @@ describe("ClaudeRunner", () => {
     assert.ok(Buffer.byteLength(text) <= 5 * 1024 * 1024);
     assert.match(text, /LAST-MARKER/);
     assert.doesNotMatch(text, /FIRST-MARKER/);
+    const lines = text.split("\n");
+    assert.equal(lines[0], "x".repeat(1023));
+  });
+  it("the log is on disk while the run is still in progress", async () => {
+    const logPath = path.join(mkdir(), "sub", "run.log");
+    const h = runner("slow", mkdir()).run(spec({ logPath }));
+    let finished = false; h.done.then(() => { finished = true; });
+    await until(() => fs.existsSync(logPath) && fs.readFileSync(logPath, "utf8").includes("SLOW-FIRST-LINE"));
+    assert.equal(finished, false);
+    assert.equal((await h.done).status, "succeeded");
+  });
+  it("a normal success run logs every event line and prefixes stderr", async () => {
+    const logPath = path.join(mkdir(), "run.log");
+    await runner("ok", mkdir()).run(spec({ logPath })).done;
+    const log = fs.readFileSync(logPath, "utf8");
+    assert.match(log, /"type":"assistant"/); assert.match(log, /"type":"result"/);
+    const failLog = path.join(mkdir(), "f.log");
+    await runner("fail", mkdir()).run(spec({ logPath: failLog })).done;
+    assert.match(fs.readFileSync(failLog, "utf8"), /\[stderr\] fake claude exploded/);
+  });
+  it("a result with a non-success subtype is failed even when is_error is false", async () => {
+    const r = await runner("maxturns", mkdir()).run(spec()).done;
+    assert.equal(r.status, "failed");
+    assert.match(r.error, /error_max_turns/);
+  });
+  it("an endless line without a newline does not grow memory unbounded or break the run", async () => {
+    const r = await runner("longline", mkdir()).run(spec()).done;
+    assert.equal(r.status, "succeeded");
   });
   it("a .js bin is spawned through process.execPath", async () => {
     const state = mkdir();
