@@ -34,6 +34,7 @@ src/                   The server, in TypeScript (compiled to dist/ with `npm ru
   persistence/         State, history, archive, favorites and scrollback stores
   sessions/            Session, SessionManager, Scrollback, OutputAnalyzer, GroupRegistry, WorkspaceLayout
   claude/              ClaudeLinker, TranscriptScanner, UsageService, SessionIndex, ClaudeMdService
+  agents/              Agent, AgentStore (encrypted ~/.agenv-agents.enc), ClaudeRunner (headless claude), ConversationForker (fork/compact/distill), AgentService
   features/            GitService, FileService, SearchService, AiService, PromptLibrary, NgrokTunnel, SystemStats
   http/                createApp, one router per area (routes/), WsGateway, page builder, error rendering
 electron.js            Electron desktop app wrapper
@@ -72,6 +73,7 @@ Every job has one class, and objects get what they need through their constructo
 - **A `Session` knows nothing about WebSockets.** Things that happen to a session (`output`, `status`, `cwd`, `command`, `changed`, `deleted`) are published on a typed event bus; the WebSocket gateway, output analyzer, Claude linker and state store subscribe. A listener that throws is logged and cannot break the others.
 - **Persistence is a repository per file** (`JsonStore`). File names and formats under `~/.agenv-*` are a compatibility contract: an older install must keep loading.
 - **Behavior is guarded by tests, not by reading.** HTTP and WebSocket behavior is tested black-box; classes are unit-tested with a fake pty.
+- **Agents never call the real Claude in tests.** `ClaudeRunner` spawns `AGENV_CLAUDE_BIN` (default `claude`); tests point it at `test/fixtures/fake-claude-cli.js`, which fakes transcripts and results and is steered by `FAKE_CLAUDE_MODE` (`ok`, `fail`, `hang`, `budget`, `garbage`, `noisy`, `slow`, `maxturns`, `longline`, `fail-late`, `fail-compact`) and `FAKE_CLAUDE_STATE` (a directory that records calls). The opt-in `AGENV_REAL_CLAUDE=1 npm run check:agents-real` runs the fork/compact flow against the real CLI (about 5 cents, build first); `--against-fake` runs the same script for free.
 
 Questionable behavior found while migrating from the old single-file server is recorded in `docs/superpowers/follow-ups.md`.
 

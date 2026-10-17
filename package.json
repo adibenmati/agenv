@@ -19,6 +19,7 @@
     "prepublishOnly": "npm run build && node scripts/run-tests.js",
     "build:watch": "tsc -w --preserveWatchOutput",
     "test:e2e": "node test/e2e/run-all.js",
+    "check:agents-real": "node scripts/check-agents-real.js",
     "watch": "nodemon --watch dist --watch public/ --ext js,html,css --delay 500ms -- server.js",
     "electron": "electron .",
     "electron:dev": "nodemon --watch electron.js --watch dist --watch public/ --ext js,html,css --delay 500ms --exec \"electron .\"",

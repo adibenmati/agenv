@@ -68,6 +68,21 @@ Sessions persist across browser reconnects. Create, rename, group, archive, and 
 ### Agent cost tracking
 Monitor token usage and cost per session in real time. See running/waiting/error status at a glance on each tab.
 
+### Agents
+An agent is a named, reusable Claude Code setup: a folder, a specialty, standing instructions and its own conversation. Open the Agents panel in the sidebar to create, run and manage them.
+
+Agenv never connects to anything on your behalf. It only starts **your own `claude` CLI** inside the agent's folder, with your own authentication and your own MCP servers. There are no connectors and no tokens to hand over.
+
+Create an agent in one of these ways:
+- **Blank** - a folder and instructions, nothing else.
+- **From a session** - adopt the Claude conversation of a running session.
+- **From a conversation** - take any past conversation and either fork it (optionally compacted with `/compact`) or distill it into a briefing file or a skill, so the agent starts with what that conversation learned.
+- **Duplicate** - copy an existing agent under a new name.
+
+**Open terminal** starts the agent's conversation in a normal terminal session. Any session with a Claude conversation also has a **Fork conversation** action that branches it into a new one without touching the original.
+
+Creating from a conversation uses real tokens. The UI shows an upper-bound estimate before you confirm. Forks and distills run read-only (`--permission-mode plan`), the source conversation is never altered, and a failed creation leaves nothing behind. Over a read-only ngrok tunnel, agent writes and runs are blocked.
+
 ### Desktop app
 When Electron is installed globally (`npm i -g electron`), `agenv` launches as a native desktop app with OS-level keyboard shortcuts and window management. The server runs internally on localhost — no exposed port.
 
