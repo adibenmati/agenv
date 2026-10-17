@@ -14,6 +14,9 @@ let _getAgentCommand = null;  // () => string
 let _isSessionOpen = null;    // (sessionId) => boolean
 let _showContextMenu = null;  // (x, y, items) => {}
 let _onResumeClosed = null;   // (archiveEntry, { agent }) => {}
+let _onForkConversation = null;           // (conversationId, cwd) => {}
+let _onMakeAgentFromConversation = null;  // (conversationId, cwd) => {}
+let _onMakeAgentFromSession = null;       // (sessionId, cwd) => {}
 
 let sessions = [];
 // Groups are "/"-separated paths ("project1/marketing/seo") forming a folder
@@ -94,6 +97,9 @@ export function init(opts) {
   _isSessionOpen = opts.isSessionOpen || (() => false);
   _showContextMenu = opts.showContextMenu || null;
   _onResumeClosed = opts.onResumeClosed || null;
+  _onForkConversation = opts.onForkConversation || null;
+  _onMakeAgentFromConversation = opts.onMakeAgentFromConversation || null;
+  _onMakeAgentFromSession = opts.onMakeAgentFromSession || null;
 
   if (!panelEl) return;
   renderShell();
@@ -361,6 +367,10 @@ function renderClosed() {
       if (a.claudeSessionId) h += `<span class="sp-status-label" title="Claude conversation ${esc(a.claudeSessionId)}">${esc(a.claudeSessionId.slice(0, 8))}</span>`;
       h += `</div></div><div class="sp-right"><span class="sp-time">${ago(a.closed)}</span><div class="sp-session-actions">`;
       if (agent) h += `<button class="sp-c-btn agent-btn" data-act="resume-closed" data-closed="${a.closed}" title="${a.claudeSessionId ? "Resume this Claude conversation" : "Continue agent in this folder"}">&#9654;</button>`;
+      if (a.claudeSessionId) {
+        h += `<button class="sp-c-btn" data-act="fork-closed" data-closed="${a.closed}" title="Fork conversation (new terminal on a copy)">&#9095;</button>`;
+        h += `<button class="sp-c-btn" data-act="agent-closed" data-closed="${a.closed}" title="Make agent from this conversation">A</button>`;
+      }
       h += `<button class="sp-c-btn" data-act="reopen-closed" data-closed="${a.closed}" title="Reopen terminal">&#8635;</button>`;
       h += `<button class="sp-c-btn" data-act="forget-closed" data-closed="${a.closed}" title="Remove from list">&#10005;</button>`;
       h += `</div></div></div>`;
@@ -368,6 +378,13 @@ function renderClosed() {
     h += `</div>`;
   }
   return h + `</div>`;
+}
+
+function closedConversationAction(closed, fork) {
+  const a = closedSessions.find((x) => x.closed === closed);
+  if (!a || !a.claudeSessionId) return;
+  const fn = fork ? _onForkConversation : _onMakeAgentFromConversation;
+  if (fn) fn(a.claudeSessionId, a.cwd);
 }
 
 function resumeClosed(closed, agent) {
@@ -487,7 +504,9 @@ function handleClick(e) {
   const closedBtn = e.target.closest(".sp-c-btn");
   if (closedBtn) {
     const closed = Number(closedBtn.dataset.closed);
-    if (closedBtn.dataset.act === "forget-closed") forgetClosed(closed);
+    const act = closedBtn.dataset.act;
+    if (act === "forget-closed") forgetClosed(closed);
+    else if (act === "fork-closed" || act === "agent-closed") closedConversationAction(closed, act === "fork-closed");
     else resumeClosed(closed, closedBtn.dataset.act === "resume-closed");
     return;
   }
@@ -626,6 +645,10 @@ function handleContextMenu(e) {
     if (!a) return;
     const items = [];
     if (isAgentEntry(a)) items.push({ label: a.claudeSessionId ? "Resume Claude Conversation" : "Continue Agent", action: "resume", handler() { resumeClosed(closed, true); } });
+    if (a.claudeSessionId) {
+      items.push({ label: "Fork conversation", action: "fork", handler() { closedConversationAction(closed, true); } });
+      items.push({ label: "Make agent from this\u2026", action: "make-agent", handler() { closedConversationAction(closed, false); } });
+    }
     items.push({ label: "Reopen Terminal", action: "reopen", handler() { resumeClosed(closed, false); } });
     if (a.claudeSessionId) items.push({ label: "Copy Claude Session ID", action: "copy", handler() { navigator.clipboard.writeText(a.claudeSessionId).catch(() => {}); } });
     items.push({ separator: true });
@@ -647,6 +670,7 @@ function handleContextMenu(e) {
     ];
     items.push({ label: s.claudeSessionId ? "Resume Claude Conversation" : "Continue Agent", action: "continue", handler() { if (_onOpenSession) _onOpenSession(sid, s, { continueAgent: true }); } });
     if (s.claudeSessionId) items.push({ label: "Copy Claude Session ID", action: "copy-claude", handler() { navigator.clipboard.writeText(s.claudeSessionId).catch(() => {}); } });
+    items.push({ label: "Make agent from this session\u2026", action: "make-agent", disabled: !s.claudeSessionId, handler() { if (_onMakeAgentFromSession) _onMakeAgentFromSession(sid, s.cwd); } });
     items.push({ separator: true });
     items.push({ label: "Rename", action: "rename", handler() { askRenameSession(sid); } });
     items.push(moveToGroupItem([sid]));

@@ -12,6 +12,7 @@ import * as extensions from "./modules/extensions.js";
 import * as mobile from "./modules/mobile.js";
 import * as sessionsPanel from "./modules/sessions.js";
 import * as claudeSearch from "./modules/claude-search.js";
+import { agentsPanel } from "./modules/agents.js";
 import * as claudeMd from "./modules/claudemd.js";
 import * as promptLib from "./modules/prompts.js";
 
@@ -285,6 +286,9 @@ extensions.initNgrokPanel();
 sessionsPanel.init({
   panel: $("sessions-panel"),
   showContextMenu: ctxmenu.show,
+  onMakeAgentFromSession(sid, cwd) { openAgentDialog({ sessionId: sid, cwd }); },
+  onForkConversation(id, cwd) { agentsPanel.forkConversation(id, cwd); },
+  onMakeAgentFromConversation(id, cwd) { openAgentDialog({ sourceConversationId: id, cwd }); },
   onOpenSession(sid, meta, opts) {
     if (meta) tabs.setSessionMeta(sid, meta);
     const existing = tabs.findWorkspaceBySession(sid);
@@ -411,6 +415,28 @@ claudeSearch.init({
   async onOpenInTerminal(cwd) {
     showTerminals();
     await createSessionInDir(cwd);
+  },
+  onForkConversation(id, cwd) { agentsPanel.forkConversation(id, cwd); },
+  onMakeAgent(id, cwd) { openAgentDialog({ sourceConversationId: id, cwd }); },
+});
+
+// ---------------------------------------------------------------------------
+// Agents panel (named agents bound to a folder and a Claude conversation)
+// ---------------------------------------------------------------------------
+function openAgentDialog(prefill) {
+  if (!(sidebar.isVisible() && sidebar.getActivePanel() === "agents-panel")) activatePanel("agents");
+  agentsPanel.openCreateDialog(prefill);
+}
+
+agentsPanel.init({
+  panel: $("agents-panel"),
+  showContextMenu: ctxmenu.show,
+  showToast(message, type) { notif.showToast(null, message, type); },
+  async onOpenSession(session) {
+    showTerminals();
+    tabs.setSessionMeta(session.id, session);
+    await tabs.createWorkspace(session.name || "Session " + session.id, session.id, session);
+    sessionsPanel.refresh();
   },
 });
 
@@ -730,6 +756,13 @@ function activatePanel(panelName) {
     claudeSearch.startPolling();
   } else {
     claudeSearch.stopPolling();
+  }
+  // Agents panel: load on show, poll while visible
+  if (panelId === "agents-panel" && sidebar.isVisible() && sidebar.getActivePanel() === "agents-panel") {
+    agentsPanel.refresh();
+    agentsPanel.startPolling();
+  } else {
+    agentsPanel.stopPolling();
   }
   // CLAUDE.md Manager: load on show
   if (panelId === "claudemd-panel" && sidebar.isVisible() && sidebar.getActivePanel() === "claudemd-panel") {

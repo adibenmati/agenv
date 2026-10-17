@@ -8,6 +8,8 @@ let panelEl = null;
 let _onResumeSession = null;  // (cwd, command) => {}
 let _onOpenInTerminal = null; // (cwd) => {}
 let _showContextMenu = null;
+let _onForkConversation = null; // (conversationId, cwd) => {}
+let _onMakeAgent = null;        // (conversationId, cwd) => {}
 
 let allSessions = [];
 let filteredSessions = [];
@@ -28,6 +30,8 @@ export function init(opts) {
   _onResumeSession = opts.onResumeSession || null;
   _onOpenInTerminal = opts.onOpenInTerminal || null;
   _showContextMenu = opts.showContextMenu || null;
+  _onForkConversation = opts.onForkConversation || null;
+  _onMakeAgent = opts.onMakeAgent || null;
   if (!panelEl) return;
   renderShell();
   panelEl.addEventListener("click", handleClick);
@@ -284,6 +288,8 @@ function renderCard(s) {
   h += `</div>`;
   h += `<div class="cs-card-right">`;
   h += `<button class="cs-card-btn resume" data-act="resume" data-id="${esc(s.id)}" title="Resume in terminal">&#9654;</button>`;
+  h += `<button class="cs-card-btn" data-act="fork" data-id="${esc(s.id)}" title="Fork conversation (new terminal on a copy)">&#9095;</button>`;
+  h += `<button class="cs-card-btn" data-act="make-agent" data-id="${esc(s.id)}" title="Make agent from this conversation">A</button>`;
   h += `<button class="cs-card-btn" data-act="expand" data-id="${esc(s.id)}" title="Details">${isExpanded ? "\u25B2" : "\u25BC"}</button>`;
   h += `</div>`;
   h += `</div>`;
@@ -355,6 +361,8 @@ function renderDetail(s) {
   // Action buttons
   h += `<div class="cs-detail-actions">`;
   h += `<button class="cs-d-btn resume" data-act="resume" data-id="${esc(s.id)}">&#9654; Resume Agent</button>`;
+  h += `<button class="cs-d-btn" data-act="fork" data-id="${esc(s.id)}">Fork conversation</button>`;
+  h += `<button class="cs-d-btn" data-act="make-agent" data-id="${esc(s.id)}">Make agent from this\u2026</button>`;
   h += `<button class="cs-d-btn" data-act="open-dir" data-id="${esc(s.id)}">Open Folder</button>`;
   h += `<button class="cs-d-btn" data-act="copy-id" data-id="${esc(s.id)}">Copy ID</button>`;
   h += `</div>`;
@@ -418,6 +426,14 @@ function handleClick(e) {
     if (act === "resume" && s) {
       const cwd = s.cwd || s.projectPath;
       if (_onResumeSession) _onResumeSession(cwd, "claude --continue");
+      return;
+    }
+    if (act === "fork" && s) {
+      if (_onForkConversation) _onForkConversation(s.id, s.cwd || s.projectPath);
+      return;
+    }
+    if (act === "make-agent" && s) {
+      if (_onMakeAgent) _onMakeAgent(s.id, s.cwd || s.projectPath);
       return;
     }
     if (act === "open-dir" && s) {
@@ -498,6 +514,8 @@ function handleContextMenu(e) {
   const cwd = s.cwd || s.projectPath;
   _showContextMenu(e.clientX, e.clientY, [
     { label: "Resume Agent (--continue)", action: "resume", handler() { if (_onResumeSession) _onResumeSession(cwd, "claude --continue"); } },
+    { label: "Fork conversation", action: "fork", handler() { if (_onForkConversation) _onForkConversation(s.id, cwd); } },
+    { label: "Make agent from this\u2026", action: "make-agent", handler() { if (_onMakeAgent) _onMakeAgent(s.id, cwd); } },
     { label: "Open Terminal in Folder", action: "open-dir", handler() { if (_onOpenInTerminal) _onOpenInTerminal(cwd); } },
     { separator: true },
     { label: "Filter by Project", action: "filter-proj", handler() {
