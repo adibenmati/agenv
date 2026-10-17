@@ -16,3 +16,6 @@ being silently changed. Each entry: where it is in the baseline (`git show pre-t
 4. **A failed shell spawn leaves a sleeping session record** (`createSession` then `startSession`, L844/880): if
    `pty.spawn` throws (shell not found), `POST /api/sessions` answers 500 but the session stays in the list as a tab that can
    never start. Ported as-is in `SessionManager.create`. Suggested: remove the record when the first spawn fails.
+5. **Access token is compared with `===`** (`isAuthenticated`, L448–455 → `AuthService.isAuthenticated`). Not constant-time;
+   low practical risk for a 32-hex token on localhost, but `crypto.timingSafeEqual` is the standard choice if the server is
+   exposed through a tunnel. (Hardened in the port: a malformed `Cookie` header or URL no longer throws — see ledger.)
