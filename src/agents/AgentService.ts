@@ -16,6 +16,8 @@ export type CreationMode = "fork" | "fork-compact" | "distill-briefing" | "disti
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DEFAULT_BUDGET_USD = 2;
+/** Reported in RunResult.note when the agent's stored conversation had no transcript and the run started a new one. */
+export const LOST_CONVERSATION_NOTE = "started a fresh conversation (previous one not found)";
 const DEFAULT_TIMEOUT_MS = 20 * 60 * 1000;
 
 /** `cancelAll`, when present, also cancels runs other users of the same runner (the forker) started. */
@@ -227,6 +229,7 @@ export class AgentService {
     }
     // A stored conversation that never got a transcript cannot be resumed: run a fresh one (its id is bound below, "agent" mode only).
     const resumable = mode !== "fresh" && !!a.conversationId && this.hasTranscript(a.conversationId, a.cwd);
+    const note = mode !== "fresh" && !!a.conversationId && !resumable ? LOST_CONVERSATION_NOTE : undefined;
     const r = await this.track(this.d.runner.run({
       cwd: a.cwd, prompt, resume: resumable ? a.conversationId : undefined, fork: resumable && mode === "fork" ? true : undefined,
       permission: overrides.permission ?? a.permission,
@@ -242,8 +245,8 @@ export class AgentService {
       this.d.store.update(id, { lastRunAt: Date.now(), ...(bind ? { conversationId: r.conversationId } : {}) });
     } catch {}   // the agent may have been removed while it ran
     // A failed fork has no conversation of its own: never hand back the source as if it were the run's.
-    if (mode === "fork" && resumable && r.conversationId === a.conversationId) return { ...r, conversationId: "" };
-    return r;
+    const out = mode === "fork" && resumable && r.conversationId === a.conversationId ? { ...r, conversationId: "" } : r;
+    return note ? { ...out, note } : out;
   }
 
   /** Runs queued or running. */

@@ -156,6 +156,21 @@ describe("AgentService conversations without a transcript", () => {
     assert.ok(res.conversationId && res.conversationId !== UUID);
     assert.equal(r.store.get(a.id).conversationId, res.conversationId);
   });
+  it("run: a stored conversation that cannot be resumed is reported in result.note; a resumed or blank one is not", async () => {
+    const note = "started a fresh conversation (previous one not found)";
+    const proj = mkdir(); const r = rig("ok", { projectsDir: proj });
+    const ghost = r.svc.createBlank(input(r.cwd)); r.store.update(ghost.id, { conversationId: UUID });
+    assert.equal((await r.svc.run(ghost.id, "hi")).note, note);
+    const ghost2 = r.svc.createBlank(input(r.cwd, { name: "Ghost2" })); r.store.update(ghost2.id, { conversationId: UUID });
+    assert.equal((await r.svc.run(ghost2.id, "hi", { conversation: "fork" })).note, note);
+    const blank = r.svc.createBlank(input(r.cwd, { name: "Blank" }));
+    assert.equal((await r.svc.run(blank.id, "hi")).note, undefined, "nothing was lost for an agent with no conversation");
+    const ghost3 = r.svc.createBlank(input(r.cwd, { name: "Ghost3" })); r.store.update(ghost3.id, { conversationId: UUID });
+    assert.equal((await r.svc.run(ghost3.id, "hi", { conversation: "fresh" })).note, undefined, "a fresh run never wanted the old one");
+    const proj2 = mkdir(); withTranscript(proj2, UUID); const r2 = rig("ok", { projectsDir: proj2 });
+    const ok = r2.svc.createBlank(input(r2.cwd)); r2.store.update(ok.id, { conversationId: UUID });
+    assert.equal((await r2.svc.run(ok.id, "hi")).note, undefined);
+  });
   it("run: stored id with a transcript resumes it", async () => {
     const proj = mkdir(); withTranscript(proj, UUID); const r = rig("ok", { projectsDir: proj });
     const a = r.svc.createBlank(input(r.cwd)); r.store.update(a.id, { conversationId: UUID });

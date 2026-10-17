@@ -147,6 +147,10 @@ export function validateRoutineInput(input: unknown, o: RoutineValidationOptions
   if (permission.allowedTools.length > MAX_ALLOWED_TOOLS || permission.allowedTools.some((t) => t.length > MAX_TOOL_LEN)) {
     bad(`permission.allowedTools allows at most ${MAX_ALLOWED_TOOLS} entries of ${MAX_TOOL_LEN} characters`);
   }
+  // buildArgs joins the entries with commas into one --allowedTools value, so a comma would split (or merge) patterns
+  if (permission.allowedTools.some((t) => t.includes(",") || CONTROL_CHARS.test(t))) {
+    bad("permission.allowedTools entries must not contain commas or control characters (one pattern per entry)");
+  }
   const ack = bool(r.allowBypass, "allowBypass", false);
   if (permission.mode === "bypassPermissions" && !ack) bad("bypassPermissions requires allowBypass: true");
   // The acknowledgement only means something together with bypassPermissions; it is never stored on its own.

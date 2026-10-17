@@ -312,6 +312,31 @@ describe("AgentRunExecutor with a fake agent service", () => {
     assert.equal(typeof o.onHandle, "function");
     assert.equal(o.cancelToken.cancelled, false);
   });
+  it("defence in depth: a bypassPermissions routine without allowBypass fails before anything is claimed or spawned", async () => {
+    let spawned = 0, pre = 0;
+    const agents = { run: async () => { spawned++; return okResult(); }, runInFolder: async () => { spawned++; return okResult(); } };
+    const { run, exec } = rig(agents, () => { pre++; return null; });
+    const bypass = { mode: "bypassPermissions", allowedTools: [] };
+    const res = await exec.execute(run, routine({ permission: bypass, allowBypass: false }), noop).done;
+    assert.equal(res.status, "failed");
+    assert.match(res.error, /bypassPermissions requires allowBypass/);
+    const folder = await exec.execute(run, routine({ permission: bypass, allowBypass: false, target: { kind: "folder", cwd: "C:\work" }, conversation: "fresh" }), noop).done;
+    assert.equal(folder.status, "failed");
+    assert.equal(spawned, 0);
+    assert.equal(pre, 0, "the preflight claim never happened");
+    const ok = await exec.execute(run, routine({ permission: bypass, allowBypass: true }), noop).done;
+    assert.equal(ok.status, "succeeded", "acknowledged bypass still runs");
+  });
+  it("a result's note becomes the run's reason", async () => {
+    const dir = tmp(), runs = runStore(dir);
+    const run = runs.create("rt1", "schedule");
+    const note = "started a fresh conversation (previous one not found)";
+    applyResult(runs, run, routine(), okResult({ note }), () => 5);
+    assert.equal(runs.get(run.id).reason, note);
+    const run2 = runs.create("rt1", "schedule");
+    applyResult(runs, run2, routine(), okResult(), () => 5);
+    assert.equal(runs.get(run2.id).reason, "");
+  });
   it("an empty model is passed as undefined", async () => {
     let o2;
     const agents = { run: async (id, p, o) => { o2 = o; return okResult(); } };

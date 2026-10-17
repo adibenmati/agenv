@@ -29,6 +29,10 @@ export interface AgentRunExecutorOptions {
   preflight?: (run: Run, routine: Routine) => string | null;
 }
 
+function failedOutcome(error: string): RunResult {
+  return { status: "failed", conversationId: "", text: "", costUsd: 0, numTurns: 0, durationMs: 0, exitCode: null, error: clip(error) };
+}
+
 function cancelledOutcome(): RunResult {
   return { status: "cancelled", conversationId: "", text: "", costUsd: 0, numTurns: 0, durationMs: 0, exitCode: null, error: "Cancelled before it started" };
 }
@@ -39,6 +43,11 @@ export class AgentRunExecutor implements RunExecutor {
   constructor(private readonly o: AgentRunExecutorOptions) { this.now = o.now ?? Date.now; }
 
   execute(run: Run, routine: Routine, hooks: ExecutorHooks): { done: Promise<RunOutcome>; cancel(): void } {
+    // Defence in depth (the validator already enforces it): never skip permissions without the recorded acknowledgement.
+    // Checked before the preflight so nothing is claimed for a run that cannot start.
+    if (routine.permission.mode === "bypassPermissions" && routine.allowBypass !== true) {
+      return { done: Promise.resolve(failedOutcome("bypassPermissions requires allowBypass")), cancel() {} };
+    }
     if (this.o.preflight) {
       let reason: string | null;
       try { reason = this.o.preflight(run, routine); } catch (e) { reason = `preflight failed: ${e instanceof Error ? e.message : String(e)}`; }
@@ -106,6 +115,7 @@ export function applyResult(runs: Pick<RunStore, "update">, run: Run, routine: R
   const costUsd = result.status === "timed_out" ? Math.max(result.costUsd, routine.maxBudgetUsd) : result.costUsd;
   return runs.update(run.id, {
     status: result.status,
+    ...(result.note ? { reason: result.note } : {}),
     finishedAt: now(),
     durationMs: result.durationMs,
     costUsd,

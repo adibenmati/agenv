@@ -142,6 +142,15 @@ describe("validateRoutineInput", () => {
     assert.equal(check({ target: { kind: "folder", cwd: "/ok/" } }).target.cwd, path.resolve("/ok"));
     assert.equal(check({ target: { kind: "folder", cwd: "/ok/sub/.." } }).target.cwd, path.resolve("/ok"));
   });
+  it("allowedTools entries must not contain commas or control characters", () => {
+    const withTools = (allowedTools) => check({ permission: { mode: "dontAsk", allowedTools } });
+    assert.deepEqual(withTools(["Read", "Bash(git status:*)"]).permission.allowedTools, ["Read", "Bash(git status:*)"]);
+    for (const bad of ["Read,Bash", "Bash(ls a,b)", "Re\u0000ad", "Read\tx", "Read\rBash", "Bash\u007f", "a\u001bb"]) {
+      assert.equal(status(() => withTools([bad])), 400, JSON.stringify(bad));
+    }
+    assert.match((() => { try { withTools(["a,b"]); } catch (e) { return e.message; } return ""; })(), /comma/);
+    assert.equal(status(() => withTools([" Read ", "  "])), null, "surrounding whitespace is trimmed and blank entries dropped as before");
+  });
   it("target kind agent forbids cwd and folder forbids agentId", () => {
     assert.equal(status(() => check({ target: { kind: "agent", agentId: "a1b2c3d4", cwd: "/ok" } })), 400);
     assert.equal(status(() => check({ target: { kind: "folder", cwd: "/ok", agentId: "a1b2c3d4" } })), 400);
