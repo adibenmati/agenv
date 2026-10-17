@@ -236,14 +236,6 @@ describe("AgentService.run", () => {
     await assert.rejects(r.svc.run(a.id, "hi"), (e) => e.status === 409);
     assert.equal(calls(r.state).length, 0);
   });
-  it("refuses with a reason while a session linked to the conversation has claudeRunning", async () => {
-    const r = rig("ok", { sessions: [{ id: 1, claudeSessionId: "c-1", claudeRunning: true }] });
-    const a = r.svc.createBlank(input(r.cwd)); r.store.update(a.id, { conversationId: "c-1" });
-    await assert.rejects(r.svc.run(a.id, "hi"), (e) => e.status === 409 && /terminal/.test(e.message));
-    assert.equal(calls(r.state).length, 0);
-    r.list[0].claudeRunning = false;
-    assert.equal((await r.svc.run(a.id, "hi")).status, "succeeded");
-  });
   it("first run stores session_id as conversationId and lastRunAt", async () => {
     const r = rig(); const a = r.svc.createBlank(input(r.cwd));
     const res = await r.svc.run(a.id, "hello");
@@ -402,10 +394,13 @@ describe("AgentService conversation modes and overrides", () => {
     await Promise.all([r.svc.run(a.id, "A"), r.svc.run(a.id, "X", { conversation: "fresh" })]);
     assert.deepEqual(events(r.state).map((e) => e.ev + e.prompt), ["startA", "endA", "startX", "endX"]);
   });
-  it("fork refuses with 409 while the source conversation is open in a running terminal; fresh does not", async () => {
+  it("a conversation open in a running terminal is never written: agent and fork runs work on a fork, with a note", async () => {
     const r = rig("ok", { sessions: [{ id: 1, claudeSessionId: "c-1", claudeRunning: true }] }); const a = bound(r);
-    await assert.rejects(r.svc.run(a.id, "hi", { conversation: "fork" }), (e) => e instanceof HttpError && e.status === 409 && /terminal/.test(e.message));
-    assert.equal(calls(r.state).length, 0);
+    const res = await r.svc.run(a.id, "hi");
+    assert.equal(res.status, "succeeded"); assert.match(res.note, /open in a terminal/);
+    assert.ok(calls(r.state)[0].argv.includes("--fork-session"), "ran on a fork");
+    assert.equal(r.store.get(a.id).conversationId, "c-1", "the agent keeps its conversation");
+    assert.equal((await r.svc.run(a.id, "hi", { conversation: "fork" })).status, "succeeded");
     assert.equal((await r.svc.run(a.id, "hi", { conversation: "fresh" })).status, "succeeded");
   });
   it("a failed fork never reports the source conversation as its own", async () => {

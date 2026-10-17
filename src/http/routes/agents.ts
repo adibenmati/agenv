@@ -21,7 +21,7 @@ export function agentsRouter(d: AppDeps): Router {
   const sessionJson = (s: { id: number; name: string; cwd: string; detectedTool: string; created: number; status: string; group: string }) =>
     ({ id: s.id, name: s.name, cwd: s.cwd, tool: s.detectedTool, created: s.created, status: s.status, group: s.group });
 
-  r.get("/api/agents", auth, (_req, res) => res.json(d.agents.list()));
+  r.get("/api/agents", auth, (_req, res) => res.json(d.agents.list().map((a) => ({ ...a, running: !!a.conversationId && d.agents.isConversationBusy(a.conversationId) }))));
 
   r.post("/api/agents", auth, wrap((req, res) => res.json(d.agents.createBlank(profilePatch(body(req))))));
 

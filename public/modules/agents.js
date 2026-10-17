@@ -70,18 +70,33 @@ function renderList() {
       <div class="ag-empty-hint">An agent is a named Claude conversation bound to a folder. Create one from scratch, from a session, or by forking a past conversation.</div></div>`;
     return;
   }
-  list.innerHTML = agents.map(renderRow).join("");
+  // Same layout as the Sessions panel: agents grouped by folder, collapsible.
+  const groups = new Map();
+  for (const a of agents) { const k = a.cwd || ""; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(a); }
+  let h = "";
+  for (const [cwd, items] of [...groups].sort((x, y) => folderName(x[0]).localeCompare(folderName(y[0])))) {
+    const collapsed = collapsedFolders.has(cwd);
+    h += `<div class="sp-group"><div class="sp-group-header${collapsed ? " collapsed" : ""}" data-folder="${esc(cwd)}" title="${esc(cwd)}">`;
+    h += `<span class="sp-group-arrow">${collapsed ? "▶" : "▼"}</span><span class="sp-group-name">${esc(folderName(cwd))}</span><span class="sp-group-count">${items.length}</span></div>`;
+    if (!collapsed) h += `<div class="sp-group-body">${items.map(renderRow).join("")}</div>`;
+    h += `</div>`;
+  }
+  list.innerHTML = h;
 }
+
+const collapsedFolders = new Set();
+const folderName = (p) => (p || "").replace(/[\\]/g, "/").split("/").filter(Boolean).pop() || "~";
 
 function renderRow(a) {
   const conv = a.conversationId ? a.conversationId.slice(0, 8) : "no conv";
   const last = a.lastRunAt ? "ran " + ago(a.lastRunAt) + " ago" : "never run";
-  let h = `<div class="ag-row" data-id="${esc(a.id)}" data-name="${esc(a.name)}">`;
-  h += `<div class="ag-row-main">`;
-  h += `<div class="ag-name"><span class="ag-name-text">${esc(a.name)}</span></div>`;
+  let h = `<div class="sp-session ag-row" data-id="${esc(a.id)}" data-name="${esc(a.name)}">`;
+  h += `<div class="sp-status ${a.running ? "running" : "idle"}" title="${a.running ? "its conversation is open in a terminal" : "not open in a terminal"}"></div>`;
+  h += `<div class="sp-info ag-row-main">`;
+  h += `<div class="sp-name-row"><span class="sp-name ag-name-text">${esc(a.name)}</span></div>`;
   if (a.specialty) h += `<div class="ag-specialty-text" title="${esc(a.specialty)}">${esc(a.specialty)}</div>`;
-  h += `<div class="ag-path" title="${esc(a.cwd)}">${esc(short(a.cwd))}</div>`;
-  h += `<div class="ag-meta"><span class="ag-conv" title="${esc(a.conversationId || "")}">${esc(conv)}</span><span class="ag-last">${esc(last)}</span></div>`;
+  h += `<div class="sp-path" title="${esc(a.cwd)}">${esc(short(a.cwd))}</div>`;
+  h += `<div class="sp-meta"><span class="sp-status-label ag-conv" title="Claude conversation ${esc(a.conversationId || "")}">${esc(conv)}</span><span class="ag-last">${esc(last)}</span></div>`;
   h += `</div>`;
   h += `<div class="ag-actions">`;
   h += `<button class="ag-btn open" data-act="open" title="Open terminal"${pending.has("open:" + a.id) ? " disabled" : ""}>&#9654;</button>`;
@@ -94,6 +109,8 @@ function renderRow(a) {
 
 function handleClick(e) {
   if (e.target.closest(".ag-new")) { openCreateDialog(); return; }
+  const head = e.target.closest(".sp-group-header[data-folder]");
+  if (head) { const k = head.dataset.folder; if (collapsedFolders.has(k)) collapsedFolders.delete(k); else collapsedFolders.add(k); renderList(); return; }
   const btn = e.target.closest(".ag-btn");
   if (!btn) return;
   const row = btn.closest(".ag-row");

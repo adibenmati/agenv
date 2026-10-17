@@ -439,6 +439,7 @@ function renderSessionCard(s) {
   // Every session can continue an agent: its linked Claude conversation when
   // there is one, otherwise the latest conversation in its folder.
   h += `<button class="sp-s-btn agent-btn" data-act="continue-agent" data-sid="${s.id}" title="${esc(continueTitle(s))}">&#9654;</button>`;
+  if (s.claudeSessionId) h += `<button class="sp-s-btn to-agent" data-act="make-agent" data-sid="${s.id}" title="Convert this conversation to an agent">&#8594;A</button>`;
   h += `<button class="sp-s-btn" data-act="toggle-detail" data-sid="${s.id}" title="Details">${isExpanded ? "\u25B2" : "\u25BC"}</button>`;
   h += `</div>`;
   h += `</div>`;
@@ -557,6 +558,9 @@ function handleClick(e) {
     } else if (act === "continue-agent") {
       const meta = sessions.find(s => s.id === sid);
       if (_onOpenSession) _onOpenSession(sid, meta, { continueAgent: true });
+    } else if (act === "make-agent") {
+      const meta = sessions.find(s => s.id === sid);
+      if (meta && _onMakeAgentFromSession) _onMakeAgentFromSession(sid, meta.cwd);
     } else if (act === "toggle-detail") {
       if (expandedSessions.has(sid)) expandedSessions.delete(sid);
       else expandedSessions.add(sid);

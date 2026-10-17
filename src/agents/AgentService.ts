@@ -17,7 +17,8 @@ export type CreationMode = "fork" | "fork-compact" | "distill-briefing" | "disti
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DEFAULT_BUDGET_USD = 2;
 /** Reported in RunResult.note when the agent's stored conversation had no transcript and the run started a new one. */
-export const LOST_CONVERSATION_NOTE = "started a fresh conversation (previous one not found)";
+export const OPEN_TERMINAL_NOTE = "the conversation is open in a terminal, so this run worked on a copy of it (its result is not added to that conversation)";
+const LOST_CONVERSATION_NOTE = "started a fresh conversation (previous one not found)";
 const DEFAULT_TIMEOUT_MS = 20 * 60 * 1000;
 
 /** `cancelAll`, when present, also cancels runs other users of the same runner (the forker) started. */
@@ -220,16 +221,18 @@ export class AgentService {
     try { return await handle.done; } finally { this.handles.delete(handle); }
   }
 
-  private async execute(id: string, prompt: string, overrides: RunOverrides, mode: ConversationMode, epoch: number): Promise<RunResult> {
+  private async execute(id: string, prompt: string, overrides: RunOverrides, requested: ConversationMode, epoch: number): Promise<RunResult> {
+    let mode = requested;
     if (epoch !== this.epoch || overrides.cancelToken?.cancelled) return cancelledBeforeStart();
     const a = this.get(id);
     if (!this.d.isDir(a.cwd)) throw new HttpError(409, `the agent's folder no longer exists: ${a.cwd}`);
-    if (mode !== "fresh" && a.conversationId && this.inUse(a.conversationId)) {
-      throw new HttpError(409, "the conversation is open in a running terminal session; close it or wait before running the agent");
-    }
+    // Two processes must not write one conversation: while it is open in a terminal, this run works on a copy (a fork).
+    const onCopy = mode !== "fresh" && !!a.conversationId && this.inUse(a.conversationId);
+    if (onCopy) mode = "fork";
     // A stored conversation that never got a transcript cannot be resumed: run a fresh one (its id is bound below, "agent" mode only).
     const resumable = mode !== "fresh" && !!a.conversationId && this.hasTranscript(a.conversationId, a.cwd);
-    const note = mode !== "fresh" && !!a.conversationId && !resumable ? LOST_CONVERSATION_NOTE : undefined;
+    const lost = mode !== "fresh" && !!a.conversationId && !resumable;
+    const note = lost ? LOST_CONVERSATION_NOTE : onCopy ? OPEN_TERMINAL_NOTE : undefined;
     const r = await this.track(this.d.runner.run({
       cwd: a.cwd, prompt, resume: resumable ? a.conversationId : undefined, fork: resumable && mode === "fork" ? true : undefined,
       permission: overrides.permission ?? a.permission,
