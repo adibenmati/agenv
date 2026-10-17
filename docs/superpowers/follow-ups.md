@@ -45,3 +45,11 @@ being silently changed. Each entry: where it is in the baseline (`git show pre-t
     `os.cpus()[].times`, which are cumulative). Ported as-is (`SystemStats`); a real reading needs two samples a moment apart.
 12. **`ngrok` is spawned without a shell**, so an npm-installed `ngrok.cmd` shim cannot be started on Windows (ENOENT, "Is ngrok
     installed?"). Ported as-is.
+13. **The advertised per-route body limits never applied** (L2324 `/api/ai/ask` 2 MB, `/api/claudemd/write` 1 MB, `/api/prompts` default
+    100 KB): the global `express.json({ limit: "50mb" })` runs first and consumes the body, so the later route-level parsers are
+    no-ops. Ported without them (same effective behavior: 50 MB everywhere). Decide whether those routes should really be
+    capped lower.
+14. **`buildPage` embedded session data unsafely** — FIXED in the port: the baseline used `template.replace(marker, string)`, so a
+    session name or path containing `$&`, `$1` or `` $` `` was rewritten, and `JSON.stringify` output containing `</script>`
+    (e.g. a session named `</script><script>…`) ended the script tag early. The port uses a replacer function and escapes `<`
+    as `<`; the parsed data is identical.

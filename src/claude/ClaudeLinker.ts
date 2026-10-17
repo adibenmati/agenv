@@ -7,6 +7,9 @@ import type { TranscriptScanner } from "./TranscriptScanner";
 
 const CLAUDE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/** Whether a string is a Claude Code conversation id (a UUID). */
+export function isClaudeSessionId(id: string): boolean { return CLAUDE_UUID.test(id); }
+
 /** One running Claude Code process, as it registers itself in ~/.claude/sessions/<pid>.json. */
 export interface RegistryEntry { pid: number; sessionId: string; startedAt?: number }
 
