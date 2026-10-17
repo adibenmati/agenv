@@ -1,6 +1,8 @@
 import * as http from "http";
 import * as path from "path";
 import type { Express } from "express";
+import type { Agent } from "./agents/Agent";
+import { AgentStore } from "./agents/AgentStore";
 import { ClaudeLinker } from "./claude/ClaudeLinker";
 import { ClaudeMdService } from "./claude/ClaudeMdService";
 import { claudePaths } from "./claude/paths";
@@ -79,6 +81,8 @@ export function buildRuntime(o: RuntimeOptions): Runtime {
   const history = new HistoryStore(file<string[]>(".agenv-history.enc", () => [], { name: ".agenv-history.json", accept: (v) => Array.isArray(v) && v.length > 0 }));
   const archive = new ArchiveStore(file<ArchiveEntry[]>(".agenv-archive.enc", () => []));
   const favorites = new FavoritesStore(file<Favorite[]>(".agenv-favorites.enc", () => []));
+  const agents = new AgentStore(file<Agent[]>(".agenv-agents.enc", () => []), createRealDirChecker());
+  void agents;   // exposed through AgentService in a later task
   const scrollbackStore = new ScrollbackStore(path.join(homedir, ".agenv-scrollback"), crypto);
   const savedState = stateFile.load();
 
