@@ -6,15 +6,15 @@ const assert = require("node:assert/strict");
 const fs = require("fs");
 const path = require("path");
 
-const { startServer, stopProcess, makeTempHome, get, post, put, del, loadInternals } = require("./helpers");
+const { startServer, stopProcess, makeTempHome, get, post, put, del } = require("./helpers");
+const { ClaudeLinker } = require("../dist/claude/ClaudeLinker");
 
 const UUID_A = "11111111-2222-4333-8444-555555555555";
 const UUID_B = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
 const findSession = async (id) => (await get("/api/sessions")).body.find((s) => s.id === id);
 
 describe("resolveClaudeLinks", () => {
-  const { resolveClaudeLinks, claudeIdFromCommand } = loadInternals(
-    "// <claude-link-internals>", "// </claude-link-internals>", ["resolveClaudeLinks", "claudeIdFromCommand"]);
+  const resolveClaudeLinks = ClaudeLinker.resolveLinks, claudeIdFromCommand = ClaudeLinker.idFromCommand;
 
   it("maps a claude process to the agenv session whose shell it runs under", () => {
     // shell 100 (session 1) -> cmd 200 -> claude 300 ; shell 400 (session 2) -> claude 500

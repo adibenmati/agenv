@@ -176,23 +176,8 @@ async function waitFor(fn, { timeout = 10000, interval = 100, message = "conditi
   }
 }
 
-/**
- * Load the pure helpers out of server.js without booting it, by evaluating the
- * slice of source between two markers. Keeps server.js a single runnable file.
- */
-function loadInternals(startMarker, endMarker, exportNames) {
-  const src = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  const from = src.indexOf(startMarker);
-  const to = src.indexOf(endMarker, from);
-  if (from < 0 || to < 0) throw new Error(`markers not found: ${startMarker} .. ${endMarker}`);
-  const mod = { exports: {} };
-  const body = src.slice(from, to) + `\nmodule.exports={${exportNames.join(",")}};`;
-  new Function("module", "exports", "require", "Buffer", body)(mod, mod.exports, require, Buffer);
-  return mod.exports;
-}
-
 module.exports = {
   startServer, stopServer, stopProcess, makeTempHome,
   request, get, post, put, del,
-  waitFor, loadInternals, TOKEN,
+  waitFor, TOKEN,
 };
