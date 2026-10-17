@@ -10,7 +10,7 @@ const { RunStore } = require("../../dist/automation/RunStore");
 const { AutomationSettings } = require("../../dist/automation/AutomationSettings");
 const { AutomationGuards, localDayStart } = require("../../dist/automation/AutomationGuards");
 const { RunQueue } = require("../../dist/automation/RunQueue");
-const { AgentRunExecutor, applyResult } = require("../../dist/automation/RunExecutor");
+const { AgentRunExecutor, applyResult, finishRun } = require("../../dist/automation/RunExecutor");
 const { AgentStore } = require("../../dist/agents/AgentStore");
 const { ClaudeRunner } = require("../../dist/agents/ClaudeRunner");
 const { ConversationForker } = require("../../dist/agents/ConversationForker");
@@ -105,6 +105,30 @@ describe("AutomationGuards", () => {
     // the next calendar day starts counting from zero again
     const g2 = new AutomationGuards({ settings: st, runs, now: () => boundary + DAY + 1000, dayStart: () => boundary + DAY });
     assert.deepEqual(g2.check(routine({ maxRunsPerDay: 1 }), "schedule"), { ok: true });
+  });
+  it("reservedUsd is added to today's spend before comparing with the cap", () => {
+    const runs = runStore(), st = settings();
+    started(runs, "rt1", NOW - 3 * 3600 * 1000, 1.5);
+    const g = guards(runs, st);
+    st.set({ maxDailyCostUsd: 2 });
+    assert.deepEqual(g.check(routine(), "schedule", { reservedUsd: 0.4 }), { ok: true });
+    assert.deepEqual(g.check(routine(), "schedule"), { ok: true });
+    assert.deepEqual(g.check(routine(), "schedule", { reservedUsd: 0.6 }), { ok: false, reason: "daily cost cap reached ($2)" });   // 1.5 + 0.6 >= 2
+    st.set({ maxDailyCostUsd: 0 });
+    assert.equal(g.check(routine(), "manual", { reservedUsd: 0 }).ok, false);
+    st.set({ maxDailyCostUsd: null });
+    assert.deepEqual(g.check(routine(), "manual", { reservedUsd: 1000 }), { ok: true });
+  });
+  it("a 23-hour DST day: the run in the last half hour of the short day does not count toward the next day", () => {
+    const runs = runStore(), st = settings();
+    const H = 3600 * 1000;
+    const springForward = Date.UTC(2026, 2, 8, 5, 0, 0);          // local midnight that begins a 23-hour day
+    const nextDay = springForward + 23 * H;
+    started(runs, "rt1", nextDay - 30 * 60 * 1000);               // the last half hour of the short day
+    const g = new AutomationGuards({ settings: st, runs, now: () => nextDay + 30 * 60 * 1000, dayStart: () => nextDay });
+    assert.deepEqual(g.check(routine({ maxRunsPerDay: 1 }), "schedule"), { ok: true });
+    const wrong = new AutomationGuards({ settings: st, runs, now: () => nextDay + 30 * 60 * 1000, dayStart: () => nextDay - 24 * H });
+    assert.equal(wrong.check(routine({ maxRunsPerDay: 1 }), "schedule").ok, false);   // fixed 24 h arithmetic would have blocked it
   });
   it("localDayStart is machine-local midnight", () => {
     const t = new Date(2026, 5, 10, 15, 30, 45, 123).getTime();
@@ -223,6 +247,14 @@ describe("RunQueue", () => {
     await queue.idle();
     assert.equal(jobs.has("c"), false);
   });
+  it("enqueue after drain is ignored and nothing starts", async () => {
+    const { queue, started } = rig(2);
+    queue.drain();
+    queue.enqueue(mkRun("late"));
+    assert.deepEqual(started, []);
+    assert.equal(queue.size(), 0); assert.equal(queue.running(), 0);
+    await queue.idle();
+  });
   it("idle resolves immediately when empty", async () => {
     await new RunQueue({ limit: 2, execute: () => Promise.resolve() }).idle();
   });
@@ -230,10 +262,10 @@ describe("RunQueue", () => {
 
 describe("AgentRunExecutor with a fake agent service", () => {
   const okResult = (o = {}) => ({ status: "succeeded", conversationId: "conv-1", text: "all done", costUsd: 0.42, numTurns: 3, durationMs: 1234, exitCode: 0, ...o });
-  function rig(agents) {
+  function rig(agents, preflight) {
     const dir = tmp(), runs = runStore(dir);
     const run = runs.create("rt1", "schedule");
-    const exec = new AgentRunExecutor({ agents, runs, now: () => 777 });
+    const exec = new AgentRunExecutor({ agents, runs, now: () => 777, preflight });
     return { runs, run, exec };
   }
   const noop = { onStart: () => {} };
@@ -302,7 +334,37 @@ describe("AgentRunExecutor with a fake agent service", () => {
     assert.equal(tok.cancelled, true); assert.equal(cancelCalls, 1);
     assert.equal((await h.done).status, "cancelled");
     h.cancel();   // harmless after the end
-    void release;
+  });
+  it("preflight runs first with the run and routine; a reason skips the run: no call, no startedAt", async () => {
+    let called = 0, seen;
+    const agents = { run: async () => { called++; return okResult(); }, runInFolder: async () => { called++; return okResult(); } };
+    const { runs, run, exec } = rig(agents, (r, rt) => { seen = [r.id, rt.id]; return "automation paused"; });
+    assert.deepEqual(await exec.execute(run, routine(), noop).done, { status: "skipped", reason: "automation paused" });
+    assert.deepEqual(seen, [run.id, "rt1"]);
+    const f = await exec.execute(run, routine({ target: { kind: "folder", cwd: "x" } }), noop).done;
+    assert.equal(f.status, "skipped");
+    assert.equal(called, 0); assert.equal(runs.get(run.id).startedAt, null);
+  });
+  it("preflight returning null lets the run proceed; a throwing preflight skips instead of spawning", async () => {
+    let called = 0;
+    const agents = { run: async () => { called++; return okResult(); } };
+    const ok = rig(agents, () => null);
+    assert.equal((await ok.exec.execute(ok.run, routine(), noop).done).status, "succeeded");
+    assert.equal(called, 1);
+    const bad = rig(agents, () => { throw new Error("guard exploded"); });
+    const res = await bad.exec.execute(bad.run, routine(), noop).done;
+    assert.equal(res.status, "skipped"); assert.match(res.reason, /guard exploded/);
+    assert.equal(called, 1);
+  });
+  it("cancel() before the process starts settles done immediately, even if the agent layer is still waiting", async () => {
+    let tok;
+    const agents = { run: (id, p, o) => { tok = o.cancelToken; return new Promise(() => {}); } };   // never settles: stuck behind a predecessor
+    const { run, exec } = rig(agents);
+    const h = exec.execute(run, routine(), noop);
+    h.cancel();
+    const res = await Promise.race([h.done, new Promise((r) => setTimeout(() => r("TIMEOUT"), 500))]);
+    assert.equal(res.status, "cancelled");
+    assert.equal(tok.cancelled, true);
   });
   it("cancel() before the handle exists only sets the token", async () => {
     let tok;
@@ -342,9 +404,10 @@ describe("AgentRunExecutor with a fake agent service", () => {
 
 describe("applyResult", () => {
   const mk = () => { const runs = runStore(); const run = runs.create("rt1", "schedule"); return { runs, run }; };
+  const rt = routine();
   it("maps status, cost, turns, conversationId, exitCode, summary and timings", () => {
     const { runs, run } = mk();
-    const out = applyResult(runs, run, { status: "succeeded", conversationId: "conv-9", text: "s".repeat(3000), costUsd: 0.5, numTurns: 4, durationMs: 900, exitCode: 0 }, () => 5000);
+    const out = applyResult(runs, run, rt, { status: "succeeded", conversationId: "conv-9", text: "s".repeat(3000), costUsd: 0.5, numTurns: 4, durationMs: 900, exitCode: 0 }, () => 5000);
     assert.equal(out.status, "succeeded"); assert.equal(out.costUsd, 0.5); assert.equal(out.numTurns, 4);
     assert.equal(out.conversationId, "conv-9"); assert.equal(out.exitCode, 0); assert.equal(out.durationMs, 900);
     assert.equal(out.finishedAt, 5000); assert.equal(out.summary.length, 2000); assert.equal(out.error, "");
@@ -353,19 +416,64 @@ describe("applyResult", () => {
   it("maps failed, timed_out and cancelled 1:1 and keeps the error (clipped by the store)", () => {
     for (const status of ["failed", "timed_out", "cancelled"]) {
       const { runs, run } = mk();
-      const out = applyResult(runs, run, { status, conversationId: "", text: "", costUsd: 0, numTurns: 0, durationMs: 10, exitCode: null, error: "e".repeat(900) });
+      const out = applyResult(runs, run, rt, { status, conversationId: "", text: "", costUsd: 0, numTurns: 0, durationMs: 10, exitCode: null, error: "e".repeat(900) });
       assert.equal(out.status, status); assert.equal(out.error.length, 500); assert.equal(out.conversationId, ""); assert.equal(out.exitCode, null);
     }
   });
   it("skipped keeps status skipped with its reason and a finish time", () => {
     const { runs, run } = mk();
-    const out = applyResult(runs, run, { status: "skipped", reason: "agent no longer exists" }, () => 42);
+    const out = applyResult(runs, run, rt, { status: "skipped", reason: "agent no longer exists" }, () => 42);
     assert.equal(out.status, "skipped"); assert.equal(out.reason, "agent no longer exists"); assert.equal(out.finishedAt, 42); assert.equal(out.startedAt, null);
   });
   it("an unsafe conversation id is dropped instead of failing the update", () => {
     const { runs, run } = mk();
-    const out = applyResult(runs, run, { status: "succeeded", conversationId: "../evil id", text: "", costUsd: 0, numTurns: 0, durationMs: 1, exitCode: 0 });
+    const out = applyResult(runs, run, rt, { status: "succeeded", conversationId: "../evil id", text: "", costUsd: 0, numTurns: 0, durationMs: 1, exitCode: 0 });
     assert.equal(out.conversationId, ""); assert.equal(out.status, "succeeded");
+  });
+});
+
+describe("applyResult charges for kills and finishRun is safe", () => {
+  const mk = () => { const runs = runStore(); const run = runs.create("rt1", "schedule"); return { runs, run }; };
+  const res = (o) => ({ status: "failed", conversationId: "", text: "", costUsd: 0, numTurns: 0, durationMs: 5, exitCode: null, ...o });
+  it("a timed_out run is charged the routine's maxBudgetUsd when it reported less", () => {
+    const { runs, run } = mk();
+    assert.equal(applyResult(runs, run, routine({ maxBudgetUsd: 3 }), res({ status: "timed_out", costUsd: 0 })).costUsd, 3);
+    const b = mk();
+    assert.equal(applyResult(b.runs, b.run, routine({ maxBudgetUsd: 3 }), res({ status: "timed_out", costUsd: 0.5 })).costUsd, 3);
+    const c = mk();
+    assert.equal(applyResult(c.runs, c.run, routine({ maxBudgetUsd: 3 }), res({ status: "timed_out", costUsd: 4 })).costUsd, 4);
+  });
+  it("cancelled and failed runs keep their reported cost", () => {
+    for (const status of ["cancelled", "failed"]) {
+      const { runs, run } = mk();
+      assert.equal(applyResult(runs, run, routine({ maxBudgetUsd: 3 }), res({ status, costUsd: 0.25 })).costUsd, 0.25);
+    }
+  });
+  it("a timing-out routine moves the daily cap", () => {
+    const runs = runStore(), st = settings(); st.set({ maxDailyCostUsd: 2 });
+    const run = runs.create("rt1", "schedule");
+    runs.update(run.id, { status: "running", startedAt: Date.now() });
+    applyResult(runs, run, routine({ maxBudgetUsd: 2 }), res({ status: "timed_out" }));
+    assert.equal(new AutomationGuards({ settings: st, runs }).check(routine(), "schedule").ok, false);
+  });
+  it("finishRun records the result like applyResult", () => {
+    const { runs, run } = mk();
+    const out = finishRun(runs, run, routine(), res({ status: "succeeded", text: "ok", exitCode: 0 }));
+    assert.equal(out.status, "succeeded"); assert.equal(runs.get(run.id).summary, "ok");
+  });
+  it("finishRun falls back to a failed run with a short error when the update throws, never leaving it running", () => {
+    const { runs, run } = mk();
+    runs.update(run.id, { status: "running", startedAt: 1 });
+    let n = 0;
+    const flaky = { update: (id, patch) => { if (n++ === 0) throw new Error("disk full"); return runs.update(id, patch); } };
+    finishRun(flaky, run, routine(), res({ status: "succeeded", text: "ok", exitCode: 0 }));
+    const cur = runs.get(run.id);
+    assert.equal(cur.status, "failed"); assert.match(cur.error, /disk full/); assert.ok(cur.finishedAt !== null);
+  });
+  it("finishRun never throws even if the fallback also fails", () => {
+    const { run } = mk();
+    const dead = { update: () => { throw new Error("gone"); } };
+    assert.doesNotThrow(() => finishRun(dead, run, routine(), res({})));
   });
 });
 
@@ -384,6 +492,9 @@ describe("AgentRunExecutor with the real AgentService and the fake claude", () =
   }
   const calls = (state) => { const f = path.join(state, "calls.jsonl"); return fs.existsSync(f) ? fs.readFileSync(f, "utf8").trim().split("\n").map((l) => JSON.parse(l)) : []; };
   const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  const within = (p, ms) => Promise.race([p, new Promise((r) => setTimeout(() => r("TIMEOUT"), ms))]);
+  const pidFile = (state) => path.join(state, "child.pid");
+  const readPid = (state) => (fs.existsSync(pidFile(state)) ? Number(fs.readFileSync(pidFile(state), "utf8")) : 0);
 
   it("runs the routine for an agent, records the result and writes the run log", async () => {
     const r = real();
@@ -393,7 +504,7 @@ describe("AgentRunExecutor with the real AgentService and the fake claude", () =
     assert.equal(res.status, "succeeded"); assert.equal(started, true);
     const c = calls(r.state)[0];
     assert.equal(c.argv.at(-1), "do the thing"); assert.equal(c.argv[c.argv.indexOf("--model") + 1], "haiku");
-    const done = applyResult(r.runs, run, res);
+    const done = applyResult(r.runs, run, routine(), res);
     assert.equal(done.status, "succeeded"); assert.equal(done.summary, "reply to: do the thing"); assert.equal(done.costUsd, 0.0123); assert.equal(done.numTurns, 1);
     assert.ok(done.startedAt !== null); assert.ok(fs.existsSync(r.runs.logPath(run.id)));
   });
@@ -421,7 +532,7 @@ describe("AgentRunExecutor with the real AgentService and the fake claude", () =
     const res = await h.done;
     assert.equal(res.status, "cancelled");
     await until(() => !alive(child));
-    assert.equal(applyResult(r.runs, run, res).status, "cancelled");
+    assert.equal(applyResult(r.runs, run, routine(), res).status, "cancelled");
   });
   it("cancel() before the run starts resolves cancelled without spawning", async () => {
     const r = real("slow");
@@ -446,18 +557,73 @@ describe("AgentRunExecutor with the real AgentService and the fake claude", () =
         const h = r.exec.execute(run, rt, { onStart() {} });
         handles.set(run.id, h);
         register(() => h.cancel());
-        applyResult(r.runs, run, await h.done);
+        finishRun(r.runs, run, rt, await h.done);
       },
     });
     const a = r.runs.create("rt1", "manual"), b = r.runs.create("rt1", "manual");
     queue.enqueue(a); queue.enqueue(b);
-    await until(() => fs.existsSync(path.join(r.state, "child.pid")));
+    await until(() => readPid(r.state) > 0);
+    const childA = readPid(r.state);
     assert.equal(queue.size(), 1);
     assert.equal(queue.cancel(a.id), true);
-    await until(() => handles.has(b.id));
+    await until(() => readPid(r.state) !== childA && r.runs.get(b.id).status === "running");   // b really started its own process
+    const childB = readPid(r.state);
     assert.equal(r.runs.get(a.id).status, "cancelled");
     assert.equal(queue.cancel(b.id), true);
     await queue.idle();
     assert.equal(r.runs.get(b.id).status, "cancelled");
+    await until(() => !alive(childA) && !alive(childB));
+  });
+  it("cancelling a run still waiting behind a long predecessor frees its queue slot at once", async () => {
+    const r = real("hang");
+    const rt = routine({ target: { kind: "agent", agentId: r.agent.id } });
+    const first = r.runs.create("rt1", "manual"), second = r.runs.create("rt1", "manual");
+    const h1 = r.exec.execute(first, rt, { onStart() {} });
+    await until(() => readPid(r.state) > 0 && r.runs.get(first.id).status === "running");
+    const queue = new RunQueue({ limit: 1, execute: async (run, register) => { const h = r.exec.execute(run, rt, { onStart() {} }); register(() => h.cancel()); finishRun(r.runs, run, rt, await h.done); } });
+    try {
+      queue.enqueue(second);                                   // waits behind first on the same agent chain
+      await tick();
+      assert.equal(queue.running(), 1);
+      assert.equal(queue.cancel(second.id), true);
+      assert.notEqual(await within(queue.idle(), 500), "TIMEOUT");   // slot freed while the predecessor still runs
+      assert.equal(r.runs.get(second.id).status, "cancelled");
+      assert.equal(r.runs.get(first.id).status, "running");
+      h1.cancel();                                             // cleanup
+      assert.equal((await h1.done).status, "cancelled");
+      await until(() => !alive(readPid(r.state)));
+      assert.equal(calls(r.state).length, 1);                  // the cancelled run never spawned
+    } finally { h1.cancel(); }
+  });
+  it("3 manual runs with maxRunsPerDay 1: only the first spawns, preflight skips the others at dequeue", async () => {
+    const r = real("ok");
+    const st = settings();
+    const guards = new AutomationGuards({ settings: st, runs: r.runs });
+    const exec = new AgentRunExecutor({ agents: r.svc, runs: r.runs, preflight: (run, rt) => { const g = guards.check(rt, run.trigger); return g.ok ? null : g.reason; } });
+    const rt = routine({ target: { kind: "agent", agentId: r.agent.id }, maxRunsPerDay: 1 });
+    const queue = new RunQueue({ limit: 1, execute: async (run) => { finishRun(r.runs, run, rt, await exec.execute(run, rt, { onStart() {} }).done); } });
+    const ids = [1, 2, 3].map(() => r.runs.create("rt1", "manual"));
+    for (const x of ids) queue.enqueue(x);
+    await queue.idle();
+    assert.equal(calls(r.state).length, 1);
+    assert.deepEqual(ids.map((x) => r.runs.get(x.id).status), ["succeeded", "skipped", "skipped"]);
+    assert.equal(r.runs.get(ids[1].id).reason, "daily run limit reached (1)");
+    assert.equal(r.runs.get(ids[2].id).startedAt, null);
+  });
+  it("a pause that happens while runs are queued stops them at dequeue", async () => {
+    const r = real("slow");
+    const st = settings();
+    const guards = new AutomationGuards({ settings: st, runs: r.runs });
+    const exec = new AgentRunExecutor({ agents: r.svc, runs: r.runs, preflight: (run, rt) => { const g = guards.check(rt, run.trigger); return g.ok ? null : g.reason; } });
+    const rt = routine({ target: { kind: "agent", agentId: r.agent.id } });
+    const queue = new RunQueue({ limit: 1, execute: async (run) => { finishRun(r.runs, run, rt, await exec.execute(run, rt, { onStart() {} }).done); } });
+    const a = r.runs.create("rt1", "manual"), b = r.runs.create("rt1", "manual");
+    queue.enqueue(a); queue.enqueue(b);
+    await until(() => r.runs.get(a.id).status === "running");
+    st.set({ paused: true });
+    await queue.idle();
+    assert.equal(r.runs.get(a.id).status, "succeeded");
+    assert.equal(r.runs.get(b.id).status, "skipped"); assert.equal(r.runs.get(b.id).reason, "automation paused");
+    assert.equal(calls(r.state).length, 1);
   });
 });

@@ -18,12 +18,15 @@ export class RunQueue {
   private readonly active = new Map<string, Active>();
   private idleWaiters: Array<() => void> = [];
   private readonly limit: number;
+  private closed = false;
 
   constructor(private readonly o: RunQueueOptions) {
     this.limit = Math.max(1, Math.floor(o.limit) || 1);
   }
 
+  /** Ignored after `drain()`: a drained queue is shut down for good. */
   enqueue(run: Run): void {
+    if (this.closed) return;
     this.waiting.push(run);
     this.pump();
   }
@@ -38,8 +41,12 @@ export class RunQueue {
     return true;
   }
 
-  /** Cancels everything: queued runs are dropped (returned so the owner can mark them cancelled), running ones are cancelled. */
+  /**
+   * Shuts the queue down: queued runs are dropped (returned so the owner can mark them cancelled), running ones are
+   * cancelled, and later enqueue() calls are ignored.
+   */
   drain(): Run[] {
+    this.closed = true;
     const dropped = this.waiting.splice(0);
     for (const a of [...this.active.values()]) this.requestCancel(a);
     this.settleIdle();

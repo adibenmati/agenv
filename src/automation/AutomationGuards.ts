@@ -36,7 +36,11 @@ export class AutomationGuards {
     this.dayStart = o.dayStart ?? localDayStart;
   }
 
-  check(routine: Routine, _trigger: RunTrigger): GuardResult {
+  /**
+   * `reservedUsd` is budget already promised to other running runs (their maxBudgetUsd): their cost is not recorded
+   * until they finish, so the cap is compared against spent + reserved.
+   */
+  check(routine: Routine, _trigger: RunTrigger, opts: { reservedUsd?: number } = {}): GuardResult {
     const s = this.settings.get();
     if (s.paused) return { ok: false, reason: "automation paused" };
     const since = this.dayStart(this.now());
@@ -44,7 +48,7 @@ export class AutomationGuards {
       return { ok: false, reason: `daily run limit reached (${routine.maxRunsPerDay})` };
     }
     // 0 is a real cap that blocks everything, so this must be a null test, not a truthiness test.
-    if (s.maxDailyCostUsd !== null && this.runs.costSince(since) >= s.maxDailyCostUsd) {
+    if (s.maxDailyCostUsd !== null && this.runs.costSince(since) + (opts.reservedUsd ?? 0) >= s.maxDailyCostUsd) {
       return { ok: false, reason: `daily cost cap reached ($${s.maxDailyCostUsd})` };
     }
     return { ok: true };
