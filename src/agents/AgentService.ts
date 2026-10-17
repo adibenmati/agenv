@@ -251,6 +251,9 @@ export class AgentService {
 
   cancelAll(): void { this.epoch++; for (const h of [...this.handles]) h.cancel(); this.d.runner.cancelAll?.(); }
 
+  /** True while a run of the agent is queued or running (its outer chain key is held). */
+  isAgentBusy(agentId: string): boolean { return this.chains.has(`agent:${agentId}`); }
+
   /** True while the conversation is open in a running terminal session. */
   isConversationBusy(conversationId: string): boolean { return this.inUse(conversationId); }
 

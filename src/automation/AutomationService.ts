@@ -22,7 +22,7 @@ export interface AutomationServiceOptions {
   settings: AutomationSettings;
   scheduler: RoutineScheduler;
   queue: RunQueue;
-  agents: Pick<AgentService, "openTerminal" | "openConversation" | "get">;
+  agents: Pick<AgentService, "openTerminal" | "openConversation" | "get" | "isAgentBusy">;
   isDir: (p: string) => boolean;
   agentExists: (id: string) => boolean;
   now: () => number;
@@ -124,15 +124,20 @@ export class AutomationService {
   /**
    * "Open interactively": a normal terminal session. Conversation mode "agent" opens the agent's own terminal; fork, fresh
    * and folder runs open the run's conversation (in the agent's or the folder's cwd). 404 when the run produced no
-   * conversation, 409 when it is still running and has none yet.
+   * conversation. 409 while the run is queued/running or while any run of the same agent is active (a terminal would be a
+   * second writer on the agent's conversation).
    */
   openRun(id: string): Session {
     const run = this.mustRun(id);
     const routine = this.o.routines.get(run.routineId);
     if (!routine) throw new HttpError(404, "routine not found");
+    if (isActive(run)) throw new HttpError(409, "the run is still active");
+    if (routine.target.kind === "agent" && this.o.agents.isAgentBusy(routine.target.agentId)) {
+      throw new HttpError(409, "the agent is busy with another run; open it when that run has finished");
+    }
     if (routine.conversation === "agent" && routine.target.kind === "agent") return this.o.agents.openTerminal(routine.target.agentId);
     if (!run.conversationId) {
-      throw isActive(run) ? new HttpError(409, "the run has no conversation yet") : new HttpError(404, "the run has no conversation to open");
+      throw new HttpError(404, "the run has no conversation to open");
     }
     const cwd = routine.target.kind === "folder" ? routine.target.cwd : this.o.agents.get(routine.target.agentId).cwd;
     return this.o.agents.openConversation(run.conversationId, cwd);

@@ -403,6 +403,28 @@ describe("routines API cancel and delete of a running run", () => {
     assert.equal((await post(`/api/runs/${r.body.id}/cancel`, {})).status, 409);
   });
 
+  it("open is a 409 while the run (or any run of its agent) is active", async () => {
+    try { fs.unlinkSync(path.join(ctx.state, "child.pid")); } catch {}
+    const a = await mk("hang-open-a"), b = await mk("hang-open-b");
+    const ra = await post(`/api/routines/${a.id}/run`, {});
+    assert.equal(ra.status, 200, JSON.stringify(ra.body));
+    await waitFor(async () => (await get(`/api/runs/${ra.body.id}`)).body.status === "running", { message: "running" });
+    const open = await post(`/api/runs/${ra.body.id}/open`, {});
+    assert.equal(open.status, 409, JSON.stringify(open.body));
+    assert.match(open.body.error, /still active/);
+    // a finished run of the same agent is refused too while another run of that agent is active
+    const rb = await post(`/api/routines/${b.id}/run`, {});
+    assert.equal(rb.status, 200, JSON.stringify(rb.body));
+    await post(`/api/runs/${rb.body.id}/cancel`, {});
+    const busy = await post(`/api/runs/${rb.body.id}/open`, {});
+    assert.equal(busy.status, 409, JSON.stringify(busy.body));
+    assert.match(busy.body.error, /busy/);
+    await post(`/api/runs/${ra.body.id}/cancel`, {});
+    const after = await post(`/api/runs/${ra.body.id}/open`, {});
+    assert.notEqual(after.status, 409, "not refused once nothing of the agent is active: " + JSON.stringify(after.body));
+    if (after.status === 200) await del(`/api/sessions/${after.body.id}`);
+  });
+
   it("deleting a routine with a running run cancels it and clears the history", async () => {
     try { fs.unlinkSync(path.join(ctx.state, "child.pid")); } catch {}
     const c = await mk("hang-delete");

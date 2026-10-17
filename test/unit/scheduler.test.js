@@ -43,7 +43,7 @@ function fakeAgents(o = {}) {
     // like the real service, the handle (the moment the process exists) is reported asynchronously, after the dequeue
     if (!o.noHandle) queueMicrotask(() => opts.onHandle?.(() => { call.cancelled = true; call.resolve?.(cancelledResult()); }));
     if (o.auto) return Promise.resolve(okResult());
-    return new Promise((res) => { call.resolve = res; });
+    return new Promise((res) => { call.resolve = (v) => { call.done = true; res(v); }; });
   };
   return {
     calls,
@@ -51,6 +51,7 @@ function fakeAgents(o = {}) {
     runInFolder: (cwd, prompt, opts) => start("folder", cwd, prompt, opts),
     finish: (i, result = okResult()) => calls[i].resolve(result),
     opened: [],
+    isAgentBusy: (id) => calls.some((c) => c.kind === "agent" && c.target === id && !c.done && c.resolve !== null),
     get: (id) => ({ id, cwd: "C:\\agent-home" }),
     openTerminal(id) { this.opened.push(["terminal", id]); return { id: 7 }; },
     openConversation(conv, cwd) { this.opened.push(["conversation", conv, cwd]); return { id: 8 }; },
@@ -635,6 +636,37 @@ describe("AutomationService runs", () => {
     assert.throws(() => r.service.openRun(mk(forkRt, fin).id), (e) => e.status === 404, "finished without a conversation");
     assert.throws(() => r.service.openRun(mk(forkRt, { status: "running", startedAt: 1 }).id), (e) => e.status === 409, "not finished, no conversation yet");
     assert.throws(() => r.service.openRun("aaaaaaaaaaaa"), (e) => e.status === 404);
+  });
+
+  it("openRun is a 409 while the run is queued or running, and while any run of the same agent is active", async () => {
+    const r = rig({ limit: 1 });
+    const rt = r.service.createRoutine(baseInput({ name: "fork", conversation: "fork", concurrency: "always_enqueue" }));
+    const other = r.service.createRoutine(baseInput({ name: "other", conversation: "fork", concurrency: "always_enqueue" }));
+    const first = r.service.runNow(rt.id);
+    const waiting = r.service.runNow(other.id);                 // queued behind the first (limit 1)
+    await flush();
+    assert.equal(r.runs.get(first.id).status, "running");
+    assert.throws(() => r.service.openRun(first.id), (e) => e.status === 409 && /still active/.test(e.message));
+    assert.throws(() => r.service.openRun(waiting.id), (e) => e.status === 409 && /still active/.test(e.message));
+    assert.deepEqual(r.agents.opened, []);
+    r.agents.finish(0, okResult({ conversationId: "conv-1" })); await flush();
+    // the first run is finished but the same agent is busy with the second one
+    assert.equal(r.runs.get(first.id).status, "succeeded");
+    assert.equal(r.runs.get(waiting.id).status, "running");
+    assert.throws(() => r.service.openRun(first.id), (e) => e.status === 409 && /agent is busy/.test(e.message));
+    r.agents.finish(1, okResult({ conversationId: "conv-2" })); await flush();
+    assert.equal(r.service.openRun(first.id).id, 8);
+    assert.equal(r.service.openRun(waiting.id).id, 8);
+    assert.deepEqual(r.agents.opened.map((o) => o[1]), ["conv-1", "conv-2"]);
+  });
+
+  it("a folder run needs no agent check: openRun works once the run itself finished", async () => {
+    const r = rig();
+    const rt = r.service.createRoutine(baseInput({ name: "d", target: { kind: "folder", cwd: path.resolve(r.dir) }, conversation: "fresh" }));
+    const run = r.service.runNow(rt.id); await flush();
+    assert.throws(() => r.service.openRun(run.id), (e) => e.status === 409);
+    r.agents.finish(0, okResult({ conversationId: "conv-f" })); await flush();
+    assert.equal(r.service.openRun(run.id).id, 8);
   });
 });
 
