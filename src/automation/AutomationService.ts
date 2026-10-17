@@ -2,6 +2,7 @@ import { HttpError } from "../core/HttpError";
 import { safeId } from "../core/ids";
 import type { AgentService } from "../agents/AgentService";
 import type { Session } from "../sessions/Session";
+import type { AutomationOwnership } from "./AutomationOwnership";
 import type { AutomationSettings, AutomationSettingsData } from "./AutomationSettings";
 import { nextCronTime } from "./cron";
 import { resolveCron, Routine, RoutineInput, validateRoutineInput } from "./Routine";
@@ -28,6 +29,11 @@ export interface AutomationServiceOptions {
   now: () => number;
   /** Timer functions for dispose's bounded wait; injectable so tests can prove none is left pending. */
   timers?: { set(fn: () => void, ms: number): unknown; clear(handle: unknown): void };
+  /**
+   * Which agenv instance runs the schedules (the lock file). Without it this instance is the owner. A non-owner never starts
+   * the tick and refuses runNow / cancelRun / openRun with a 409; routine edits stay allowed (the owner re-reads them).
+   */
+  ownership?: Pick<AutomationOwnership, "acquire" | "release" | "isOwner" | "ownerPort">;
   /** Called after any routine, run or settings change (wired to gateway.broadcastEvent("runs-updated")). */
   onChange: () => void;
 }
@@ -81,6 +87,8 @@ export class AutomationService {
    */
   async deleteRoutine(id: string): Promise<void> {
     this.must(id);
+    // The runs of a routine another instance is executing cannot be cancelled from here.
+    if (!this.isOwner() && this.o.runs.active(id)) this.requireOwner();
     this.o.routines.remove(id);
     for (const run of this.o.runs.list(id, MAX_RUNS).filter(isActive)) this.cancelNow(run);
     await this.settled(() => this.o.runs.active(id) === undefined);
@@ -91,7 +99,10 @@ export class AutomationService {
   }
 
   /** Run now. Throws 409 with the reason when paused or a daily limit is reached; never touches nextRunAt. */
-  runNow(id: string): Run { return this.o.scheduler.runManually(this.must(id)); }
+  runNow(id: string): Run {
+    this.requireOwner();
+    return this.o.scheduler.runManually(this.must(id));
+  }
 
   // ---- runs ----
 
@@ -111,6 +122,7 @@ export class AutomationService {
 
   /** Queued: removed. Running: its process tree is killed and the final record is returned. Finished: 409. */
   async cancelRun(id: string): Promise<Run> {
+    this.requireOwner();
     const run = this.mustRun(id);
     if (!isActive(run)) throw new HttpError(409, "the run has already finished");
     this.cancelNow(run);
@@ -128,6 +140,7 @@ export class AutomationService {
    * second writer on the agent's conversation).
    */
   openRun(id: string): Session {
+    this.requireOwner();
     const run = this.mustRun(id);
     const routine = this.o.routines.get(run.routineId);
     if (!routine) throw new HttpError(404, "routine not found");
@@ -153,7 +166,27 @@ export class AutomationService {
     return s;
   }
 
+  /** Whether this instance runs the schedules, and the port of the instance that does (null when there is no lock). */
+  ownerInfo(): { owner: boolean; ownerPort: number | null } {
+    const own = this.o.ownership;
+    return own ? { owner: own.isOwner(), ownerPort: own.ownerPort() } : { owner: true, ownerPort: null };
+  }
+
   // ---- lifecycle ----
+
+  /** Gives the schedule lock back (sync, also called from the process exit hook). A lock that is not ours stays. */
+  releaseOwnership(): void { this.o.ownership?.release(); }
+
+  /**
+   * Called once the server listens: takes the schedule lock and, if this instance owns it, closes runs a dead server left
+   * active, applies catch-up and starts the tick. A non-owner starts nothing. Returns whether scheduling runs here.
+   */
+  startScheduling(): boolean {
+    if (this.o.ownership && !this.o.ownership.acquire()) return false;
+    this.o.scheduler.startup();
+    this.o.scheduler.start();
+    return true;
+  }
 
   /** Stops the tick, drops queued runs and cancels running ones, then waits (bounded) for them to be recorded. Call before agents.cancelAll(). */
   async dispose(): Promise<void> {
@@ -162,10 +195,18 @@ export class AutomationService {
     let handle: unknown;
     const timeout = new Promise<void>((resolve) => { handle = this.timers.set(resolve, DISPOSE_WAIT_MS); });
     try { await Promise.race([this.o.queue.idle(), timeout]); } finally { this.timers.clear(handle); }
+    try { this.o.ownership?.release(); } catch {}
     this.change();
   }
 
   // ---- helpers ----
+
+  private isOwner(): boolean { return this.o.ownership ? this.o.ownership.isOwner() : true; }
+
+  private requireOwner(): void {
+    if (this.isOwner()) return;
+    throw new HttpError(409, `automation is owned by another agenv instance (port ${this.o.ownership!.ownerPort()})`);
+  }
 
   private must(id: string): Routine {
     const r = this.o.routines.get(id);

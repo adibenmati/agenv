@@ -142,6 +142,7 @@ function main(): void {
   process.on("exit", () => {
     if (!shuttingDown && !startupFailed) { try { stateStore.saveNow(); } catch {} try { sessions.saveAllScrollback(true); } catch {} }
     removePidFile();
+    try { runtime.automation.releaseOwnership(); } catch {}
   });
 
   // ---- listen ----
@@ -157,9 +158,13 @@ function main(): void {
   runtime.server.listen(config.port, config.host, () => {
     console.log(`[agenv] Listening on ${config.host}:${config.port}`);
     stateStore.release();   // the port is ours: save the restored/initial sessions now
-    // Routines only run in the process that owns the port: close runs a dead server left active, apply catch-up, then tick.
-    try { runtime.scheduler.startup(); } catch (e) { console.error(`[agenv] Routine catch-up failed: ${(e as Error).message}`); }
-    try { runtime.scheduler.start(); } catch (e) { console.error(`[agenv] Routine scheduler failed to start: ${(e as Error).message}`); }
+    // Routines run only in the one agenv instance that holds the schedule lock: it closes runs a dead server left active,
+    // applies catch-up, then ticks. Any other instance still serves the API but starts nothing.
+    try {
+      if (!runtime.automation.startScheduling()) {
+        console.log(`[agenv] Routines are scheduled by another agenv instance (port ${runtime.automation.ownerInfo().ownerPort}); this one only serves the panel.`);
+      }
+    } catch (e) { console.error(`[agenv] Routine scheduler failed to start: ${(e as Error).message}`); }
     // Write PID file so 'agenv stop/kill' can find us
     try { fs.writeFileSync(pidPath, JSON.stringify({ pid: process.pid, port: config.port, host: config.host, started: Date.now() })); } catch {}
   });

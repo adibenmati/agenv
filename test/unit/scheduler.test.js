@@ -81,7 +81,7 @@ function rig(o = {}) {
   const executor = o.executor ?? new AgentRunExecutor({ agents, runs, now, preflight: makePreflight({ runs, routines, guards, now }) });
   const queue = createRunQueue({ limit: o.limit ?? 2, routines, runs, executor, now, onChange });
   const scheduler = new RoutineScheduler({ routines, runs, guards, queue, now, onChange, missedGraceMs: o.grace, tickMs: o.tickMs, log: () => {} });
-  const service = new AutomationService({ routines, runs, settings, scheduler, queue, agents, isDir, agentExists, now, onChange, timers: o.timers });
+  const service = new AutomationService({ routines, runs, settings, scheduler, queue, agents, isDir, agentExists, now, onChange, timers: o.timers, ownership: o.ownership });
   return { dir, clock, saves, changes, routines, runs, settings, guards, agents, executor, queue, scheduler, service, reopen: (name, fb) => jsonStore(dir, name, fb) };
 }
 const due = (r, rt, plusMs = 1000) => { r.clock.t = rt.nextRunAt + plusMs; };
@@ -507,6 +507,70 @@ describe("head-of-line blocking: a busy agent must not hold a queue slot", () =>
     await flush();
     assert.deepEqual(r.agents.calls.map((c) => c.kind), ["folder", "agent"]);
     assert.equal(r.runs.list(f2.id)[0].status, "queued");
+  });
+});
+
+describe("instance ownership of the schedules", () => {
+  const fakeOwnership = (owner, port = 4321) => {
+    const o = { acquires: 0, releases: 0, acquire() { o.acquires++; return owner; }, release() { o.releases++; }, isOwner: () => owner, ownerPort: () => port };
+    return o;
+  };
+  const owned = /automation is owned by another agenv instance \(port 4321\)/;
+
+  it("the owner starts catch-up and the tick; dispose releases the lock", async () => {
+    const own = fakeOwnership(true, 3000);
+    const r = rig({ ownership: own });
+    const calls = [];
+    r.scheduler.startup = () => calls.push("startup"); r.scheduler.start = () => calls.push("start");
+    assert.equal(r.service.startScheduling(), true);
+    assert.deepEqual(calls, ["startup", "start"]);
+    assert.equal(own.acquires, 1);
+    assert.deepEqual(r.service.ownerInfo(), { owner: true, ownerPort: 3000 });
+    await r.service.dispose();
+    assert.equal(own.releases, 1);
+  });
+
+  it("a non-owner never runs catch-up or the tick", () => {
+    const own = fakeOwnership(false);
+    const r = rig({ ownership: own });
+    const calls = [];
+    r.scheduler.startup = () => calls.push("startup"); r.scheduler.start = () => calls.push("start"); r.scheduler.tick = () => calls.push("tick");
+    assert.equal(r.service.startScheduling(), false);
+    assert.deepEqual(calls, []);
+    assert.deepEqual(r.service.ownerInfo(), { owner: false, ownerPort: 4321 });
+  });
+
+  it("a non-owner answers 409 to runNow, cancelRun and openRun, and the run operations change nothing", async () => {
+    const own = fakeOwnership(false);
+    const r = rig({ ownership: own });
+    const rt = r.service.createRoutine(baseInput());           // routine CRUD stays allowed
+    r.service.updateRoutine(rt.id, { name: "renamed" });
+    const run = r.runs.create(rt.id, "manual", "running");
+    assert.throws(() => r.service.runNow(rt.id), (e) => e instanceof HttpError && e.status === 409 && owned.test(e.message));
+    await assert.rejects(() => r.service.cancelRun(run.id), (e) => e.status === 409 && owned.test(e.message));
+    r.runs.update(run.id, { status: "succeeded", finishedAt: 1, conversationId: "c-1" });
+    assert.throws(() => r.service.openRun(run.id), (e) => e.status === 409 && owned.test(e.message));
+    assert.equal(r.runs.list(rt.id).length, 1, "no run was created");
+    assert.equal(r.agents.calls.length, 0);
+    assert.deepEqual(r.agents.opened, []);
+    await r.service.deleteRoutine(rt.id);                      // nothing active: still fine
+  });
+
+  it("a non-owner refuses to delete a routine another instance is running", async () => {
+    const r = rig({ ownership: fakeOwnership(false) });
+    const rt = r.service.createRoutine(baseInput());
+    r.runs.create(rt.id, "schedule", "running");
+    await assert.rejects(() => r.service.deleteRoutine(rt.id), (e) => e.status === 409 && owned.test(e.message));
+    assert.ok(r.routines.get(rt.id));
+  });
+
+  it("without an ownership object the service is the owner and starts scheduling", () => {
+    const r = rig();
+    const calls = [];
+    r.scheduler.startup = () => calls.push("startup"); r.scheduler.start = () => calls.push("start");
+    assert.equal(r.service.startScheduling(), true);
+    assert.deepEqual(calls, ["startup", "start"]);
+    assert.deepEqual(r.service.ownerInfo(), { owner: true, ownerPort: null });
   });
 });
 

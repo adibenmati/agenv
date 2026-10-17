@@ -9,6 +9,7 @@ import { TrackedRunner } from "./agents/TrackedRunner";
 import { ConversationForker } from "./agents/ConversationForker";
 import { ChangeBatcher } from "./automation/ChangeBatcher";
 import { AutomationGuards } from "./automation/AutomationGuards";
+import { AutomationOwnership } from "./automation/AutomationOwnership";
 import { AutomationService } from "./automation/AutomationService";
 import { AutomationSettings } from "./automation/AutomationSettings";
 import type { AutomationSettingsData } from "./automation/AutomationSettings";
@@ -148,8 +149,10 @@ export function buildRuntime(o: RuntimeOptions): Runtime {
   });
   const runQueue = createRunQueue({ limit: 2, routines: routineStore, runs: runStore, executor, now: clock, onChange: runsChanged });
   const scheduler = new RoutineScheduler({ routines: routineStore, runs: runStore, guards, queue: runQueue, now: clock, onChange: runsChanged });
+  // One agenv instance per machine runs the schedules (a lock file in the home folder); index.ts acquires it once the port is ours.
+  const ownership = new AutomationOwnership({ path: path.join(homedir, ".agenv-automation.lock"), port: config.port });
   const automation = new AutomationService({
-    routines: routineStore, runs: runStore, settings: automationSettings, scheduler, queue: runQueue, agents,
+    ownership, routines: routineStore, runs: runStore, settings: automationSettings, scheduler, queue: runQueue, agents,
     isDir: isRealDir, agentExists: (id) => agentStore.get(id) !== undefined, now: clock, onChange: runsChanged,
   });
 

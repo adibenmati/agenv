@@ -21,8 +21,9 @@ function stubClaudeDir() {
   return dir;
 }
 
-async function boot(mode = "ok") {
+async function boot(mode = "ok", beforeStart) {
   const home = makeTempHome(), state = tmp("agenv-fake-state-"), work = tmp("agenv-work-"), stub = stubClaudeDir();
+  if (beforeStart) beforeStart(home);
   const server = await startServer({
     home,
     env: {
@@ -322,7 +323,7 @@ describe("routines API", () => {
 
   it("pausing blocks run-now with a 409 and a reason; unpausing restores it", async () => {
     const c = await create();
-    assert.deepEqual((await get("/api/automation")).body, { paused: false, maxDailyCostUsd: null });
+    assert.deepEqual((await get("/api/automation")).body, { paused: false, maxDailyCostUsd: null, owner: true, ownerPort: ctx.server.port });
     const p = await put("/api/automation", { paused: true });
     assert.equal(p.status, 200, JSON.stringify(p.body));
     assert.equal(p.body.paused, true);
@@ -435,6 +436,59 @@ describe("routines API cancel and delete of a running run", () => {
     assert.equal((await get(`/api/runs/${r.body.id}`)).status, 404);
     await waitFor(() => !isAlive(childPid), { message: "the child process to exit" });
   });
+});
+
+describe("routines: only one agenv instance runs the schedules", () => {
+  const LOCK = ".agenv-automation.lock";
+  const readLock = (ctx) => JSON.parse(fs.readFileSync(path.join(ctx.home, LOCK), "utf8"));
+
+  it("the first instance owns the lock and reports itself as the owner", async () => {
+    const ctx = await boot();
+    try {
+      const a = (await get("/api/automation")).body;
+      assert.equal(a.owner, true);
+      assert.equal(a.ownerPort, ctx.server.port);
+      assert.deepEqual({ pid: readLock(ctx).pid, port: readLock(ctx).port }, { pid: ctx.server.proc.pid, port: ctx.server.port });
+    } finally { await stopProcess(ctx.server.proc); rmAll(ctx.dirs); }
+  }, { timeout: 30000 });
+
+  it("a graceful shutdown gives the lock back", async () => {
+    const ctx = await boot();
+    try {
+      assert.equal(readLock(ctx).pid, ctx.server.proc.pid);
+      assert.equal((await post("/api/shutdown", {})).status, 200);
+      await waitFor(() => !fs.existsSync(path.join(ctx.home, LOCK)), { message: "the lock to be released", timeout: 15000 });
+    } finally { await stopProcess(ctx.server.proc); rmAll(ctx.dirs); }
+  }, { timeout: 30000 });
+
+  it("an instance that finds a live owner does not schedule and refuses run operations with a 409", async () => {
+    const ctx = await boot("ok", (home) => fs.writeFileSync(path.join(home, LOCK), JSON.stringify({ pid: process.pid, port: 54321, startedAt: 1 })));
+    try {
+      const a = (await get("/api/automation")).body;
+      assert.equal(a.owner, false);
+      assert.equal(a.ownerPort, 54321);
+      const agent = (await post("/api/agents", { name: "w", specialty: "t", cwd: ctx.work })).body;
+      const c = await post("/api/routines", { name: "x", cron: "0 3 1 1 *", timezone: "UTC", prompt: "hi", target: { kind: "agent", agentId: agent.id } });
+      assert.equal(c.status, 200, "routine edits stay allowed: " + JSON.stringify(c.body));
+      const run = await post(`/api/routines/${c.body.id}/run`, {});
+      assert.equal(run.status, 409, JSON.stringify(run.body));
+      assert.match(run.body.error, /owned by another agenv instance \(port 54321\)/);
+      assert.equal((await post("/api/runs/aaaaaaaaaaaa/cancel", {})).status, 409);
+      assert.equal((await post("/api/runs/aaaaaaaaaaaa/open", {})).status, 409);
+      assert.equal(readLock(ctx).pid, process.pid, "the owner's lock is untouched");
+    } finally { await stopProcess(ctx.server.proc); }
+    try { assert.equal(readLock(ctx).pid, process.pid, "a refused instance leaves the lock when it stops"); } finally { rmAll(ctx.dirs); }
+  }, { timeout: 30000 });
+
+  it("a stale lock (its process is gone) is taken over", async () => {
+    const dead = require("child_process").spawnSync(process.execPath, ["-e", "0"]).pid;
+    const ctx = await boot("ok", (home) => fs.writeFileSync(path.join(home, LOCK), JSON.stringify({ pid: dead, port: 54321, startedAt: 1 })));
+    try {
+      const a = (await get("/api/automation")).body;
+      assert.equal(a.owner, true);
+      assert.equal(readLock(ctx).pid, ctx.server.proc.pid);
+    } finally { await stopProcess(ctx.server.proc); rmAll(ctx.dirs); }
+  }, { timeout: 30000 });
 });
 
 describe("routines over a read-only tunnel", () => {

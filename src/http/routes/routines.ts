@@ -77,7 +77,9 @@ export function routinesRouter(d: AppDeps): Router {
     res.json(sessionJson(s));
   }));
 
-  r.get("/api/automation", auth, (_req, res) => res.json(d.automation.getSettings()));
+  // GET: the global switches plus which agenv instance runs the schedules: { paused, maxDailyCostUsd, owner, ownerPort }.
+  const automationState = (settings: object): object => ({ ...settings, ...d.automation.ownerInfo() });
+  r.get("/api/automation", auth, (_req, res) => res.json(automationState(d.automation.getSettings())));
 
   r.put("/api/automation", auth, wrap((req, res) => res.json(d.automation.setSettings(settingsPatch(body(req)) as never))));
 
