@@ -194,12 +194,18 @@ export class SessionManager {
   }
 
   private destroy(s: Session, exitCode: number): void {
-    this.o.archive.add({
-      name: s.name || "", cwd: s.cwd, tool: s.detectedTool || "terminal",
-      lastCommand: s.lastCommand || "", launchCommand: s.launchCommand || "",
-      group: s.group || "", claudeSessionId: s.claudeSessionId || null,
-      created: s.created, lastActivity: s.lastActivity, closed: Date.now(),
-    });
+    // Not being able to remember a closed session (disk full, no permission) must not stop it from closing: the
+    // shell is already gone, and on the shell-exit path an exception here would crash the whole server.
+    try {
+      this.o.archive.add({
+        name: s.name || "", cwd: s.cwd, tool: s.detectedTool || "terminal",
+        lastCommand: s.lastCommand || "", launchCommand: s.launchCommand || "",
+        group: s.group || "", claudeSessionId: s.claudeSessionId || null,
+        created: s.created, lastActivity: s.lastActivity, closed: Date.now(),
+      });
+    } catch (e: any) {
+      console.error(`[agenv] Could not archive closed session ${s.id}: ${e.message}`);
+    }
     s.pty = null;
     s.live = false;
     this.sessions.delete(s.id);

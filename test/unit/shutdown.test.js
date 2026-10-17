@@ -85,6 +85,16 @@ describe("dist/index.js lifecycle", () => {
     await request(s.port, "POST", "/api/shutdown"); await withTimeout(s.exited, 8000, "exit");
   });
 
+  it("--mirror: closing tab 0 from the browser does not stop the server (only the mirrored shell ending does)", async () => {
+    const home = mkHome(); const s = await start(home, ["--mirror"]);
+    const first = (await request(s.port, "GET", "/api/sessions")).body[0]; assert.equal(first.id, 0);
+    assert.equal((await request(s.port, "DELETE", "/api/sessions/0")).status, 200);
+    await sleep(1200);
+    assert.equal((await request(s.port, "GET", "/api/stats")).status, 200, "the server is still serving");
+    assert.equal(s.proc.exitCode, null, "and the process is still running");
+    await request(s.port, "POST", "/api/shutdown"); await withTimeout(s.exited, 8000, "exit");
+  });
+
   it("a port that is already taken ends with a clear message and exit code 1", async () => {
     const home = mkHome(); const s = await start(home);
     await request(s.port, "POST", "/api/sessions", { name: "first-only" });

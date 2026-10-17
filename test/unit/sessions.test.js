@@ -121,6 +121,16 @@ describe("SessionManager", () => {
   it("deleting an unknown session is a 404", () => {
     assert.throws(() => rig().m.delete(99), (e) => e.status === 404 && e.message === "Session not found");
   });
+  it("a failing archive write cannot leave a zombie session or crash the process (disk full, permissions)", () => {
+    const orig = console.error; console.error = () => {};
+    try {
+      const a = rig(); const s = a.m.create({ name: "x" }); a.archive.add = () => { throw new Error("EACCES: archive not writable"); };
+      assert.doesNotThrow(() => a.m.delete(s.id)); assert.equal(a.m.get(s.id), undefined, "the session is gone even though it could not be archived");
+      assert.deepEqual(a.events.find((e) => e[0] === "deleted"), ["deleted", -1]);
+      const b = rig(); b.m.create({}); b.archive.add = () => { throw new Error("ENOSPC"); };
+      assert.doesNotThrow(() => b.spawned[0].exit(1), "a shell that exits must not raise an uncaught exception"); assert.equal(b.m.size, 0);
+    } finally { console.error = orig; }
+  });
   it("a shell that exits by itself is archived and deleted with its exit code", () => {
     const { m, spawned, events, archive } = rig(); m.create({ name: "y" }); spawned[0].exit(7);
     assert.equal(m.size, 0); assert.equal(archive.list().length, 1); assert.deepEqual(events.find((e) => e[0] === "deleted"), ["deleted", 7]);

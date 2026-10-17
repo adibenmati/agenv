@@ -86,9 +86,10 @@ function main(): void {
   if (config.mirror) {
     process.stdin.on("data", (data) => { const s = sessions.get(0); if (s) sessions.write(s, String(data)); });
     bus.on("output", (s, data) => { if (s.id === 0) process.stdout.write(data); });
-    // When the mirrored shell ends there is nothing left to show: leave with its exit code.
+    // When the mirrored shell ends there is nothing left to show: leave with its exit code. A session closed from
+    // the browser (API delete) is announced with -1 and must not stop the server.
     bus.on("deleted", (s, code) => {
-      if (s.id !== 0) return;
+      if (s.id !== 0 || code === -1) return;
       stateStore.saveNow(); sessions.saveAllScrollback();
       process.exit(code);
     });
