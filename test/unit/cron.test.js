@@ -136,6 +136,42 @@ describe("daylight saving", () => {
   });
 });
 
+describe("day-skip never overshoots midnight across DST", () => {
+  it("30 0 * * 1 in New York across the 2026-03-08 spring-forward (Sat 03-07 -> Mon 03-09 00:30 EDT)", () => {
+    assert.equal(iso(nextCronTime("30 0 * * 1", NY, utc("2026-03-07T12:00:00Z"))), "2026-03-09T04:30:00.000Z");
+    assert.equal(iso(nextCronTime("0 0 * * 1", NY, utc("2026-03-07T12:00:00Z"))), "2026-03-09T04:00:00.000Z");
+    assert.equal(iso(nextCronTime("*/10 0 * * 1", NY, utc("2026-03-07T12:00:00Z"))), "2026-03-09T04:00:00.000Z");
+  });
+
+  it("0 0 9 3 * in New York does not skip a year when March 9th follows the spring-forward", () => {
+    assert.equal(iso(nextCronTime("0 0 9 3 *", NY, utc("2026-03-07T00:00:00Z"))), "2026-03-09T04:00:00.000Z");
+  });
+
+  it("0 0 * * 6 in Jerusalem fires on Saturday 2026-03-28 (day after the DST jump)", () => {
+    assert.equal(iso(nextCronTime("0 0 * * 6", "Asia/Jerusalem", utc("2026-03-24T00:00:00Z"))), "2026-03-27T21:00:00.000Z");
+  });
+
+  it("15 0 * * 1-5 fires once per local weekday for every day of 2026 (no misses, no doubles)", () => {
+    const zones = ["America/New_York", "Europe/London", "Asia/Jerusalem", "Pacific/Auckland", "Australia/Lord_Howe"];
+    const expected = [];
+    for (let d = 0; d < 365; d++) {
+      const day = new Date(Date.UTC(2026, 0, 1 + d));
+      if (day.getUTCDay() >= 1 && day.getUTCDay() <= 5) expected.push(day.toISOString().slice(0, 10));
+    }
+    for (const tz of zones) {
+      const got = fires("15 0 * * 1-5", tz, utc("2025-12-30T00:00:00Z"), utc("2027-01-02T00:00:00Z"))
+        .map((t) => local(t, tz)).filter((l) => l.date.startsWith("2026-"));
+      assert.ok(got.every((l) => l.time === "00:15"), `${tz}: wrong time`);
+      assert.deepEqual(got.map((l) => l.date), expected, tz);
+    }
+  });
+
+  it("a list of fixed hours around the gap fires at the gap end and again at its own time (30 2,3 on NY 2026-03-08)", () => {
+    const day = fires("30 2,3 * * *", NY, utc("2026-03-08T00:00:00-05:00"), utc("2026-03-09T00:00:00-04:00"));
+    assert.deepEqual(day.map(iso), ["2026-03-08T07:00:00.000Z", "2026-03-08T07:30:00.000Z"]);
+  });
+});
+
 describe("isValidTimeZone / PRESETS", () => {
   it('isValidTimeZone rejects "Mars/Base"', () => {
     assert.equal(isValidTimeZone("Mars/Base"), false);

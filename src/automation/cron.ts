@@ -10,9 +10,9 @@ import { HttpError } from "../core/HttpError";
 
 export interface CronField {
   values: Set<number>;
-  /** The field was a bare `*`. */
+  /** The field is exactly `*`. (Vixie cron treats any leading star, even a star-step, as a star for the dom/dow either-or rule; here a star-step counts as restricted.) */
   any: boolean;
-  /** The source contained a `*` (so `*` or a star-step): the field is a rhythm, not a fixed time of day. */
+  /** The source contained a `*` (a star, a star-step, or a list containing one): the field is a rhythm, not a fixed time of day. */
   wild: boolean;
 }
 
@@ -114,11 +114,25 @@ function skippedMatch(c: ParsedCron, prev: Wall, w: Wall): boolean {
 
 /** Is `t` a repeat of a wall-clock minute already seen shortly before (the second pass through a fall-back hour)? */
 function isRepeatedWallTime(t: number, w: Wall, tz: string): boolean {
+  // DST shifts are 30 min (Lord Howe), 60 min (nearly everywhere) or, historically, 120 min (double summer time).
   for (const back of [30, 60, 120]) {
     const e = wallClock(t - back * MIN, tz);
     if (e.day === w.day && e.hour === w.hour && e.minute === w.minute && e.month === w.month) return true;
   }
   return false;
+}
+
+/**
+ * Step towards the next wall-clock midnight without ever passing it. The wall-clock distance equals the elapsed
+ * distance except on a DST day: stepping it blindly overshoots by the shift on spring-forward (landing at 01:00 and
+ * missing the whole 00:xx hour). If we land past 00:00 of the next day we back up by the wall time we are past it;
+ * an undershoot (fall-back) just costs another loop.
+ */
+function nextWallMidnight(t: number, w: Wall, tz: string): number {
+  const target = t + ((23 - w.hour) * 60 + (60 - w.minute)) * MIN;
+  const e = wallClock(target, tz);
+  const past = e.day === w.day && e.month === w.month ? 0 : e.hour * 60 + e.minute; // still on `w`'s day: undershoot
+  return Math.max(t + MIN, target - past * MIN);
 }
 
 /**
@@ -141,7 +155,7 @@ export function nextCronTime(expr: string, tz: string, afterMs: number): number 
     if (fixed && skippedMatch(c, wallClock(t - MIN, zone), w)) return t;
     // Skip ahead in big steps while whole days/hours can't match. Steps are computed from the wall clock,
     // so DST shifts just cost an extra loop (and the gap check above still sees the minute before `t`).
-    if (!dayMatches(c, w)) { t += ((23 - w.hour) * 60 + (60 - w.minute)) * MIN; continue; }
+    if (!dayMatches(c, w)) { t = nextWallMidnight(t, w, zone); continue; }
     if (!c.hour.values.has(w.hour)) { t += (60 - w.minute) * MIN; continue; }
     if (!c.minute.values.has(w.minute)) { t += MIN; continue; }
     if (fixed && isRepeatedWallTime(t, w, zone)) { t += MIN; continue; }
@@ -163,8 +177,10 @@ export function isValidTimeZone(tz: string): boolean {
 }
 
 /**
- * Smallest possible gap, in minutes, between two firings (UTC, so DST never shortens it). Scans one week of firings;
- * if that week holds fewer than two (e.g. monthly), uses the first two firings after it.
+ * Smallest gap, in minutes, between two consecutive firings, evaluated in UTC (a DST day can make a real gap up to an
+ * hour shorter or longer; fine for the "more often than hourly" rule). Exact for gaps under a week: scans the week
+ * from 2026-01-01. If that week holds fewer than two firings (e.g. monthly) it is the gap between the first two
+ * firings, a representative gap rather than the true minimum.
  */
 export function minGapMinutes(expr: string): number {
   parseCron(expr);
