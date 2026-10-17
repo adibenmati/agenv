@@ -13,7 +13,10 @@
     "restart": "node scripts/manage.js stop && node server.js",
     "destroy": "node scripts/manage.js destroy",
     "status": "node scripts/manage.js status",
-    "test": "node --test test/api.test.js test/session.test.js test/cli.test.js test/claude-usage.test.js test/groups.test.js test/claude-link.test.js",
+    "build": "tsc",
+    "pretest": "npm run build",
+    "test": "node scripts/run-tests.js",
+    "prepublishOnly": "npm run build && node scripts/run-tests.js",
     "watch": "nodemon --watch server.js --watch public/ --ext js,html,css --delay 500ms -- server.js",
     "electron": "electron .",
     "electron:dev": "nodemon --watch electron.js --watch server.js --watch public/ --ext js,html,css --delay 500ms --exec \"electron .\"",
@@ -27,15 +30,16 @@
     "appId": "dev.agenv.app",
     "productName": "Agenv",
     "directories": {
-      "output": "dist"
+      "output": "release"
     },
     "files": [
       "server.js",
       "electron.js",
       "preload.js",
       "cli.js",
+      "dist/**/*",
       "public/**/*",
-      "scripts/**/*",
+      "scripts/manage.js",
       "package.json",
       "node_modules/**/*"
     ],
@@ -102,8 +106,9 @@
     "server.js",
     "electron.js",
     "preload.js",
+    "dist/",
     "public/",
-    "scripts/",
+    "scripts/manage.js",
     "assets/",
     "LICENSE",
     "README.md"
@@ -117,7 +122,11 @@
   },
   "devDependencies": {
     "@electron/rebuild": "^3.7.2",
+    "@types/express": "^4.17.25",
+    "@types/node": "^20.19.43",
+    "@types/ws": "^8.18.2",
     "electron": "^41.2.1",
-    "electron-builder": "^26.0.12"
+    "electron-builder": "^26.0.12",
+    "typescript": "^5.9.3"
   }
 }

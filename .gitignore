@@ -8,3 +8,4 @@ Thumbs.db
 .agenv.log
 test/tmp/
 dist/
+release/
