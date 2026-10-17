@@ -21,9 +21,10 @@ function stubClaudeDir() {
 }
 
 /** Starts a server on a temp HOME with the fake claude; resolves once the API answers. */
-async function boot(mode, extraEnv) {
+async function boot(mode, extraEnv, beforeStart) {
   const home = tmp("agenv-routines-e2e-"), state = tmp("agenv-routines-state-"), stub = stubClaudeDir();
   const port = await freePort();
+  if (beforeStart) beforeStart(home);
   const proc = spawn(process.execPath, [path.join(repo, "server.js"), "--port", port, "--host", "127.0.0.1", "--token", "T", "--no-qr"], {
     env: { ...process.env, HOME: home, USERPROFILE: home, AGENV_CLAUDE_BIN: FAKE, FAKE_CLAUDE_STATE: state, FAKE_CLAUDE_MODE: mode, PATH: stub + path.delimiter + process.env.PATH, ...(extraEnv || {}) },
     stdio: "ignore", windowsHide: true,
@@ -38,13 +39,15 @@ async function boot(mode, extraEnv) {
   for (let i = 0; ; i++) {
     try { await call("GET", "/api/routines"); break; } catch { if (i > 60) throw new Error("server did not start"); await sleep(250); }
   }
-  return { port, proc, get: (p) => call("GET", p), post: (p, b) => call("POST", p, b || {}), dirs: [home, state, stub] };
+  return { port, proc, get: (p) => call("GET", p), post: (p, b) => call("POST", p, b || {}), put: (p, b) => call("PUT", p, b || {}), del: (p) => call("DELETE", p), dirs: [home, state, stub] };
 }
 
 (async () => {
   const work = tmp("agenv-routines-work-");
   const A = await boot("ok");
   const B = await boot("slow", { FAKE_CLAUDE_SLOW_MS: "60000" });
+  // a second instance that finds a live owner: the lock names this very (alive) process as holder
+  const C = await boot("ok", {}, (home) => fs.writeFileSync(path.join(home, ".agenv-automation.lock"), JSON.stringify({ pid: process.pid, port: 4242, startedAt: 1 })));
   const browser = await chromium.launch({ executablePath: exe });
   const errors = [];
   const ok = (cond, msg) => { console.log((cond ? "PASS " : "FAIL ") + msg); if (!cond) process.exitCode = 1; };
@@ -213,6 +216,49 @@ async function boot(mode, extraEnv) {
     await page.screenshot({ path: shot("routines.png") });
     ok(await page.evaluate(() => { const p = document.getElementById("routines-panel"); return p.scrollWidth <= p.clientWidth; }), "no horizontal overflow in the panel");
 
+    // 9b. One refresh costs three requests however many routines exist, and an unchanged list is not rebuilt
+    const bulk = [];
+    for (let i = 1; i <= 15; i++) bulk.push(await A.post("/api/routines", { name: "bulk" + i, cron: "preset:daily", prompt: "x", target: { kind: "agent", agentId: agentA.id } }));
+    await waitFor(async () => (await rowNames(page)).filter((n) => /^bulk/.test(n)).length === 15, 15000, "15 more rows");
+    await sleep(1500);
+    const mineA = (r) => r.url.startsWith(`http://127.0.0.1:${A.port}/`);
+    // an expanded routine fetches its own run list (by design); collapse the one earlier steps expanded
+    for (const el of await page.$$("#routines-panel .rt-row:has(.rt-runs)")) await (await el.$('[data-act="runs"]')).click();
+    await sleep(300);
+    await page.evaluate(() => { document.querySelector("#routines-panel .rt-row").__kept = true; });
+    const from = requests.length;
+    await A.put("/api/automation", {});                  // changes nothing, but broadcasts "runs-updated": the panel refreshes
+    await waitFor(() => requests.slice(from).some((r) => mineA(r) && /\/api\/routines\?/.test(r.url)), 8000, "a refresh");
+    await sleep(1200);
+    const win = requests.slice(from).filter((r) => mineA(r) && /\/api\/(routines|automation|agents|runs)/.test(r.url));
+    const lists = win.filter((r) => /\/api\/routines\?/.test(r.url)).length;
+    ok(lists >= 1 && win.length <= 3 * lists && !win.some((r) => /\/api\/routines\/[^/?]+\/runs/.test(r.url)),
+      "with 16 routines a refresh makes 3 requests and none per routine (" + win.length + " requests for " + lists + " refresh(es): " + win.map((r) => r.url.replace(/^.*\/api/, "").replace(/\?token=T&?/, "?")).join(" ") + ")");
+    ok(await page.evaluate(() => !!document.querySelector("#routines-panel .rt-row").__kept), "an unchanged list is not rebuilt (row element survived the refresh)");
+    for (const b of bulk) await A.del("/api/routines/" + b.id);
+    await waitFor(async () => (await rowNames(page)).filter((n) => /^bulk/.test(n)).length === 0, 15000, "bulk rows gone");
+
+    // 9c. The next run time is shown in the routine's own timezone, with the zone's abbreviation
+    await A.post("/api/routines", { name: "tzcheck", cron: "preset:daily", timezone: "America/New_York", prompt: "x", target: { kind: "agent", agentId: agentA.id } });
+    await page.waitForSelector(row("tzcheck"));
+    const tzNext = (await page.textContent(`${row("tzcheck")} .rt-next`)).trim();
+    ok(/\b(EST|EDT)\b/.test(tzNext), "next run is labelled with the routine's timezone: " + tzNext);
+
+    // 9d. Editing a "skip all permissions" routine does not inherit the acknowledgement
+    const byp = await A.post("/api/routines", { name: "bypassy", cron: "preset:daily", prompt: "x", target: { kind: "agent", agentId: agentA.id }, permission: { mode: "bypassPermissions", allowedTools: [] }, allowBypass: true });
+    ok(byp.allowBypass === true, "a bypass routine with the acknowledgement was stored");
+    await page.waitForSelector(row("bypassy"));
+    await page.click(`${row("bypassy")} [data-act="edit"]`);
+    await page.waitForSelector(".rt-dialog .rt-bypass");
+    ok(!(await page.isChecked(".rt-dialog .rt-bypass")) && await page.isDisabled(".rt-dialog .rt-save"), "edit dialog starts with the acknowledgement unticked and Save disabled");
+    await page.check(".rt-dialog .rt-bypass");
+    ok(await page.isEnabled(".rt-dialog .rt-save"), "ticking it again enables Save");
+    await page.keyboard.press("Escape");
+    await page.waitForFunction(() => !document.querySelector(".rt-dialog"));
+    await A.del("/api/routines/" + byp.id);
+    const tzr = (await A.get("/api/routines")).find((r) => r.name === "tzcheck");
+    if (tzr) await A.del("/api/routines/" + tzr.id);
+
     // 10. Slow run: log shows the first line while running; Cancel -> cancelled; polling stops on close and on hide
     const pageB = await newPage(B);
     const slow = await B.post("/api/routines", { name: "slow", cron: "preset:daily", prompt: "go slowly", target: { kind: "agent", agentId: agentB.id } });
@@ -225,6 +271,7 @@ async function boot(mode, extraEnv) {
     await pageB.waitForFunction(() => /SLOW-FIRST-LINE/.test(document.querySelector(".rt-runview .rt-log")?.textContent || ""), null, { timeout: 30000 });
     const statusNow = (await pageB.textContent(".rt-runview .rt-rv-status")).trim();
     ok(/running|queued/.test(statusNow), "the log shows the first line while the run is still " + statusNow);
+    ok(await pageB.isDisabled(".rt-runview .rt-rv-open"), "Open interactively is disabled while the run is active");
     await pageB.screenshot({ path: shot("routines-slow.png") });
     const mine = (r) => r.url.startsWith(`http://127.0.0.1:${B.port}/`); // the first page keeps polling its own server
     const logReqs = () => requests.filter((r) => mine(r) && /\/api\/runs\/[^/]+\/log/.test(r.url)).length;
@@ -233,6 +280,8 @@ async function boot(mode, extraEnv) {
     await pageB.click(".rt-runview .rt-rv-cancel");
     await pageB.waitForFunction(() => /cancelled/.test(document.querySelector(".rt-runview .rt-rv-status")?.textContent || ""), null, { timeout: 20000 });
     ok((await runsOf(B, slow.id))[0].status === "cancelled", "Cancel ends the slow run as cancelled");
+    await pageB.waitForFunction(() => { const b = document.querySelector(".rt-runview .rt-rv-open"); return b && !b.disabled; }, null, { timeout: 8000 }).catch(() => {});
+    ok(await pageB.isEnabled(".rt-runview .rt-rv-open"), "Open interactively is available again once the run finished");
     ok(await pageB.isHidden(".rt-runview .rt-rv-cancel") || await pageB.isDisabled(".rt-runview .rt-rv-cancel"), "Cancel is gone once the run is finished");
     const l1 = logReqs(); await sleep(3500);
     ok(logReqs() === l1, "no more log requests once the run finished");
@@ -257,6 +306,21 @@ async function boot(mode, extraEnv) {
     // cleanup: cancel the running run via the API so the fake claude does not outlive the test
     for (const r of await runsOf(B, slow.id)) if (r.status === "running" || r.status === "queued") await B.post(`/api/runs/${r.id}/cancel`);
 
+    // 11. An instance that does not own the schedules says so, and offers no Run now
+    const agentC = await C.post("/api/agents", { name: "idle", cwd: work });
+    await C.post("/api/routines", { name: "unowned", cron: "preset:daily", prompt: "x", target: { kind: "agent", agentId: agentC.id } });
+    const owner = await C.get("/api/automation");
+    ok(owner.owner === false && owner.ownerPort === 4242, "the second instance reports owner:false and the owner's port: " + JSON.stringify(owner));
+    const pageC = await newPage(C);
+    await pageC.click("#ab-routines");
+    await pageC.waitForSelector(row("unowned"));
+    await pageC.waitForSelector("#routines-panel .rt-owner-banner:not([hidden])");
+    const banner = (await pageC.textContent("#routines-panel .rt-owner-banner")).trim();
+    ok(/4242/.test(banner) && /another agenv instance/i.test(banner), "non-owner banner names the owner's port: " + banner);
+    ok(await pageC.isDisabled(`${row("unowned")} [data-act="run"]`), "Run now is disabled in a non-owner instance");
+    await pageC.screenshot({ path: shot("routines-not-owner.png") });
+    ok(await page.isHidden("#routines-panel .rt-owner-banner"), "the owner shows no such banner");
+
     ok(errors.length === 0, "no page errors / window dialogs" + (errors.length ? ": " + errors.join(" | ") : ""));
   } catch (e) {
     console.log("FAIL exception:", e.message.split("\n").slice(0, 3).join(" | "), "@", (e.stack.match(/routines\.e2e\.js:\d+/) || [""])[0]);
@@ -265,8 +329,8 @@ async function boot(mode, extraEnv) {
     if (errors.length) console.log("page errors: " + errors.join(" | "));
   } finally {
     await browser.close();
-    for (const s of [A, B]) { try { s.proc.kill(); } catch {} }
+    for (const s of [A, B, C]) { try { s.proc.kill(); } catch {} }
     await sleep(500);
-    for (const d of [work, ...A.dirs, ...B.dirs]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch {} }
+    for (const d of [work, ...A.dirs, ...B.dirs, ...C.dirs]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch {} }
   }
 })();

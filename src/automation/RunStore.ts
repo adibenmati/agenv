@@ -199,6 +199,13 @@ export class RunStore {
     return out;
   }
 
+  /** Queued + running runs per routine (routines with none are absent), from one pass over the cached history. */
+  activeCounts(): Map<string, number> {
+    const out = new Map<string, number>();
+    for (const r of this.all()) if (isActive(r)) out.set(r.routineId, (out.get(r.routineId) ?? 0) + 1);
+    return out;
+  }
+
   /** How many of the routine's runs are queued or running. */
   activeCount(routineId: string): number {
     let n = 0;

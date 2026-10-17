@@ -532,8 +532,21 @@ describe("routine list with lastRun, and the per-routine queue cap", () => {
     assert.equal(by.B.lastRun.costUsd, 0.1);
     assert.equal(typeof by.B.lastRun.startedAt, "number");
     assert.equal(by.C.lastRun, null);
+    assert.deepEqual([by.A.activeRuns, by.B.activeRuns, by.C.activeRuns], [0, 0, 0]);
     assert.equal(by.A.id, a.id, "the routine itself is unchanged");
     assert.equal(c.id, by.C.id);
+  });
+
+  it("activeRuns counts queued+running even when the newest run is a finished 'coalesced' row", async () => {
+    const r = rig();
+    const rt = r.service.createRoutine(baseInput());
+    r.service.runNow(rt.id); await flush();
+    const co = r.service.runNow(rt.id);                          // coalesced into the running one
+    assert.equal(co.status, "coalesced");
+    const item = r.service.listRoutinesWithLastRun()[0];
+    assert.equal(item.lastRun.status, "coalesced");
+    assert.equal(item.activeRuns, 1);
+    r.agents.finish(0); await flush();
   });
 
   it("always_enqueue caps queued+running runs per routine at 25; extra firings are recorded skipped 'queue full (25)'", async () => {

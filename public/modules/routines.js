@@ -20,10 +20,11 @@ let polling = false;
 let idleTicks = 0;
 let routines = [];
 let agents = [];
-let settings = { paused: false, maxDailyCostUsd: null };
+let settings = { paused: false, maxDailyCostUsd: null, owner: true, ownerPort: null };
+let listHtml = null;             // the markup last put into the list; an unchanged render leaves the DOM alone
 let loaded = false;
 let refreshing = false, refreshAgain = false;
-const runsByRoutine = new Map(); // routine id -> runs, newest first
+const runsByRoutine = new Map(); // routine id -> runs, newest first; loaded only for expanded routines
 const expanded = new Set();      // routine ids whose runs are shown
 const pending = new Set();       // in-flight actions, keyed "run:<id>" / "toggle:<id>" / "open:<run id>" ...
 let view = null;                 // the open run view: { id, ov, timer, busy, run, close }
@@ -55,7 +56,12 @@ function fmtDur(ms) {
 }
 
 const whenAgo = (ts) => { const a = ago(ts); return a === "now" ? "just now" : a + " ago"; };
-const fmtDate = (ts) => new Date(ts).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+const DATE_FMT = { weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" };
+const fmtDate = (ts) => new Date(ts).toLocaleString([], DATE_FMT);
+/** A time in the routine's own timezone with the zone's short name (EST, GMT+9, ...), so it matches the schedule shown beside it. */
+function fmtDateIn(ts, tz) {
+  try { return new Date(ts).toLocaleString([], { ...DATE_FMT, timeZone: tz, timeZoneName: "short" }); } catch { return fmtDate(ts); }
+}
 function inTime(ts) {
   const d = (ts - Date.now()) / 1000;
   if (d < 90) return "in under a minute";
@@ -131,7 +137,11 @@ export function handleEvent(name) {
   eventTimer = setTimeout(() => { eventTimer = null; if (polling) refresh(); }, 250);
 }
 
-const anyActive = () => { for (const runs of runsByRoutine.values()) if (runs.some(isActive)) return true; return false; };
+const anyActive = () => {
+  if (routines.some((r) => r.activeRuns > 0 || isActive(r.lastRun))) return true;
+  for (const runs of runsByRoutine.values()) if (runs.some(isActive)) return true;
+  return !!view && isActive(view.run);
+};
 
 async function getJson(path) {
   const resp = await fetch(api(path));
@@ -139,18 +149,24 @@ async function getJson(path) {
   return resp.json();
 }
 
-/** Reloads routines, settings and each routine's recent runs. Overlapping calls are folded into one follow-up. */
+const loadRuns = (id) => getJson("/api/routines/" + encodeURIComponent(id) + "/runs?limit=" + RUNS_LIMIT);
+
+/**
+ * Reloads routines (each carries its newest run), settings and agents: three requests however many routines there are.
+ * A routine's run list is fetched only while it is expanded. Overlapping calls are folded into one follow-up.
+ */
 export async function refresh() {
   if (!panelEl) return;
   if (refreshing) { refreshAgain = true; return; }
   refreshing = true;
   try {
     const [rs, st, ags] = await Promise.all([getJson("/api/routines"), getJson("/api/automation"), getJson("/api/agents").catch(() => null)]);
-    const runs = await Promise.all(rs.map((r) => getJson("/api/routines/" + encodeURIComponent(r.id) + "/runs?limit=" + RUNS_LIMIT).catch(() => runsByRoutine.get(r.id) || [])));
+    for (const id of [...expanded]) if (!rs.some((r) => r.id === id)) expanded.delete(id);
+    const open = [...expanded];
+    const runs = await Promise.all(open.map((id) => loadRuns(id).catch(() => runsByRoutine.get(id) || [])));
     routines = rs; settings = st; if (ags) agents = ags;
     runsByRoutine.clear();
-    rs.forEach((r, i) => runsByRoutine.set(r.id, runs[i]));
-    for (const id of [...expanded]) if (!runsByRoutine.has(id)) expanded.delete(id);
+    open.forEach((id, i) => runsByRoutine.set(id, runs[i]));
     loaded = true;
     renderStrip(); renderList();
   } catch {}
@@ -172,6 +188,7 @@ function renderShell() {
       <label class="rt-cap-row">Daily cost cap $<input class="rt-cap" type="number" min="0" step="0.01" placeholder="none" title="Total cost per day across all routines; empty = no cap" /></label>
     </div>
     <div class="rt-banner" hidden>Automation is paused. Nothing will run, including Run now.</div>
+    <div class="rt-banner rt-owner-banner" hidden></div>
     <div class="rt-list" id="rt-list"></div>`;
 }
 
@@ -180,6 +197,14 @@ function renderStrip() {
   if (!pause) return;
   pause.checked = !!settings.paused;
   banner.hidden = !settings.paused;
+  const ob = panelEl.querySelector(".rt-owner-banner");
+  if (ob) {
+    const foreign = settings.owner === false;
+    ob.hidden = !foreign;
+    ob.textContent = foreign
+      ? "Another agenv instance" + (settings.ownerPort ? " (port " + settings.ownerPort + ")" : "") + " runs the schedules. You can edit routines here, but nothing runs from this instance: no schedule, catch-up or Run now."
+      : "";
+  }
   if (document.activeElement !== cap) cap.value = settings.maxDailyCostUsd == null ? "" : String(settings.maxDailyCostUsd);
 }
 
@@ -187,11 +212,18 @@ function renderList() {
   const list = panelEl.querySelector("#rt-list");
   if (!list) return;
   if (!routines.length) {
-    list.innerHTML = `<div class="rt-empty"><div class="rt-empty-text">${loaded ? "No routines yet" : "Loading..."}</div>
-      <div class="rt-empty-hint">A routine runs a prompt on a schedule, unattended, against one of your agents or a folder. Create agents in the Agents panel first.</div></div>`;
+    setListHtml(list, `<div class="rt-empty"><div class="rt-empty-text">${loaded ? "No routines yet" : "Loading..."}</div>
+      <div class="rt-empty-hint">A routine runs a prompt on a schedule, unattended, against one of your agents or a folder. Create agents in the Agents panel first.</div></div>`);
     return;
   }
-  list.innerHTML = routines.map(renderRow).join("");
+  setListHtml(list, routines.map(renderRow).join(""));
+}
+
+/** Rebuilding the list loses hover, focus and scroll state; the 2 s polling must not do it when nothing changed. */
+function setListHtml(list, html) {
+  if (html === listHtml && list.firstChild) return;
+  listHtml = html;
+  list.innerHTML = html;
 }
 
 function targetText(r) {
@@ -206,12 +238,13 @@ function badge(status, extra) {
 
 function renderRow(r) {
   const runs = runsByRoutine.get(r.id) || [];
-  const last = runs[0];
+  const last = r.lastRun;
   const open = expanded.has(r.id);
-  const blocked = settings.paused || pending.has("run:" + r.id);
+  const foreign = settings.owner === false;
+  const blocked = settings.paused || foreign || pending.has("run:" + r.id);
   let next;
   if (!r.enabled) next = "Disabled";
-  else if (r.nextRunAt) next = "Next " + fmtDate(r.nextRunAt) + " (" + inTime(r.nextRunAt) + ")";
+  else if (r.nextRunAt) next = "Next " + fmtDateIn(r.nextRunAt, r.timezone) + " (" + inTime(r.nextRunAt) + ")";
   else next = "Not scheduled";
   let h = `<div class="rt-row${r.enabled ? "" : " off"}" data-id="${esc(r.id)}" data-name="${esc(r.name)}">`;
   h += `<div class="rt-line1"><label class="rt-switch" title="${r.enabled ? "Enabled: click to disable" : "Disabled: click to enable"}"><input type="checkbox" class="rt-toggle"${r.enabled ? " checked" : ""}${pending.has("toggle:" + r.id) ? " disabled" : ""} /></label>`;
@@ -220,10 +253,10 @@ function renderRow(r) {
   h += `<div class="rt-target" title="${esc(r.target.kind === "folder" ? r.target.cwd : r.target.agentId)}">${esc(targetText(r))}</div>`;
   h += `<div class="rt-next">${esc(next)}</div>`;
   h += `<div class="rt-last">`;
-  h += last ? `${badge(last.status)} <span class="rt-last-cost">${esc(fmtUsd(last.costUsd))}</span> <span class="rt-last-ago">${esc(whenAgo(last.queuedAt || last.startedAt))}</span>` : `<span class="rt-never">never run</span>`;
+  h += last ? `${badge(last.status)} <span class="rt-last-cost">${esc(fmtUsd(last.costUsd))}</span> <span class="rt-last-ago">${esc(last.startedAt || last.finishedAt ? whenAgo(last.startedAt || last.finishedAt) : "")}</span>` : `<span class="rt-never">never run</span>`;
   h += `</div>`;
   h += `<div class="rt-actions">`;
-  h += `<button class="rt-btn run" data-act="run" title="${settings.paused ? "Automation is paused" : "Run now"}"${blocked ? " disabled" : ""}>Run now</button>`;
+  h += `<button class="rt-btn run" data-act="run" title="${settings.paused ? "Automation is paused" : foreign ? "Another agenv instance runs the schedules" : "Run now"}"${blocked ? " disabled" : ""}>Run now</button>`;
   h += `<button class="rt-btn" data-act="runs" title="Show recent runs">Runs ${open ? "&#9652;" : "&#9662;"}</button>`;
   h += `<button class="rt-btn" data-act="edit" title="Edit">Edit</button>`;
   h += `<button class="rt-btn danger" data-act="delete" title="Delete">Delete</button>`;
@@ -261,7 +294,11 @@ function handleClick(e) {
   if (!btn || btn.disabled) return;
   const act = btn.dataset.act;
   if (act === "run") runNow(r);
-  else if (act === "runs") { if (expanded.has(r.id)) expanded.delete(r.id); else expanded.add(r.id); renderList(); }
+  else if (act === "runs") {
+    if (expanded.has(r.id)) { expanded.delete(r.id); runsByRoutine.delete(r.id); renderList(); return; }
+    expanded.add(r.id); renderList();
+    loadRuns(r.id).then((runs) => { if (expanded.has(r.id)) { runsByRoutine.set(r.id, runs); renderList(); } }).catch(() => {});
+  }
   else if (act === "edit") openRoutineDialog(r);
   else if (act === "delete") openDeleteDialog(r);
 }
@@ -291,7 +328,7 @@ async function runNow(r) {
   await guarded("run:" + r.id, async () => {
     try {
       await request("/api/routines/" + encodeURIComponent(r.id) + "/run", json("POST"));
-      expanded.add(r.id);
+      expanded.add(r.id);                              // refresh() below loads the run list of an expanded routine
     } catch (e) { toast("Could not run " + r.name + ": " + e.message, "error"); }
     await refresh();
   }, RUN_COOLDOWN_MS);
@@ -427,7 +464,7 @@ export async function openRoutineDialog(routine) {
     <label class="rt-label">Conversation<select class="ask-input rt-conv"></select></label>
     <label class="rt-label">Permissions<select class="ask-input rt-perm"></select></label>
     <div class="rt-hint rt-perm-hint"></div>
-    <div data-sec="tools"><label class="rt-label">Allowed tools (one per line or comma separated)<textarea class="ask-input rt-tools" rows="3" spellcheck="false" placeholder="Read&#10;Grep&#10;Bash(git status)"></textarea></label></div>
+    <div data-sec="tools"><label class="rt-label">Allowed tools (one pattern per line)<textarea class="ask-input rt-tools" rows="3" spellcheck="false" placeholder="Read&#10;Grep&#10;Bash(git status)"></textarea></label></div>
     <div class="rt-bypass-warn" data-sec="bypass">
       <b>Warning.</b> With all permissions skipped the agent can run any command, with nobody watching. It can read, change or delete anything this user account can reach. Only use this for a folder and a prompt you fully trust.
       <label class="rt-check"><input type="checkbox" class="rt-bypass" /> I understand this agent can run any command unattended</label>
@@ -491,7 +528,7 @@ export async function openRoutineDialog(routine) {
     const budget = numOrNull(".rt-budget", "Budget", false), timeout = numOrNull(".rt-timeout", "Timeout", true), maxRuns = numOrNull(".rt-maxruns", "Max runs per day", true);
     const bad = budget.error || timeout.error || maxRuns.error;
     if (bad) { showErr(bad); return; }
-    const tools = q(".rt-tools").value.split(/[\n,]/).map((t) => t.trim()).filter(Boolean);
+    const tools = q(".rt-tools").value.split("\n").map((t) => t.trim()).filter(Boolean);
     const body = {
       name: q(".rt-name").value.trim(),
       cron: preset === "custom" ? curCron() : "preset:" + preset,
@@ -542,7 +579,7 @@ export async function openRoutineDialog(routine) {
     q(".rt-conv").value = routine.conversation;
     q(".rt-perm").value = routine.permission.mode;
     q(".rt-tools").value = (routine.permission.allowedTools || []).join("\n");
-    q(".rt-bypass").checked = !!routine.allowBypass;
+    // The acknowledgement is never inherited: editing a "skip all permissions" routine means ticking it again.
     q(".rt-budget").value = String(routine.maxBudgetUsd); q(".rt-timeout").value = String(routine.timeoutMin);
     q(".rt-maxruns").value = routine.maxRunsPerDay == null ? "" : String(routine.maxRunsPerDay);
     q(".rt-model").value = routine.model || "";
@@ -594,10 +631,20 @@ async function pollRun() {
   } finally { v.busy = false; }
 }
 
+/** Opening a terminal while the run is active would make a second writer on its conversation; the poll re-enables it once it finished. */
+function syncOpenBtn(v) {
+  const btn = v.ov.querySelector(".rt-rv-open");
+  if (!btn) return;
+  const active = !v.run || isActive(v.run);
+  btn.disabled = active || !!v.opening;
+  btn.title = active ? "Available once the run has finished" : "Open this run's conversation in a terminal tab";
+}
+
 function paintGone(v) {
   const q = (s) => v.ov.querySelector(s);
   q(".rt-rv-meta").textContent = "This run no longer exists (its routine may have been deleted).";
   q(".rt-rv-cancel").hidden = true;
+  q(".rt-rv-open").disabled = true;
 }
 
 function paintRun(v, log) {
@@ -618,6 +665,7 @@ function paintRun(v, log) {
   if (run.summary) meta += `<div class="rt-rv-summary">${esc(run.summary)}</div>`;
   q(".rt-rv-meta").innerHTML = meta;
   q(".rt-rv-cancel").hidden = !isActive(run);
+  syncOpenBtn(v);
   if (log != null) {
     const pre = q(".rt-log");
     const stick = !v.painted || pre.scrollHeight - pre.scrollTop - pre.clientHeight < 24;
@@ -636,7 +684,7 @@ export function openRunView(runId, routineName) {
     <pre class="rt-log">Loading…</pre>
     <div class="ask-actions">
       <button class="ask-btn rt-rv-cancel" hidden>Cancel run</button>
-      <button class="ask-btn rt-rv-open" title="Open this run's conversation in a terminal tab">Open interactively</button>
+      <button class="ask-btn rt-rv-open" title="Available once the run has finished" disabled>Open interactively</button>
       <button class="ask-btn primary rt-rv-close" data-r="close">Close</button>
     </div>`, "rt-runview", () => { stopViewTimer(); if (view && view.ov === ov) view = null; });
   const v = { id: runId, ov, timer: null, busy: false, run: null, painted: false, close };
@@ -665,12 +713,14 @@ async function cancelRun(v) {
 async function openInteractively(v) {
   const btn = v.ov.querySelector(".rt-rv-open");
   await guarded("open:" + v.id, async () => {
-    btn.disabled = true;
+    if (btn.disabled) return;
+    v.opening = true; syncOpenBtn(v);
     try {
       const session = await request("/api/runs/" + encodeURIComponent(v.id) + "/open", json("POST"));
       if (_onOpenSession) await _onOpenSession(session);
       if (view === v) v.close();
-    } catch (e) { toast("Could not open the run: " + e.message, "error"); btn.disabled = false; }
+    } catch (e) { toast("Could not open the run: " + e.message, "error"); }
+    v.opening = false; if (view === v) syncOpenBtn(v);
   });
 }
 

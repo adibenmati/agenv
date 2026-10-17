@@ -56,11 +56,15 @@ export class AutomationService {
   listRoutines(): Routine[] { return this.o.routines.list(); }
 
   /** The routines, each with its newest run (any status) so the panel needs no per-routine /runs call. One pass over the history. */
-  listRoutinesWithLastRun(): Array<Routine & { lastRun: LastRun | null }> {
-    const latest = this.o.runs.latestByRoutine();
+  listRoutinesWithLastRun(): Array<Routine & { lastRun: LastRun | null; activeRuns: number }> {
+    const latest = this.o.runs.latestByRoutine(), active = this.o.runs.activeCounts();
     return this.o.routines.list().map((r) => {
       const l = latest.get(r.id);
-      return { ...r, lastRun: l ? { id: l.id, status: l.status, startedAt: l.startedAt, finishedAt: l.finishedAt, costUsd: l.costUsd, reason: l.reason } : null };
+      return {
+        ...r,
+        lastRun: l ? { id: l.id, status: l.status, startedAt: l.startedAt, finishedAt: l.finishedAt, costUsd: l.costUsd, reason: l.reason } : null,
+        activeRuns: active.get(r.id) ?? 0,    // the newest run can be a finished "coalesced" row while an older one still runs
+      };
     });
   }
 
