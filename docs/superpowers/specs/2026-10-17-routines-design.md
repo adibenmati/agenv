@@ -1,6 +1,6 @@
 # agenv: scheduled routines — design
 
-Date: 2026-10-17 · Status: **amended 2026-10-17 (routines now target agents) — needs re-approval** · Target release: 1.7.0 · Builds on the TypeScript backend (1.5.0, merged, unreleased) and on **agents** (`2026-10-17-agents-design.md`, 1.6.0)
+Date: 2026-10-17 · Status: **implemented in the 1.7.0 branch (`feat/routines-impl`); not yet merged or published** · Target release: 1.7.0 · Builds on the TypeScript backend (1.5.0, merged, unreleased) and on **agents** (`2026-10-17-agents-design.md`, 1.6.0)
 
 ## 1. Goal and intent
 
@@ -63,8 +63,7 @@ cron.ts               parse + next-fire calculation in an IANA zone (the tested 
 Routine.ts            types + validation (cron, timezone, limits, enums)
 RoutineStore.ts       CRUD over JsonStore<Routine[]>
 RunStore.ts           run history (JsonStore) + log files
-RunExecutor.ts        interface (Strategy): execute(run, routine, hooks) → { status, costUsd, ... }
-HeadlessClaudeExecutor.ts   resolves the routine's agent (or folder) and delegates to the agents' shared `ClaudeRunner`
+RunExecutor.ts        interface (Strategy): execute(run, routine, hooks) → { status, costUsd, ... }; AgentRunExecutor resolves the routine's agent (or folder) and delegates to `AgentService`, which uses the agents' shared `ClaudeRunner`
                       (`src/agents/ClaudeRunner.ts`: arguments, spawn, stream-json log, tree-kill, timeout, budget) — no second copy
 RunQueue.ts           FIFO with a global parallel limit (default 2) and per-routine "active" lookup
 RoutineScheduler.ts   30 s tick; claims due routines; applies concurrency/catch-up policies and the guards
@@ -92,15 +91,18 @@ HTTP (`src/http/routes/routines.ts`, authenticated; writes added to the tunnel r
 4. **Execute.** The queue starts it when a slot is free:
    `claude -p --output-format stream-json --verbose --resume <conversationId> --permission-mode <mode> [--allowedTools …]
    [--model …] [--append-system-prompt …] [--append-system-prompt-file …] [--add-dir …] [--mcp-config …]
-   --max-budget-usd <n>`, prompt on stdin, `cwd` = the **agent's folder** (agents spec §5). With `conversation: "fork"` the
+   --max-budget-usd <n> -- <prompt>`, the prompt is passed as an argument after `--` (not on stdin), `cwd` = the **agent's folder** (agents spec §5). With `conversation: "fork"` the
    resume adds `--fork-session`; with `"fresh"` there is no `--resume`.
+   The executor does not spawn anything itself: it delegates to `AgentService` (`run` / `runInFolder`), which uses the shared `ClaudeRunner`.
    stdout lines go to the run's log and a few fields (turns, partial text) update the Run live.
 5. **Finish.** The final `result` event gives cost, turns, conversation id and text. The Run becomes
    `succeeded`/`failed`; a timeout kills the whole process tree (`taskkill /T /F` on Windows) → `timed_out`;
    cancel does the same → `cancelled`. If the agent had no conversation yet, the new one is saved on the agent. (Verified result
    fields: `result`, `session_id`, `total_cost_usd`, `num_turns`, `duration_ms`, `is_error`.)
-6. **Missed runs.** At startup, a routine whose `nextRunAt` is in the past follows its `catchUp` policy: `skip_missed`
-   fires once and jumps ahead; `enqueue_missed_with_cap` replays up to 25 (never for sub-hourly schedules).
+6. **Missed runs.** At startup, a routine whose `nextRunAt` is in the past follows its `catchUp` policy: `skip_missed`:
+   slots older than the grace window (max(2 min, 4 x tick interval)) are not run; the schedule jumps to the next future slot; a visible skipped
+   row records how many were missed. A slot within the grace fires normally (so a quick restart still fires it, once). `enqueue_missed_with_cap`
+   replays up to 25 of the missed slots (never for sub-hourly schedules).
 7. **Open interactively.** The agent's "Open terminal": an ordinary agenv session running `claude --resume <conversationId>`
    in the agent's folder — from there it is a normal terminal (the Claude linking picks it up). For `"fork"` runs it opens the run's fork.
 
