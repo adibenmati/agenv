@@ -15,6 +15,7 @@ const { AgentRunExecutor } = require("../../dist/automation/RunExecutor");
 const { nextCronTime } = require("../../dist/automation/cron");
 const { RoutineScheduler, createRunQueue, makePreflight } = require("../../dist/automation/RoutineScheduler");
 const { AutomationService } = require("../../dist/automation/AutomationService");
+const { AutomationOwnership } = require("../../dist/automation/AutomationOwnership");
 const { ChangeBatcher } = require("../../dist/automation/ChangeBatcher");
 
 const tmpDirs = [];
@@ -579,7 +580,7 @@ describe("routine list with lastRun, and the per-routine queue cap", () => {
 
 describe("instance ownership of the schedules", () => {
   const fakeOwnership = (owner, port = 4321) => {
-    const o = { acquires: 0, releases: 0, acquire() { o.acquires++; return owner; }, release() { o.releases++; }, isOwner: () => owner, ownerPort: () => port };
+    const o = { acquires: 0, releases: 0, acquire() { o.acquires++; return owner; }, tryAcquire() { return owner; }, heartbeat() { return owner; }, release() { o.releases++; }, isOwner: () => owner, ownerPort: () => port };
     return o;
   };
   const owned = /automation is owned by another agenv instance \(port 4321\)/;
@@ -638,6 +639,121 @@ describe("instance ownership of the schedules", () => {
     assert.equal(r.service.startScheduling(), true);
     assert.deepEqual(calls, ["startup", "start"]);
     assert.deepEqual(r.service.ownerInfo(), { owner: true, ownerPort: null });
+  });
+});
+
+describe("ownership heartbeat, demotion and takeover", () => {
+  /** Injected interval timers the test fires by hand. */
+  function fakeTimers() {
+    const t = { intervals: [], cleared: [], oneShots: [],
+      every(fn, ms) { const h = { fn, ms, active: true }; t.intervals.push(h); return h; },
+      set(fn, ms) { const h = { fn, ms, active: true }; t.oneShots.push(h); return h; },
+      clear(h) { if (h) h.active = false; t.cleared.push(h); },
+      fire() { for (const h of t.intervals.filter((x) => x.active)) h.fn(); },
+      activeIntervals: () => t.intervals.filter((x) => x.active).length };
+    return t;
+  }
+  /** Two instances (each with its own rig and stores) on one lock file and one fake ownership clock. */
+  function twoInstances() {
+    const lock = path.join(tmp(), ".agenv-automation.lock");
+    const oc = { t: 5_000_000 };
+    const alive = new Set([111, 222]);
+    const mk = (pid, port) => {
+      const timers = fakeTimers();
+      const ownership = new AutomationOwnership({ path: lock, pid, port, now: () => oc.t, isAlive: (p) => alive.has(p) });
+      const r = rig({ ownership, timers });
+      const calls = [];
+      const start = r.scheduler.start.bind(r.scheduler), stop = r.scheduler.stop.bind(r.scheduler), startup = r.scheduler.startup.bind(r.scheduler);
+      r.scheduler.startup = () => { calls.push("startup"); startup(); };
+      r.scheduler.start = () => { calls.push("start"); start(); };
+      r.scheduler.stop = () => { calls.push("stop"); stop(); };
+      return Object.assign(r, { ownership, fake: timers, calls });
+    };
+    return { lock, oc, alive, A: mk(111, 3000), B: mk(222, 3001) };
+  }
+  const owned = /automation is owned by another agenv instance/;
+
+  it("the owner heartbeats on every timer tick", async () => {
+    const { lock, oc, A } = twoInstances();
+    assert.equal(A.service.startScheduling(), true);
+    assert.equal(A.fake.activeIntervals(), 1);
+    assert.equal(A.fake.intervals[0].ms, 30_000);
+    const first = JSON.parse(fs.readFileSync(lock, "utf8"));
+    oc.t += 30_000;
+    A.fake.fire();
+    assert.equal(JSON.parse(fs.readFileSync(lock, "utf8")).heartbeatAt, first.heartbeatAt + 30_000);
+    await A.service.dispose();
+  });
+
+  it("an owner whose lock was taken over demotes itself: scheduler stopped, run operations answer 409, no routine fires", async () => {
+    const { lock, A } = twoInstances();
+    A.service.startScheduling();
+    const rt = A.service.createRoutine(baseInput());
+    const run = A.runs.create(rt.id, "manual", "running");
+    assert.ok(A.scheduler.timer, "ticking while owner");
+    fs.writeFileSync(lock, JSON.stringify({ pid: 222, port: 3001, startedAt: 1, heartbeatAt: 5_000_000 }));    // someone else took over
+    const stops = A.calls.filter((c) => c === "stop").length;
+    A.fake.fire();
+    assert.equal(A.calls.filter((c) => c === "stop").length, stops + 1, "the scheduler was stopped");
+    assert.equal(A.scheduler.timer, null, "the tick no longer runs");
+    assert.deepEqual(A.service.ownerInfo(), { owner: false, ownerPort: 3001 });
+    assert.throws(() => A.service.runNow(rt.id), (e) => e.status === 409 && owned.test(e.message));
+    await assert.rejects(() => A.service.cancelRun(run.id), (e) => e.status === 409);
+    assert.equal(A.runs.get(run.id).status, "running", "a run already in progress is not cancelled");
+    assert.equal(A.fake.activeIntervals(), 1, "the demoted instance keeps polling for a takeover");
+    assert.equal(JSON.parse(fs.readFileSync(lock, "utf8")).pid, 222, "the new owner's lock is untouched");
+    A.runs.update(run.id, { status: "failed", finishedAt: 1 });
+    await A.service.dispose();
+    assert.equal(JSON.parse(fs.readFileSync(lock, "utf8")).pid, 222, "dispose of a non-owner leaves the lock");
+  });
+
+  it("a non-owner takes over after the owner stops heartbeating, then runs startup and start exactly once", async () => {
+    const { lock, oc, A, B } = twoInstances();
+    A.service.startScheduling();
+    assert.equal(B.service.startScheduling(), false);
+    assert.deepEqual(B.calls, []);
+    assert.equal(B.fake.activeIntervals(), 1, "a non-owner polls too");
+    oc.t += 30_000; A.fake.fire(); B.fake.fire();
+    oc.t += 30_000; A.fake.fire(); B.fake.fire();
+    assert.deepEqual(B.calls, [], "a live owner keeps the schedules");
+    assert.equal(B.service.ownerInfo().owner, false);
+    // A is killed (Electron serverProcess.kill()): no more heartbeats, the lock stays with a pid that is still "alive" (reused)
+    oc.t += 91_000;
+    B.fake.fire();
+    assert.deepEqual(B.calls, ["startup", "start"]);
+    assert.deepEqual(B.service.ownerInfo(), { owner: true, ownerPort: 3001 });
+    assert.equal(JSON.parse(fs.readFileSync(lock, "utf8")).pid, 222);
+    oc.t += 30_000; B.fake.fire();
+    assert.deepEqual(B.calls, ["startup", "start"], "later ticks only heartbeat");
+    assert.equal(JSON.parse(fs.readFileSync(lock, "utf8")).heartbeatAt, oc.t);
+    await B.service.dispose();
+    await A.service.dispose();
+    assert.equal(fs.existsSync(lock), false, "the new owner released it");
+  });
+
+  it("dispose clears the interval timer and a disposed service never polls again", async () => {
+    const { A, B } = twoInstances();
+    A.service.startScheduling(); B.service.startScheduling();
+    await A.service.dispose(); await B.service.dispose();
+    assert.equal(A.fake.activeIntervals(), 0);
+    assert.equal(B.fake.activeIntervals(), 0);
+    assert.ok(A.fake.cleared.includes(A.fake.intervals[0]));
+  });
+
+  it("starting twice does not stack timers", async () => {
+    const { A } = twoInstances();
+    A.service.startScheduling(); A.service.startScheduling();
+    assert.equal(A.fake.intervals.length, 1);
+    await A.service.dispose();
+  });
+
+  it("without an ownership object there is no timer at all", async () => {
+    const timers = fakeTimers();
+    const r = rig({ timers });
+    r.scheduler.startup = () => {}; r.scheduler.start = () => {};
+    r.service.startScheduling();
+    assert.equal(timers.intervals.length, 0);
+    await r.service.dispose();
   });
 });
 

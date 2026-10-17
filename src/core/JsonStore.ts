@@ -1,5 +1,6 @@
-import * as fs from "fs";
+import * as nodeFs from "fs";
 import { Crypto } from "./Crypto";
+import { Fs, isTransientFsError, renameWithRetry, uniqueTmp } from "./atomicFile";
 
 export interface JsonStoreOptions<T> {
   path: string;
@@ -10,34 +11,26 @@ export interface JsonStoreOptions<T> {
   legacyPath?: string;
   /** Only migrate a legacy value this accepts (e.g. a non-empty array); defaults to accepting anything. */
   acceptLegacy?: (v: unknown) => boolean;
-}
-
-/** On Windows a rename over a file another process (a virus scanner, an indexer) has open fails briefly with EPERM/EBUSY/EACCES. */
-function renameWithRetry(from: string, to: string): void {
-  for (let attempt = 0; ; attempt++) {
-    try { fs.renameSync(from, to); return; } catch (e) {
-      const code = (e as NodeJS.ErrnoException).code;
-      if (attempt >= 4 || (code !== "EPERM" && code !== "EBUSY" && code !== "EACCES")) throw e;
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
-    }
-  }
+  /** The filesystem; injectable so tests can simulate a rename another process blocks. Defaults to node's fs. */
+  fs?: Fs;
 }
 
 /** Repository over one encrypted JSON file. */
 export class JsonStore<T> {
-  constructor(private readonly o: JsonStoreOptions<T>) {}
+  private readonly fs: Fs;
+  constructor(private readonly o: JsonStoreOptions<T>) { this.fs = o.fs ?? nodeFs; }
 
   load(): T {
     const { path, crypto, fallback, legacyPath, acceptLegacy } = this.o;
     try {
-      return crypto.decryptJSON<T>(fs.readFileSync(path, "utf8"));
+      return crypto.decryptJSON<T>(this.fs.readFileSync(path, "utf8"));
     } catch {
       if (legacyPath) {
         try {
-          const old = JSON.parse(fs.readFileSync(legacyPath, "utf8"));
+          const old = JSON.parse(this.fs.readFileSync(legacyPath, "utf8"));
           if (!acceptLegacy || acceptLegacy(old)) {
             this.save(old as T);
-            try { fs.unlinkSync(legacyPath); } catch {}
+            try { this.fs.unlinkSync(legacyPath); } catch {}
             return old as T;
           }
         } catch {}
@@ -48,18 +41,31 @@ export class JsonStore<T> {
 
   /** Cheap change detector for the file: "<mtimeMs>:<size>:<inode>" (the inode changes with every atomic save), or null when it does not exist. Callers cache a parsed value under it. */
   signature(): string | null {
-    try { const st = fs.statSync(this.o.path); return `${st.mtimeMs}:${st.size}:${st.ino}`; } catch { return null; }
+    try { const st = this.fs.statSync(this.o.path); return `${st.mtimeMs}:${st.size}:${st.ino}`; } catch { return null; }
   }
 
-  /** Atomic: the new content is written to <path>.tmp and renamed over the target, so a crash never leaves a half-written file. */
+  /**
+   * Atomic: the new content is written to a unique <path>.<pid>.<random>.tmp and renamed over the target, so a crash never
+   * leaves a half-written file. A rename that stays blocked by EPERM/EBUSY/EACCES after the retries (a scanner holding the
+   * target open) falls back to a direct write: no worse than before saves were atomic. Any other failure is thrown and the
+   * old file is untouched.
+   */
   save(value: T): void {
-    const tmp = this.o.path + ".tmp";
+    const fs = this.fs, target = this.o.path;
+    const data = this.o.crypto.encryptJSON(value);
+    const tmp = uniqueTmp(target);
     try {
-      fs.writeFileSync(tmp, this.o.crypto.encryptJSON(value), "utf8");
-      renameWithRetry(tmp, this.o.path);
+      fs.writeFileSync(tmp, data, "utf8");
     } catch (e) {
       try { fs.unlinkSync(tmp); } catch {}
       throw e;
+    }
+    try {
+      renameWithRetry(tmp, target, fs);
+    } catch (e) {
+      try { fs.unlinkSync(tmp); } catch {}
+      if (!isTransientFsError(e)) throw e;
+      fs.writeFileSync(target, data, "utf8");
     }
   }
 }

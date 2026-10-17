@@ -2,7 +2,7 @@ import { HttpError } from "../core/HttpError";
 import { safeId } from "../core/ids";
 import type { AgentService } from "../agents/AgentService";
 import type { Session } from "../sessions/Session";
-import type { AutomationOwnership } from "./AutomationOwnership";
+import { AutomationOwnership, OWNERSHIP_TICK_MS } from "./AutomationOwnership";
 import type { AutomationSettings, AutomationSettingsData } from "./AutomationSettings";
 import { nextCronTime } from "./cron";
 import { resolveCron, Routine, RoutineInput, validateRoutineInput } from "./Routine";
@@ -31,12 +31,12 @@ export interface AutomationServiceOptions {
   agentExists: (id: string) => boolean;
   now: () => number;
   /** Timer functions for dispose's bounded wait; injectable so tests can prove none is left pending. */
-  timers?: { set(fn: () => void, ms: number): unknown; clear(handle: unknown): void };
+  timers?: { set(fn: () => void, ms: number): unknown; clear(handle: unknown): void; /** Repeating timer for the ownership heartbeat / takeover poll; defaults to an unref'd setInterval. */ every?(fn: () => void, ms: number): unknown };
   /**
    * Which agenv instance runs the schedules (the lock file). Without it this instance is the owner. A non-owner never starts
    * the tick and refuses runNow / cancelRun / openRun with a 409; routine edits stay allowed (the owner re-reads them).
    */
-  ownership?: Pick<AutomationOwnership, "acquire" | "release" | "isOwner" | "ownerPort">;
+  ownership?: Pick<AutomationOwnership, "acquire" | "tryAcquire" | "heartbeat" | "release" | "isOwner" | "ownerPort">;
   /** Called after any routine, run or settings change (wired to gateway.broadcastEvent("runs-updated")). */
   onChange: () => void;
 }
@@ -44,11 +44,13 @@ export interface AutomationServiceOptions {
 /** What the HTTP layer calls: routines, runs, logs and the global switches. Every method throws HttpError for bad input. */
 const realTimers = {
   set(fn: () => void, ms: number): unknown { const t = setTimeout(fn, ms); t.unref?.(); return t; },
-  clear(h: unknown): void { clearTimeout(h as NodeJS.Timeout); },
+  clear(h: unknown): void { clearTimeout(h as NodeJS.Timeout); clearInterval(h as NodeJS.Timeout); },
+  every(fn: () => void, ms: number): unknown { const t = setInterval(fn, ms); t.unref?.(); return t; },
 };
 
 export class AutomationService {
   private readonly timers: NonNullable<AutomationServiceOptions["timers"]>;
+  private ownershipTimer: unknown = null;
   constructor(private readonly o: AutomationServiceOptions) { this.timers = o.timers ?? realTimers; }
 
   // ---- routines ----
@@ -198,6 +200,7 @@ export class AutomationService {
    * active, applies catch-up and starts the tick. A non-owner starts nothing. Returns whether scheduling runs here.
    */
   startScheduling(): boolean {
+    this.watchOwnership();
     if (this.o.ownership && !this.o.ownership.acquire()) return false;
     this.o.scheduler.startup();
     this.o.scheduler.start();
@@ -206,6 +209,7 @@ export class AutomationService {
 
   /** Stops the tick, drops queued runs and cancels running ones, then waits (bounded) for them to be recorded. Call before agents.cancelAll(). */
   async dispose(): Promise<void> {
+    this.stopWatchingOwnership();
     this.o.scheduler.stop();
     for (const run of this.o.queue.drain()) this.markCancelled(run.id, "cancelled (server stopping)");
     let handle: unknown;
@@ -216,6 +220,35 @@ export class AutomationService {
   }
 
   // ---- helpers ----
+
+  /**
+   * Every 30 s: the owner refreshes the lock's heartbeat and, if the lock turned out to belong to someone else, demotes
+   * itself (scheduler stopped; runs already going are left to finish; run operations answer 409 from now on). A non-owner
+   * looks at the lock and takes the schedules over once the owner's heartbeat has gone stale: startup() (close runs a dead
+   * server left active, catch-up) and start(). No timer without an ownership object.
+   */
+  private watchOwnership(): void {
+    const own = this.o.ownership;
+    if (!own || this.ownershipTimer !== null) return;
+    const every = this.timers.every ?? realTimers.every;
+    this.ownershipTimer = every(() => {
+      try {
+        if (own.isOwner()) {
+          if (!own.heartbeat()) { this.o.scheduler.stop(); this.change(); }
+        } else if (own.tryAcquire()) {
+          this.o.scheduler.startup();
+          this.o.scheduler.start();
+          this.change();
+        }
+      } catch {}
+    }, OWNERSHIP_TICK_MS);
+  }
+
+  private stopWatchingOwnership(): void {
+    if (this.ownershipTimer === null) return;
+    this.timers.clear(this.ownershipTimer);
+    this.ownershipTimer = null;
+  }
 
   private isOwner(): boolean { return this.o.ownership ? this.o.ownership.isOwner() : true; }
 

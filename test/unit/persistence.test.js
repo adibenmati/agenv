@@ -36,13 +36,15 @@ describe("JsonStore", () => {
     const s = new JsonStore({ path: path.join(d, "a.enc"), crypto: mk(d), fallback: () => ["fb"], legacyPath: legacy, acceptLegacy: (v) => Array.isArray(v) && v.length > 0 });
     assert.deepEqual(s.load(), ["fb"]); assert.ok(fs.existsSync(legacy));
   });
-  it("save writes <path>.tmp and renames it over the target; no .tmp is left behind", () => {
+  it("save writes a unique <path>.<pid>.<random>.tmp and renames it over the target; no .tmp is left behind", () => {
     const d = tmp(); const p = path.join(d, "a.enc"); const s = new JsonStore({ path: p, crypto: mk(d), fallback: () => [] });
     const seen = [];
     const original = fs.renameSync;
     const rename = mock.method(fs, "renameSync", (from, to) => { seen.push([from, to]); return original.call(fs, from, to); });
     try { s.save([1]); } finally { rename.mock.restore(); }
-    assert.deepEqual(seen, [[p + ".tmp", p]]);
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0][1], p);
+    assert.match(path.basename(seen[0][0]), new RegExp("^a\.enc\." + process.pid + "\.[0-9a-f]{8,}\.tmp$"));
     assert.deepEqual(fs.readdirSync(d).filter((f) => f.endsWith(".tmp")), []);
     assert.deepEqual(s.load(), [1]);
   });
@@ -55,6 +57,41 @@ describe("JsonStore", () => {
     assert.equal(fs.readFileSync(p, "utf8"), before, "the target is byte-for-byte the old file");
     assert.deepEqual(s.load(), ["old"]);
     assert.deepEqual(fs.readdirSync(d).filter((f) => f.endsWith(".tmp")), []);
+  });
+  it("two saves use different temp names", () => {
+    const d = tmp(); const p = path.join(d, "a.enc"); const s = new JsonStore({ path: p, crypto: mk(d), fallback: () => [] });
+    const seen = [];
+    const original = fs.renameSync;
+    const rename = mock.method(fs, "renameSync", (from, to) => { seen.push(from); return original.call(fs, from, to); });
+    try { s.save([1]); s.save([2]); } finally { rename.mock.restore(); }
+    assert.equal(seen.length, 2);
+    assert.notEqual(seen[0], seen[1]);
+  });
+  it("a rename that fails briefly with EPERM/EBUSY/EACCES is retried and the save stays atomic (injected fs)", () => {
+    for (const c of ["EPERM", "EBUSY", "EACCES"]) {
+      const d = tmp(); const p = path.join(d, "a.enc");
+      let fails = 2, renames = 0, direct = 0;
+      const ifs = { ...fs,
+        renameSync: (f, t) => { renames++; if (fails-- > 0) throw Object.assign(new Error(c), { code: c }); return fs.renameSync(f, t); },
+        writeFileSync: (f, ...a) => { if (f === p) direct++; return fs.writeFileSync(f, ...a); } };
+      const s = new JsonStore({ path: p, crypto: mk(d), fallback: () => [], fs: ifs });
+      s.save(["new"]);
+      assert.equal(renames, 3, c);
+      assert.equal(direct, 0, "no direct write was needed");
+      assert.deepEqual(s.load(), ["new"]);
+      assert.deepEqual(fs.readdirSync(d).filter((f) => f.endsWith(".tmp")), []);
+    }
+  });
+  it("when the rename keeps failing with EPERM the save falls back to a direct write (no worse than before atomic saves)", () => {
+    const d = tmp(); const p = path.join(d, "a.enc");
+    let renames = 0;
+    const ifs = { ...fs, renameSync: () => { renames++; throw Object.assign(new Error("EPERM"), { code: "EPERM" }); } };
+    const s = new JsonStore({ path: p, crypto: mk(d), fallback: () => [], fs: ifs });
+    s.save(["old"]);
+    s.save(["new"]);
+    assert.ok(renames >= 5, "the retries ran first");
+    assert.deepEqual(s.load(), ["new"], "the new content was written");
+    assert.deepEqual(fs.readdirSync(d).filter((f) => f.endsWith(".tmp")), [], "the temp file was removed");
   });
   it("signature() changes with every save and with an outside modification, and is null for a missing file", () => {
     const d = tmp(); const p = path.join(d, "a.enc"); const s = new JsonStore({ path: p, crypto: mk(d), fallback: () => [] });
