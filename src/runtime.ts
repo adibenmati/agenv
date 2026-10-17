@@ -2,7 +2,10 @@ import * as http from "http";
 import * as path from "path";
 import type { Express } from "express";
 import type { Agent } from "./agents/Agent";
+import { AgentService } from "./agents/AgentService";
 import { AgentStore } from "./agents/AgentStore";
+import { ClaudeRunner } from "./agents/ClaudeRunner";
+import { ConversationForker } from "./agents/ConversationForker";
 import { ClaudeLinker } from "./claude/ClaudeLinker";
 import { ClaudeMdService } from "./claude/ClaudeMdService";
 import { claudePaths } from "./claude/paths";
@@ -81,8 +84,7 @@ export function buildRuntime(o: RuntimeOptions): Runtime {
   const history = new HistoryStore(file<string[]>(".agenv-history.enc", () => [], { name: ".agenv-history.json", accept: (v) => Array.isArray(v) && v.length > 0 }));
   const archive = new ArchiveStore(file<ArchiveEntry[]>(".agenv-archive.enc", () => []));
   const favorites = new FavoritesStore(file<Favorite[]>(".agenv-favorites.enc", () => []));
-  const agents = new AgentStore(file<Agent[]>(".agenv-agents.enc", () => []), createRealDirChecker());
-  void agents;   // exposed through AgentService in a later task
+  const agentStore = new AgentStore(file<Agent[]>(".agenv-agents.enc", () => []), createRealDirChecker());
   const scrollbackStore = new ScrollbackStore(path.join(homedir, ".agenv-scrollback"), crypto);
   const savedState = stateFile.load();
 
@@ -105,6 +107,10 @@ export function buildRuntime(o: RuntimeOptions): Runtime {
     defs: savedState && Array.isArray(savedState.sessionGroups) ? savedState.sessionGroups : [],
   });
   const analyzer = new OutputAnalyzer(bus, isRealDir);
+  const claudeRunner = new ClaudeRunner();
+  const agents = new AgentService({
+    store: agentStore, runner: claudeRunner, forker: new ConversationForker({ runner: claudeRunner }), sessions, isDir: isRealDir,
+  });
 
   // ---- tunnel, security, transport ----
   const ngrok = new NgrokTunnel({ defaultPort: config.port });
@@ -127,7 +133,7 @@ export function buildRuntime(o: RuntimeOptions): Runtime {
   });
 
   const deps: AppDeps = {
-    config, auth, sessions, groups, layout, stateStore, history, archive, favorites, gateway, linker,
+    config, auth, sessions, agents, groups, layout, stateStore, history, archive, favorites, gateway, linker,
     usage: new UsageService(scanner),
     sessionIndex: new SessionIndex(scanner, { projects: claude.projects, indexFile: claude.indexFile }),
     claudeMd: new ClaudeMdService({ projects: claude.projects, scanner }),
@@ -146,6 +152,7 @@ export function buildRuntime(o: RuntimeOptions): Runtime {
   return {
     ...deps, app, server, bus, savedState,
     dispose(): Promise<void> {
+      agents.cancelAll();
       linker.stop();
       gateway.dispose();
       auth.dispose();
