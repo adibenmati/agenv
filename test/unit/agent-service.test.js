@@ -470,3 +470,59 @@ describe("AgentService.openConversation and isConversationBusy", () => {
     r.list[0].claudeRunning = false; assert.equal(r.svc.isConversationBusy("c-1"), false);
   });
 });
+
+describe("AgentService per-run cancellation (cancelToken and onHandle)", () => {
+  const spec = (o = {}) => ({ permission: { mode: "plan", allowedTools: [] }, maxBudgetUsd: 1.5, timeoutMs: 60000, ...o });
+  const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  it("onHandle gets a cancel function as the process starts; calling it cancels only that run", async () => {
+    const r = rig("hang"); const a = r.svc.createBlank(input(r.cwd));
+    let cancel = null;
+    const p = r.svc.run(a.id, "x", { onHandle: (c) => { cancel = c; } });
+    await until(() => cancel !== null && events(r.state).length > 0);
+    assert.equal(typeof cancel, "function");
+    cancel();
+    assert.equal((await p).status, "cancelled");
+    assert.equal(calls(r.state).length, 1);
+  });
+  it("cancelling one run leaves a concurrent run of another agent alone", async () => {
+    const r = rig("slow"); const a = r.svc.createBlank(input(r.cwd)); const b = r.svc.createBlank(input(mkdir(), { name: "Sue" }));
+    let cancelA = null;
+    const pa = r.svc.run(a.id, "A", { onHandle: (c) => { cancelA = c; } });
+    const pb = r.svc.run(b.id, "B");
+    await until(() => cancelA !== null && events(r.state).length >= 2);
+    cancelA();
+    assert.equal((await pa).status, "cancelled");
+    assert.equal((await pb).status, "succeeded");
+  });
+  it("a run whose cancelToken is set while it waits in the queue resolves cancelled without spawning", async () => {
+    const r = rig("slow"); const a = r.svc.createBlank(input(r.cwd));
+    const token = { cancelled: false };
+    const p = r.svc.run(a.id, "first"), q = r.svc.run(a.id, "second", { cancelToken: token });
+    token.cancelled = true;
+    assert.equal((await p).status, "succeeded");
+    const res = await q;
+    assert.equal(res.status, "cancelled");
+    assert.equal(calls(r.state).length, 1);
+  });
+  it("a token already cancelled never spawns, for agent and folder runs", async () => {
+    const r = rig(); const a = r.svc.createBlank(input(r.cwd));
+    assert.equal((await r.svc.run(a.id, "x", { cancelToken: { cancelled: true } })).status, "cancelled");
+    assert.equal((await r.svc.runInFolder(r.cwd, "x", spec({ cancelToken: { cancelled: true } }))).status, "cancelled");
+    assert.equal(calls(r.state).length, 0);
+  });
+  it("runInFolder reports a cancel handle and cancelling it kills the process tree", async () => {
+    const r = rig("hang"); let cancel = null;
+    const p = r.svc.runInFolder(r.cwd, "x", spec({ onHandle: (c) => { cancel = c; } }));
+    await until(() => cancel !== null && fs.existsSync(path.join(r.state, "child.pid")));
+    const child = Number(fs.readFileSync(path.join(r.state, "child.pid"), "utf8"));
+    assert.ok(alive(child));
+    cancel();
+    assert.equal((await p).status, "cancelled");
+    await until(() => !alive(child));
+  });
+  it("an onHandle that throws does not break the run", async () => {
+    const r = rig(); const a = r.svc.createBlank(input(r.cwd));
+    const res = await r.svc.run(a.id, "x", { onHandle: () => { throw new Error("boom"); } });
+    assert.equal(res.status, "succeeded");
+  });
+});

@@ -33,10 +33,16 @@ export interface AgentServiceDeps {
 
 export type ConversationMode = "agent" | "fork" | "fresh";
 
-/** Per-run settings on top of the agent's. `permission` and `model` replace the agent's for that run only. */
-export interface RunOverrides extends Partial<RunSpec> { conversation?: ConversationMode; permission?: Permission; model?: string }
+/**
+ * Lets the caller cancel one run: `cancelToken.cancelled` is checked when the job starts (a run cancelled while queued
+ * resolves "cancelled" without spawning), and `onHandle` receives the cancel function as soon as the process has started.
+ */
+export interface RunControl { cancelToken?: { cancelled: boolean }; onHandle?: (cancel: () => void) => void }
 
-export interface FolderRunSpec { permission: Permission; model?: string; maxBudgetUsd: number; timeoutMs: number; logPath?: string }
+/** Per-run settings on top of the agent's. `permission` and `model` replace the agent's for that run only. */
+export interface RunOverrides extends Partial<RunSpec>, RunControl { conversation?: ConversationMode; permission?: Permission; model?: string }
+
+export interface FolderRunSpec extends RunControl { permission: Permission; model?: string; maxBudgetUsd: number; timeoutMs: number; logPath?: string }
 
 function cancelledBeforeStart(): RunResult {
   return { status: "cancelled", conversationId: "", text: "", costUsd: 0, numTurns: 0, durationMs: 0, exitCode: null, error: "Cancelled before it started" };
@@ -195,22 +201,24 @@ export class AgentService {
     if (!this.d.isDir(abs)) throw new HttpError(409, `the folder no longer exists: ${abs}`);
     const epoch = this.epoch;
     return await this.enqueue(`folder:${abs}`, async () => {
-      if (epoch !== this.epoch) return cancelledBeforeStart();
+      if (epoch !== this.epoch || spec.cancelToken?.cancelled) return cancelledBeforeStart();
       if (!this.d.isDir(abs)) throw new HttpError(409, `the folder no longer exists: ${abs}`);
       return this.track(this.d.runner.run({
         cwd: abs, prompt, permission: spec.permission, model: spec.model || undefined,
         maxBudgetUsd: spec.maxBudgetUsd, timeoutMs: spec.timeoutMs, logPath: spec.logPath,
-      }));
+      }), spec);
     });
   }
 
-  private async track(handle: RunHandle): Promise<RunResult> {
+  private async track(handle: RunHandle, ctl?: RunControl): Promise<RunResult> {
     this.handles.add(handle);
+    if (ctl?.onHandle) { try { ctl.onHandle(() => handle.cancel()); } catch {} }
+    if (ctl?.cancelToken?.cancelled) handle.cancel();
     try { return await handle.done; } finally { this.handles.delete(handle); }
   }
 
   private async execute(id: string, prompt: string, overrides: RunOverrides, mode: ConversationMode, epoch: number): Promise<RunResult> {
-    if (epoch !== this.epoch) return cancelledBeforeStart();
+    if (epoch !== this.epoch || overrides.cancelToken?.cancelled) return cancelledBeforeStart();
     const a = this.get(id);
     if (!this.d.isDir(a.cwd)) throw new HttpError(409, `the agent's folder no longer exists: ${a.cwd}`);
     if (mode !== "fresh" && a.conversationId && this.inUse(a.conversationId)) {
@@ -225,7 +233,7 @@ export class AgentService {
       maxBudgetUsd: overrides.maxBudgetUsd ?? DEFAULT_BUDGET_USD,
       timeoutMs: overrides.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       logPath: overrides.logPath,
-    }));
+    }), overrides);
     try {
       // Only an "agent" run's successful result decides the agent's conversation (a resumed run may come back on a new id);
       // failed or cancelled ones never do, and neither do fork or fresh runs.
