@@ -54,7 +54,7 @@ describe("RunStore", () => {
     assert.equal(status(() => runs.create("r1", "manual", "weird")), 400);
     assert.equal(status(() => runs.create("", "manual")), 400);
     assert.equal(status(() => runs.create(5, "manual")), 400);
-    assert.equal(status(() => runs.create("r1", "manual", "queued", "x".repeat(501))), 400);
+    assert.equal(status(() => runs.create("r1", "manual", "queued", 7)), 400);
   });
 
   it("update merges validated fields and persists", () => {
@@ -93,12 +93,30 @@ describe("RunStore", () => {
     assert.equal(runs.get(r.id).status, "queued");
   });
 
-  it("update rejects over-long reason/error", () => {
+  it("over-long reason/error are truncated to 500 chars ending in an ellipsis, never rejected", () => {
     const { runs } = mk();
     const r = runs.create("r1", "manual");
-    assert.equal(status(() => runs.update(r.id, { reason: "x".repeat(501) })), 400);
-    assert.equal(status(() => runs.update(r.id, { error: "x".repeat(501) })), 400);
-    assert.equal(runs.update(r.id, { error: "x".repeat(500) }).error.length, 500);
+    assert.equal(runs.update(r.id, { error: "x".repeat(500) }).error, "x".repeat(500));
+    const u = runs.update(r.id, { reason: "r".repeat(5000), error: "e".repeat(5000) });
+    assert.equal(u.reason, "r".repeat(499) + "…");
+    assert.equal(u.error, "e".repeat(499) + "…");
+    assert.equal(runs.get(r.id).error.length, 500);
+    assert.equal(status(() => runs.update(r.id, { error: 5 })), 400);
+  });
+
+  it("a 5000-char reason/error on create and update does not break the lifecycle", () => {
+    const { runs } = mk();
+    const s = runs.create("r1", "schedule", "skipped", "p".repeat(5000));
+    assert.equal(s.reason.length, 500);
+    assert.ok(s.reason.endsWith("…"));
+    const r = runs.create("r1", "manual");
+    runs.update(r.id, { status: "running", startedAt: Date.now() });
+    assert.equal(runs.active("r1").id, r.id);
+    const f = runs.update(r.id, { status: "failed", finishedAt: Date.now(), exitCode: 1, error: "stderr ".repeat(1000), reason: "why ".repeat(1000) });
+    assert.equal(f.status, "failed");
+    assert.equal(f.error.length, 500);
+    assert.equal(f.reason.length, 500);
+    assert.equal(runs.active("r1"), undefined);
   });
 
   it("summary is truncated to 2000 chars", () => {
@@ -202,7 +220,8 @@ describe("RunStore", () => {
     assert.equal(runs.readLog(r.id, 14), "line three\n"); // starts mid "line two": cut forward to next line
     assert.equal(runs.readLog(r.id, 11), "line three\n"); // starts exactly on a line
     assert.equal(runs.readLog(r.id, 12), "line three\n"); // starts at the newline ending line two
-    assert.equal(runs.readLog(r.id, 5), ""); // no newline in the window: nothing complete
+    assert.equal(runs.readLog(r.id, 5), "hree\n"); // only a partial line fits: better than nothing
+    assert.equal(runs.readLog(r.id, 17), "line three\n"); // partial line two is dropped when a complete line follows
     assert.equal(runs.readLog(r.id, 0), "");
     assert.equal(runs.readLog(r.id, -3), "");
     assert.equal(status(() => runs.readLog(r.id, NaN)), 400);
@@ -225,8 +244,58 @@ describe("RunStore", () => {
     const { runs } = mk();
     const r = runs.create("r1", "manual");
     writeLog(runs, r.id, "héllo wörld\nsecond ✓ line\n");
-    assert.equal(runs.readLog(r.id, 9), "");
+    assert.equal(runs.readLog(r.id, 9), "✓ line\n");
+    assert.equal(runs.readLog(r.id, 8), " line\n"); // starts inside the check mark: continuation bytes skipped
+    assert.equal(runs.readLog(r.id, 14), "cond ✓ line\n"); // no complete line fits: the partial one is returned
     assert.equal(runs.readLog(r.id, 18), "second ✓ line\n");
+  });
+
+  it("readLog returns the tail of a single line longer than the window", () => {
+    const { runs } = mk();
+    const r = runs.create("r1", "manual");
+    writeLog(runs, r.id, "a".repeat(100 * 1024) + "b".repeat(100 * 1024)); // one 200 KB line, no newline
+    const out = runs.readLog(r.id, 64 * 1024);
+    assert.equal(out.length, 64 * 1024);
+    assert.ok(out.endsWith("b"));
+    assert.ok(!out.includes("�"));
+    // a finished long line (newline is the last byte of the window): cutting would leave nothing, so keep its tail
+    writeLog(runs, r.id, "z".repeat(200 * 1024) + "\n");
+    const out2 = runs.readLog(r.id, 64 * 1024);
+    assert.equal(out2.length, 64 * 1024);
+    assert.ok(out2.endsWith("z\n"));
+  });
+
+  it("readLog skips UTF-8 continuation bytes when the window starts inside a multibyte char", () => {
+    const { runs } = mk();
+    const r = runs.create("r1", "manual");
+    writeLog(runs, r.id, "✓".repeat(1000)); // 3000 bytes, one line, no newline
+    for (const n of [1000, 1001, 1002]) { // each start offset lands on a different byte of a check mark
+      const out = runs.readLog(r.id, n);
+      assert.ok(out.length > 0);
+      assert.ok(!out.includes("�"), `window ${n}`);
+      assert.ok(out.startsWith("✓"), `window ${n}`);
+      assert.ok(Buffer.byteLength(out) <= n);
+    }
+  });
+
+  it("removeForRoutine deletes that routine's runs and logs, only when none is queued/running", () => {
+    const { runs } = mk();
+    const a1 = runs.create("a", "manual"); runs.update(a1.id, { status: "succeeded", finishedAt: 1 });
+    const a2 = runs.create("a", "schedule", "skipped", "x");
+    const b1 = runs.create("b", "manual"); runs.update(b1.id, { status: "succeeded", finishedAt: 1 });
+    const pa1 = writeLog(runs, a1.id, "log\n"), pb1 = writeLog(runs, b1.id, "log\n");
+    const a3 = runs.create("a", "manual");
+    assert.deepEqual(runs.removeForRoutine("a"), { removed: 0 }, "active run blocks removal");
+    assert.ok(runs.get(a1.id));
+    assert.ok(fs.existsSync(pa1));
+    runs.update(a3.id, { status: "cancelled", finishedAt: 2 });
+    assert.deepEqual(runs.removeForRoutine("a"), { removed: 3 });
+    assert.equal(runs.get(a1.id), undefined);
+    assert.equal(runs.get(a2.id), undefined);
+    assert.equal(fs.existsSync(pa1), false);
+    assert.ok(runs.get(b1.id));
+    assert.ok(fs.existsSync(pb1));
+    assert.deepEqual(runs.removeForRoutine("a"), { removed: 0 });
   });
 
   it("readLog/logPath reject ids that are not safe ids (no traversal)", () => {

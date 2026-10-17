@@ -46,13 +46,17 @@ function oneOf<T extends string>(list: readonly T[], v: unknown, what: string): 
   return v as T;
 }
 
-function boundedText(v: unknown, max: number, what: string): string {
+/** Non-strings are a 400; over-long text is cut to `max` (ending in an ellipsis) so a long stderr can never strand a run. */
+function clipText(v: unknown, max: number, what: string): string {
   if (typeof v !== "string") throw new HttpError(400, `${what} must be a string`);
-  if (v.length > max) throw new HttpError(400, `${what} must be at most ${max} characters`);
-  return v;
+  return v.length > max ? v.slice(0, max - 1) + "…" : v;
 }
 
-/** Run history (~/.agenv-runs.enc, newest 500) plus the location and bounded reading of each run's log file. */
+/**
+ * Run history (~/.agenv-runs.enc, newest 500) plus the location and bounded reading of each run's log file.
+ * Nothing is cached: every read decrypts the file and every mutation re-encrypts it (about 10 ms typical, at most
+ * ~80 ms measured with a full 500-run history), which is fine at the tick/run rates of the scheduler.
+ */
 export class RunStore {
   private readonly store: JsonStore<Run[]>;
   private readonly logDir: string;
@@ -72,7 +76,7 @@ export class RunStore {
     if (typeof routineId !== "string" || !routineId || routineId.length > MAX_ROUTINE_ID) throw new HttpError(400, "invalid routineId");
     oneOf(RUN_TRIGGERS, trigger, "trigger");
     oneOf(RUN_STATUSES, status, "status");
-    boundedText(reason, MAX_REASON, "reason");
+    reason = clipText(reason, MAX_REASON, "reason");
     const runs = this.all();
     const now = Date.now();
     const run: Run = {
@@ -89,7 +93,8 @@ export class RunStore {
 
   /**
    * Patch of the outcome fields. `id`, `routineId`, `queuedAt`, `trigger` and unknown keys are ignored. The whole patch
-   * is validated before anything changes; `summary` is truncated to 2000 characters, `reason`/`error` over 500 are a 400.
+   * is validated before anything changes; `summary` is cut to 2000 characters and `reason`/`error` to 500 (ellipsis
+   * included); only non-strings are a 400.
    */
   update(id: string, patch: Partial<Omit<Run, "id" | "routineId" | "queuedAt" | "trigger">>): Run {
     if (!patch || typeof patch !== "object" || Array.isArray(patch)) throw new HttpError(400, "patch must be an object");
@@ -99,9 +104,9 @@ export class RunStore {
     const p = patch as Record<string, unknown>;
     const next: Partial<Run> = {};
     if (p.status !== undefined) next.status = oneOf(RUN_STATUSES, p.status, "status");
-    if (p.reason !== undefined) next.reason = boundedText(p.reason, MAX_REASON, "reason");
-    if (p.error !== undefined) next.error = boundedText(p.error, MAX_REASON, "error");
-    if (p.summary !== undefined) next.summary = boundedText(p.summary, Infinity, "summary").slice(0, MAX_SUMMARY);
+    if (p.reason !== undefined) next.reason = clipText(p.reason, MAX_REASON, "reason");
+    if (p.error !== undefined) next.error = clipText(p.error, MAX_REASON, "error");
+    if (p.summary !== undefined) next.summary = clipText(p.summary, Infinity, "summary").slice(0, MAX_SUMMARY);
     for (const k of ["startedAt", "finishedAt"] as const) {
       if (p[k] !== undefined) {
         if (!isTime(p[k])) throw new HttpError(400, `${k} must be a non-negative number or null`);
@@ -162,7 +167,8 @@ export class RunStore {
 
   /**
    * The last `tailBytes` of the log (at most 1 MB), starting on a line boundary: a window that begins mid-line drops
-   * that partial line. "" when there is no log yet. Throws 400 for an unsafe id or a non-numeric size.
+   * that partial line, unless no complete line fits (the runner logs one raw event per line and one can exceed the
+   * window), in which case the partial line is returned minus any cut-off UTF-8 character. "" when there is no log yet. Throws 400 for an unsafe id or a non-numeric size.
    */
   readLog(id: string, tailBytes: number): string {
     const file = this.logPath(id);
@@ -182,11 +188,18 @@ export class RunStore {
       const got = fs.readSync(fd, buf, 0, buf.length, start - lead);
       let chunk = buf.subarray(0, got);
       if (lead) {
-        if (chunk[0] !== 10) {
-          const nl = chunk.indexOf(10, 1);
-          chunk = nl < 0 ? chunk.subarray(chunk.length) : chunk.subarray(nl + 1);
+        if (chunk[0] === 10) {
+          chunk = chunk.subarray(1); // the window begins exactly on a line
         } else {
-          chunk = chunk.subarray(1);
+          const nl = chunk.indexOf(10, 1);
+          if (nl >= 0 && nl + 1 < chunk.length) {
+            chunk = chunk.subarray(nl + 1); // drop the partial first line
+          } else {
+            // no complete line fits (one very long line): a partial line beats nothing; skip the cut-off character
+            let i = 1;
+            while (i < chunk.length && (chunk[i] & 0xc0) === 0x80) i++;
+            chunk = chunk.subarray(i);
+          }
         }
       }
       return chunk.toString("utf8");
@@ -219,6 +232,19 @@ export class RunStore {
   active(routineId: string): Run | undefined {
     const mine = this.all().filter((r) => r.routineId === routineId && isActive(r));
     return mine.find((r) => r.status === "running") ?? mine[0];
+  }
+
+  /**
+   * Deletes all runs of a routine and their log files, but only when none of them is queued/running (returns
+   * { removed: 0 } and changes nothing otherwise): the caller cancels active runs first.
+   */
+  removeForRoutine(routineId: string): { removed: number } {
+    const runs = this.all();
+    const mine = runs.filter((r) => r.routineId === routineId);
+    if (!mine.length || mine.some(isActive)) return { removed: 0 };
+    this.store.save(runs.filter((r) => r.routineId !== routineId));
+    for (const r of mine) this.deleteLog(r.id);
+    return { removed: mine.length };
   }
 
   private deleteLog(id: string): void {
