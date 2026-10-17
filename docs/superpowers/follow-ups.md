@@ -19,3 +19,6 @@ being silently changed. Each entry: where it is in the baseline (`git show pre-t
 5. **Access token is compared with `===`** (`isAuthenticated`, L448–455 → `AuthService.isAuthenticated`). Not constant-time;
    low practical risk for a 32-hex token on localhost, but `crypto.timingSafeEqual` is the standard choice if the server is
    exposed through a tunnel. (Hardened in the port: a malformed `Cookie` header or URL no longer throws — see ledger.)
+6. **A WebSocket message of `null` crashed the server** (L3324+ `ws.on("message")`: `JSON.parse("null")` → `msg.type` throws
+   inside the handler → uncaught exception). Hardened in `WsGateway`; noted here because the baseline is vulnerable — any
+   authenticated client (or a tunnel user with the token) could take the server down with one frame.
