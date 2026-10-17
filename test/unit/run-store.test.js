@@ -128,19 +128,19 @@ describe("RunStore", () => {
 
   it("keeps only the newest 500 runs and deletes pruned runs' log files", () => {
     const { runs, logDir } = mk();
-    const first = runs.create("r1", "schedule");
-    const second = runs.create("r1", "schedule");
+    const first = runs.create("r1", "schedule", "skipped", "x");
+    const second = runs.create("r1", "schedule", "skipped", "x");
     const p1 = writeLog(runs, first.id, "old\n"), p2 = writeLog(runs, second.id, "old2\n");
-    for (let i = 0; i < 498; i++) runs.create("r1", "schedule");
+    for (let i = 0; i < 498; i++) runs.create("r1", "schedule", "skipped", "x");
     assert.equal(runs.list("r1", 500).length, 500);
     assert.ok(fs.existsSync(p1), "500 runs still fit");
-    const third = runs.create("r1", "schedule"); // 501st: the oldest goes
+    const third = runs.create("r1", "schedule", "skipped", "x"); // 501st: the oldest goes
     assert.equal(runs.get(first.id), undefined);
     assert.ok(runs.get(second.id));
     assert.ok(runs.get(third.id));
     assert.equal(fs.existsSync(p1), false);
     assert.ok(fs.existsSync(p2));
-    runs.create("r1", "schedule");
+    runs.create("r1", "schedule", "skipped", "x");
     assert.equal(fs.existsSync(p2), false);
     assert.equal(runs.list(undefined, 500).length, 500);
     assert.equal(fs.readdirSync(logDir).length, 0);
@@ -353,5 +353,123 @@ describe("RunStore", () => {
     assert.equal(again.get(r.id).error, "boom");
     assert.equal(again.get(r.id).trigger, "catch_up");
     assert.equal(again.list().length, 1);
+  });
+});
+
+const row = (i, status = "succeeded", routineId = "r1") => ({
+  id: i.toString(16).padStart(12, "0"), routineId, trigger: "schedule", status, reason: "", queuedAt: i, startedAt: status === "queued" ? null : i,
+  finishedAt: status === "queued" || status === "running" ? null : i, durationMs: 0, costUsd: 0, numTurns: 0, conversationId: "", exitCode: null, error: "", summary: "",
+});
+
+describe("RunStore pruning never loses an active run", () => {
+  it("prunes the oldest FINISHED rows; queued and running rows survive however old", () => {
+    const { store, logDir, runs } = mk();
+    const rows = [row(1, "running"), row(2, "queued")];
+    for (let i = 3; i <= 500; i++) rows.push(row(i));
+    store.save(rows);
+    for (const id of [rows[0].id, rows[2].id, rows[3].id]) writeLog(runs, id, "x");
+    const fresh = runs.create("r2", "manual");                 // 501 rows: one finished row must go
+    const all = runs.list(undefined, 500);
+    assert.equal(all.length, 500);
+    assert.ok(runs.get(rows[0].id), "the old running row is kept");
+    assert.ok(runs.get(rows[1].id), "the old queued row is kept");
+    assert.equal(runs.get(rows[2].id), undefined, "the oldest finished row went");
+    assert.ok(runs.get(rows[3].id), "the next one stays");
+    assert.ok(runs.get(fresh.id));
+    assert.equal(fs.existsSync(runs.logPath(rows[2].id)), false, "its log went with it");
+    assert.equal(fs.existsSync(runs.logPath(rows[0].id)), true, "an active run's log stays");
+  });
+
+  it("when all 500 rows are active nothing is pruned and the history may grow", () => {
+    const { store, runs } = mk();
+    store.save(Array.from({ length: 500 }, (_, i) => row(i + 1, i % 2 ? "running" : "queued")));
+    runs.create("r2", "manual");
+    runs.create("r2", "manual", "skipped", "x");
+    const all = runs.list(undefined, 500);
+    assert.equal(new Set(store.load().map((r) => r.id)).size, 502, "all 500 active rows plus both new ones are stored");
+    assert.equal(all.length, 500, "list still caps at 500");
+    assert.ok(runs.get(row(1, "queued").id), "the oldest active row is still there");
+  });
+
+  it("activeCount counts a routine's queued and running runs", () => {
+    const { runs } = mk();
+    runs.create("r1", "manual"); runs.update(runs.create("r1", "manual").id, { status: "running", startedAt: 1 });
+    runs.create("r1", "schedule", "skipped", "x"); runs.create("r2", "manual");
+    assert.equal(runs.activeCount("r1"), 2);
+    assert.equal(runs.activeCount("r2"), 1);
+    assert.equal(runs.activeCount("r3"), 0);
+  });
+});
+
+describe("RunStore.latestByRoutine", () => {
+  it("gives the newest run of every routine in one pass", () => {
+    const { store, runs } = mk();
+    store.save([row(1, "succeeded", "a"), row(2, "failed", "b"), row(3, "skipped", "a"), row(4, "running", "c")]);
+    let loads = 0; const load = store.load.bind(store); store.load = () => { loads++; return load(); };
+    const m = runs.latestByRoutine();
+    assert.equal(loads, 1);
+    assert.deepEqual([...m.keys()].sort(), ["a", "b", "c"]);
+    assert.equal(m.get("a").id, row(3).id);
+    assert.equal(m.get("b").status, "failed");
+    assert.equal(m.get("c").status, "running");
+  });
+});
+
+describe("RunStore read cache", () => {
+  const spyLoads = (store) => { const o = { n: 0 }; const load = store.load.bind(store); store.load = () => { o.n++; return load(); }; return o; };
+
+  it("repeated reads do not decrypt again; the first read after construction does", () => {
+    const { dir, logDir, runs } = mk();
+    const r = runs.create("r1", "manual");
+    const store2 = mkJson(dir); const n = spyLoads(store2);
+    const fresh = new RunStore({ store: store2, logDir });
+    for (let i = 0; i < 5; i++) { fresh.get(r.id); fresh.list("r1"); fresh.costSince(0); fresh.countSince("r1", 0); fresh.active("r1"); fresh.latestByRoutine(); }
+    assert.equal(n.n, 1, "one decrypt for any number of reads");
+  });
+
+  it("the store's own writes keep the cache valid (no re-read after create/update)", () => {
+    const { store, runs } = mk();
+    const n = spyLoads(store);
+    const r = runs.create("r1", "manual");
+    runs.update(r.id, { status: "running", startedAt: 5 });
+    assert.equal(runs.get(r.id).status, "running");
+    runs.update(r.id, { status: "succeeded", finishedAt: 9, costUsd: 0.5 });
+    assert.equal(runs.list()[0].costUsd, 0.5);
+    assert.equal(n.n, 1, "only the very first read touched the file");
+  });
+
+  it("an outside modification invalidates the cache", () => {
+    const { dir, logDir, store, runs } = mk();
+    runs.create("r1", "manual");
+    assert.equal(runs.list().length, 1);
+    const other = new RunStore({ store: mkJson(dir), logDir });          // another writer on the same file
+    other.create("r2", "manual");
+    const n = spyLoads(store);
+    assert.equal(runs.list(undefined, 10).length, 2, "sees the other writer's row");
+    assert.equal(n.n, 1);
+    runs.list(); runs.list();
+    assert.equal(n.n, 1, "and caches it again");
+    store.save([row(7, "failed", "z")]);                                  // a raw rewrite of the same file
+    assert.deepEqual(runs.list(undefined, 10).map((r) => r.routineId), ["z"]);
+  });
+
+  it("mutating a returned run cannot corrupt the cache", () => {
+    const { runs } = mk();
+    const r = runs.create("r1", "manual");
+    const got = runs.get(r.id); got.status = "succeeded"; got.costUsd = 99;
+    runs.list()[0].summary = "tampered";
+    runs.latestByRoutine().get("r1").error = "tampered";
+    const again = runs.get(r.id);
+    assert.equal(again.status, "queued"); assert.equal(again.costUsd, 0); assert.equal(again.summary, ""); assert.equal(again.error, "");
+  });
+
+  it("a failed save does not leave the cache ahead of the disk", () => {
+    const { store, runs } = mk();
+    const r = runs.create("r1", "manual");
+    const save = store.save.bind(store);
+    store.save = () => { throw new Error("disk full"); };
+    assert.throws(() => runs.update(r.id, { status: "running", startedAt: 3 }), /disk full/);
+    store.save = save;
+    assert.equal(runs.get(r.id).status, "queued", "reads what is really stored");
   });
 });

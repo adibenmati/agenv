@@ -12,6 +12,17 @@ export interface JsonStoreOptions<T> {
   acceptLegacy?: (v: unknown) => boolean;
 }
 
+/** On Windows a rename over a file another process (a virus scanner, an indexer) has open fails briefly with EPERM/EBUSY/EACCES. */
+function renameWithRetry(from: string, to: string): void {
+  for (let attempt = 0; ; attempt++) {
+    try { fs.renameSync(from, to); return; } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (attempt >= 4 || (code !== "EPERM" && code !== "EBUSY" && code !== "EACCES")) throw e;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+    }
+  }
+}
+
 /** Repository over one encrypted JSON file. */
 export class JsonStore<T> {
   constructor(private readonly o: JsonStoreOptions<T>) {}
@@ -35,7 +46,20 @@ export class JsonStore<T> {
     }
   }
 
+  /** Cheap change detector for the file: "<mtimeMs>:<size>:<inode>" (the inode changes with every atomic save), or null when it does not exist. Callers cache a parsed value under it. */
+  signature(): string | null {
+    try { const st = fs.statSync(this.o.path); return `${st.mtimeMs}:${st.size}:${st.ino}`; } catch { return null; }
+  }
+
+  /** Atomic: the new content is written to <path>.tmp and renamed over the target, so a crash never leaves a half-written file. */
   save(value: T): void {
-    fs.writeFileSync(this.o.path, this.o.crypto.encryptJSON(value), "utf8");
+    const tmp = this.o.path + ".tmp";
+    try {
+      fs.writeFileSync(tmp, this.o.crypto.encryptJSON(value), "utf8");
+      renameWithRetry(tmp, this.o.path);
+    } catch (e) {
+      try { fs.unlinkSync(tmp); } catch {}
+      throw e;
+    }
   }
 }

@@ -36,6 +36,35 @@ describe("JsonStore", () => {
     const s = new JsonStore({ path: path.join(d, "a.enc"), crypto: mk(d), fallback: () => ["fb"], legacyPath: legacy, acceptLegacy: (v) => Array.isArray(v) && v.length > 0 });
     assert.deepEqual(s.load(), ["fb"]); assert.ok(fs.existsSync(legacy));
   });
+  it("save writes <path>.tmp and renames it over the target; no .tmp is left behind", () => {
+    const d = tmp(); const p = path.join(d, "a.enc"); const s = new JsonStore({ path: p, crypto: mk(d), fallback: () => [] });
+    const seen = [];
+    const original = fs.renameSync;
+    const rename = mock.method(fs, "renameSync", (from, to) => { seen.push([from, to]); return original.call(fs, from, to); });
+    try { s.save([1]); } finally { rename.mock.restore(); }
+    assert.deepEqual(seen, [[p + ".tmp", p]]);
+    assert.deepEqual(fs.readdirSync(d).filter((f) => f.endsWith(".tmp")), []);
+    assert.deepEqual(s.load(), [1]);
+  });
+  it("a failing rename leaves the old file intact and removes the temp file", () => {
+    const d = tmp(); const p = path.join(d, "a.enc"); const s = new JsonStore({ path: p, crypto: mk(d), fallback: () => [] });
+    s.save(["old"]);
+    const before = fs.readFileSync(p, "utf8");
+    const rename = mock.method(fs, "renameSync", () => { throw new Error("EXDEV simulated"); });
+    try { assert.throws(() => s.save(["new"]), /EXDEV simulated/); } finally { rename.mock.restore(); }
+    assert.equal(fs.readFileSync(p, "utf8"), before, "the target is byte-for-byte the old file");
+    assert.deepEqual(s.load(), ["old"]);
+    assert.deepEqual(fs.readdirSync(d).filter((f) => f.endsWith(".tmp")), []);
+  });
+  it("signature() changes with every save and with an outside modification, and is null for a missing file", () => {
+    const d = tmp(); const p = path.join(d, "a.enc"); const s = new JsonStore({ path: p, crypto: mk(d), fallback: () => [] });
+    assert.equal(s.signature(), null);
+    s.save([1]); const a = s.signature(); assert.ok(a);
+    assert.equal(s.signature(), a, "stable while untouched");
+    s.save([1, 2, 3]); const b = s.signature(); assert.notEqual(b, a);
+    const t = new Date(Date.now() + 5000); fs.utimesSync(p, t, t);
+    assert.notEqual(s.signature(), b, "mtime alone is enough");
+  });
   it("reads files written by the old server (compatibility fixture)", () => {
     const fx = path.join(__dirname, "..", "fixtures", "crypto");
     const dir = tmp(); fs.copyFileSync(path.join(fx, "cipher.json"), path.join(dir, "x.enc")); fs.copyFileSync(path.join(fx, "key"), path.join(dir, "key"));

@@ -11,6 +11,9 @@ import type { RoutineScheduler } from "./RoutineScheduler";
 import type { RunQueue } from "./RunQueue";
 import { MAX_RUNS, Run, RunStore } from "./RunStore";
 
+/** The slice of a routine's newest run that the routine list carries. */
+export interface LastRun { id: string; status: Run["status"]; startedAt: number | null; finishedAt: number | null; costUsd: number; reason: string }
+
 /** How long cancel / delete / dispose wait for a killed process to be recorded. */
 const SETTLE_TIMEOUT_MS = 10_000;
 const DISPOSE_WAIT_MS = 3000;
@@ -51,6 +54,15 @@ export class AutomationService {
   // ---- routines ----
 
   listRoutines(): Routine[] { return this.o.routines.list(); }
+
+  /** The routines, each with its newest run (any status) so the panel needs no per-routine /runs call. One pass over the history. */
+  listRoutinesWithLastRun(): Array<Routine & { lastRun: LastRun | null }> {
+    const latest = this.o.runs.latestByRoutine();
+    return this.o.routines.list().map((r) => {
+      const l = latest.get(r.id);
+      return { ...r, lastRun: l ? { id: l.id, status: l.status, startedAt: l.startedAt, finishedAt: l.finishedAt, costUsd: l.costUsd, reason: l.reason } : null };
+    });
+  }
 
   /** Validates, computes nextRunAt from now and stores. A permission the client omits is acceptEdits (the agent's is not inherited). */
   createRoutine(input: unknown): Routine {
@@ -235,7 +247,7 @@ export class AutomationService {
 
   private async settled(done: () => boolean): Promise<void> {
     const end = Date.now() + SETTLE_TIMEOUT_MS;
-    while (!done() && Date.now() < end) await sleep(5);
+    while (!done() && Date.now() < end) await sleep(50);
   }
 
   private change(): void { try { this.o.onChange(); } catch {} }

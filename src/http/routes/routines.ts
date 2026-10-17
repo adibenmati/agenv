@@ -40,7 +40,7 @@ export function routinesRouter(d: AppDeps): Router {
     return n;
   };
 
-  r.get("/api/routines", auth, (_req, res) => res.json(d.automation.listRoutines()));
+  r.get("/api/routines", auth, (_req, res) => res.json(d.automation.listRoutinesWithLastRun()));
 
   r.post("/api/routines", auth, wrap((req, res) => res.json(d.automation.createRoutine(routinePatch(body(req))))));
 

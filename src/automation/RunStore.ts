@@ -41,6 +41,21 @@ const isNum = (v: unknown): v is number => typeof v === "number" && Number.isFin
 const isTime = (v: unknown): v is number | null => v === null || (isNum(v) && v >= 0);
 const isActive = (r: Run) => r.status === "queued" || r.status === "running";
 
+/**
+ * Keeps at most MAX_RUNS rows by dropping the oldest FINISHED ones. Queued and running rows are never dropped (a run that is
+ * still executing must keep its record), so a history made only of active runs may exceed the limit.
+ */
+function prune(runs: Run[]): { runs: Run[]; pruned: Run[] } {
+  let excess = runs.length - MAX_RUNS;
+  if (excess <= 0) return { runs, pruned: [] };
+  const kept: Run[] = [], pruned: Run[] = [];
+  runs.forEach((r, i) => {
+    // the row just created (the last one) is never its own victim
+    if (excess > 0 && !isActive(r) && i < runs.length - 1) { pruned.push(r); excess--; } else kept.push(r);
+  });
+  return { runs: kept, pruned };
+}
+
 function oneOf<T extends string>(list: readonly T[], v: unknown, what: string): T {
   if (typeof v !== "string" || !(list as readonly string[]).includes(v)) throw new HttpError(400, `invalid ${what}`);
   return v as T;
@@ -54,8 +69,10 @@ function clipText(v: unknown, max: number, what: string): string {
 
 /**
  * Run history (~/.agenv-runs.enc, newest 500) plus the location and bounded reading of each run's log file.
- * Nothing is cached: every read decrypts the file and every mutation re-encrypts it (about 10 ms typical, at most
- * ~80 ms measured with a full 500-run history), which is fine at the tick/run rates of the scheduler.
+ * The parsed history is cached under the file's signature (mtime, size, inode), so repeated reads (the panel polls every
+ * 2 s) do not decrypt; the cache is dropped when the file changes underneath it and replaced by the store's own saves.
+ * Every mutation still re-encrypts the file (about 10 ms typical, ~80 ms with a full 500-run history).
+ * Rows handed out are copies, so a caller can never corrupt the cache.
  */
 export class RunStore {
   private readonly store: JsonStore<Run[]>;
@@ -66,9 +83,31 @@ export class RunStore {
     this.logDir = o.logDir;
   }
 
+  private cache: { sig: string; runs: Run[] } | null = null;
+
+  /** The cached history. Read-only: callers that change rows work on `editable()` and hand the result to `write()`. */
   private all(): Run[] {
+    const sig = this.signature();                       // stat BEFORE reading: a write in between only makes the next read reload
+    if (sig !== null && this.cache && this.cache.sig === sig) return this.cache.runs;
     const r = this.store.load();
-    return Array.isArray(r) ? r : [];
+    const runs = Array.isArray(r) ? r : [];
+    this.cache = sig === null ? null : { sig, runs };
+    return runs;
+  }
+
+  private editable(): Run[] { return this.all().map((r) => ({ ...r })); }
+
+  /** Persists `runs` (which the cache then owns) and re-keys the cache to the file as written. A failed save drops the cache. */
+  private write(runs: Run[]): void {
+    this.cache = null;
+    this.store.save(runs);
+    const sig = this.signature();
+    if (sig !== null) this.cache = { sig, runs };
+  }
+
+  private signature(): string | null {
+    const s = this.store as { signature?: () => string | null };
+    return typeof s.signature === "function" ? s.signature() : null;
   }
 
   /** Statuses other than queued/running are final, so such a run is born finished (and never started). */
@@ -77,7 +116,7 @@ export class RunStore {
     oneOf(RUN_TRIGGERS, trigger, "trigger");
     oneOf(RUN_STATUSES, status, "status");
     reason = clipText(reason, MAX_REASON, "reason");
-    const runs = this.all();
+    const runs = this.editable();
     const now = Date.now();
     const run: Run = {
       id: this.newId(runs), routineId, trigger, status, reason,
@@ -85,10 +124,10 @@ export class RunStore {
       durationMs: 0, costUsd: 0, numTurns: 0, conversationId: "", exitCode: null, error: "", summary: "",
     };
     runs.push(run);
-    const pruned = runs.length > MAX_RUNS ? runs.splice(0, runs.length - MAX_RUNS) : [];
-    this.store.save(runs);
-    for (const p of pruned) this.deleteLog(p.id);
-    return run;
+    const kept = prune(runs);
+    this.write(kept.runs);
+    for (const p of kept.pruned) this.deleteLog(p.id);
+    return { ...run };
   }
 
   /**
@@ -98,7 +137,7 @@ export class RunStore {
    */
   update(id: string, patch: Partial<Omit<Run, "id" | "routineId" | "queuedAt" | "trigger">>): Run {
     if (!patch || typeof patch !== "object" || Array.isArray(patch)) throw new HttpError(400, "patch must be an object");
-    const runs = this.all();
+    const runs = this.editable();
     const cur = runs.find((r) => r.id === id);
     if (!cur) throw new HttpError(404, "run not found");
     const p = patch as Record<string, unknown>;
@@ -132,11 +171,14 @@ export class RunStore {
       next.conversationId = p.conversationId as string;
     }
     Object.assign(cur, next);
-    this.store.save(runs);
-    return cur;
+    this.write(runs);
+    return { ...cur };
   }
 
-  get(id: string): Run | undefined { return this.all().find((r) => r.id === id); }
+  get(id: string): Run | undefined {
+    const r = this.all().find((x) => x.id === id);
+    return r && { ...r };
+  }
 
   /** Newest first. `limit` defaults to 50 and is capped at 500 (anything not a positive number means the default). */
   list(routineId?: string, limit?: number): Run[] {
@@ -144,9 +186,24 @@ export class RunStore {
     const out: Run[] = [];
     const runs = this.all();
     for (let i = runs.length - 1; i >= 0 && out.length < n; i--) {
-      if (routineId === undefined || runs[i].routineId === routineId) out.push(runs[i]);
+      if (routineId === undefined || runs[i].routineId === routineId) out.push({ ...runs[i] });
     }
     return out;
+  }
+
+  /** The newest run of every routine that has one, from a single pass over the history. */
+  latestByRoutine(): Map<string, Run> {
+    const out = new Map<string, Run>();
+    for (const r of this.all()) out.set(r.routineId, r);       // oldest first, so the last write per routine is the newest
+    for (const [k, v] of out) out.set(k, { ...v });
+    return out;
+  }
+
+  /** How many of the routine's runs are queued or running. */
+  activeCount(routineId: string): number {
+    let n = 0;
+    for (const r of this.all()) if (r.routineId === routineId && isActive(r)) n++;
+    return n;
   }
 
   costSince(sinceMs: number): number {
@@ -212,7 +269,7 @@ export class RunStore {
 
   /** At startup: runs a dead server left queued/running can never finish. Returns how many were closed. */
   markInterrupted(): number {
-    const runs = this.all();
+    const runs = this.editable();
     const now = Date.now();
     let n = 0;
     for (const r of runs) {
@@ -224,14 +281,15 @@ export class RunStore {
       r.durationMs = r.startedAt !== null ? Math.max(0, now - r.startedAt) : 0;
       n++;
     }
-    if (n) this.store.save(runs);
+    if (n) this.write(runs);
     return n;
   }
 
   /** The routine's queued/running run (a running one wins over a queued one). */
   active(routineId: string): Run | undefined {
     const mine = this.all().filter((r) => r.routineId === routineId && isActive(r));
-    return mine.find((r) => r.status === "running") ?? mine[0];
+    const r = mine.find((x) => x.status === "running") ?? mine[0];
+    return r && { ...r };
   }
 
   /**
@@ -242,7 +300,7 @@ export class RunStore {
     const runs = this.all();
     const mine = runs.filter((r) => r.routineId === routineId);
     if (!mine.length || mine.some(isActive)) return { removed: 0 };
-    this.store.save(runs.filter((r) => r.routineId !== routineId));
+    this.write(runs.filter((r) => r.routineId !== routineId));
     for (const r of mine) this.deleteLog(r.id);
     return { removed: mine.length };
   }

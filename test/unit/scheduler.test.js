@@ -510,6 +510,60 @@ describe("head-of-line blocking: a busy agent must not hold a queue slot", () =>
   });
 });
 
+describe("routine list with lastRun, and the per-routine queue cap", () => {
+  it("listRoutinesWithLastRun gives each routine its newest run from one pass over the history", async () => {
+    const r = rig({ agentOpts: { auto: true } });
+    const a = r.service.createRoutine(baseInput({ name: "A" })), b = r.service.createRoutine(baseInput({ name: "B" })), c = r.service.createRoutine(baseInput({ name: "C" }));
+    r.service.runNow(a.id); await flush();
+    r.runs.create(a.id, "schedule", "skipped", "automation paused");
+    r.service.runNow(b.id); await flush();
+    let latest = 0, listed = 0;
+    const lb = r.runs.latestByRoutine.bind(r.runs), ll = r.runs.list.bind(r.runs);
+    r.runs.latestByRoutine = () => { latest++; return lb(); };
+    r.runs.list = (...x) => { listed++; return ll(...x); };
+    const out = r.service.listRoutinesWithLastRun();
+    assert.equal(latest, 1);
+    assert.equal(listed, 0, "no per-routine run listing");
+    const by = Object.fromEntries(out.map((x) => [x.name, x]));
+    assert.deepEqual(Object.keys(by.A.lastRun).sort(), ["costUsd", "finishedAt", "id", "reason", "startedAt", "status"]);
+    assert.equal(by.A.lastRun.status, "skipped");
+    assert.equal(by.A.lastRun.reason, "automation paused");
+    assert.equal(by.B.lastRun.status, "succeeded");
+    assert.equal(by.B.lastRun.costUsd, 0.1);
+    assert.equal(typeof by.B.lastRun.startedAt, "number");
+    assert.equal(by.C.lastRun, null);
+    assert.equal(by.A.id, a.id, "the routine itself is unchanged");
+    assert.equal(c.id, by.C.id);
+  });
+
+  it("always_enqueue caps queued+running runs per routine at 25; extra firings are recorded skipped 'queue full (25)'", async () => {
+    const r = rig({ limit: 1 });
+    const rt = r.service.createRoutine(baseInput({ concurrency: "always_enqueue" }));
+    const runs = [];
+    for (let i = 0; i < 30; i++) runs.push(r.service.runNow(rt.id));
+    await flush();
+    const all = r.runs.list(rt.id, 100);
+    assert.equal(all.filter((x) => x.status === "running" || x.status === "queued").length, 25);
+    const skipped = all.filter((x) => x.status === "skipped");
+    assert.equal(skipped.length, 5);
+    assert.ok(skipped.every((x) => x.reason === "queue full (25)"), skipped.map((x) => x.reason).join("|"));
+    r.agents.finish(0); await flush();                           // a slot frees: the next firing is accepted again
+    assert.equal(r.service.runNow(rt.id).status, "queued");
+  });
+
+  it("the cap also bounds a catch-up burst", async () => {
+    const r = rig({ limit: 1 });
+    const rt = r.service.createRoutine(baseInput({ concurrency: "always_enqueue", catchUp: "enqueue_missed_with_cap" }));
+    for (let i = 0; i < 10; i++) r.service.runNow(rt.id);
+    r.clock.t = rt.nextRunAt + 40 * HOUR + 5 * 60000;
+    r.scheduler.tick();
+    await flush();
+    const all = r.runs.list(rt.id, 200);
+    assert.equal(all.filter((x) => x.status === "running" || x.status === "queued").length, 25);
+    assert.ok(all.some((x) => x.status === "skipped" && x.reason === "queue full (25)"));
+  });
+});
+
 describe("instance ownership of the schedules", () => {
   const fakeOwnership = (owner, port = 4321) => {
     const o = { acquires: 0, releases: 0, acquire() { o.acquires++; return owner; }, release() { o.releases++; }, isOwner: () => owner, ownerPort: () => port };

@@ -245,6 +245,20 @@ describe("routines API", () => {
     assert.equal(one.body.routineId, c.id);
   });
 
+  it("GET /api/routines carries each routine's lastRun (newest run of any status), null before the first", async () => {
+    const c = await create({ name: "with-last-run" });
+    const before = (await get("/api/routines")).body.find((x) => x.id === c.id);
+    assert.equal(before.lastRun, null);
+    await post(`/api/routines/${c.id}/run`, {});
+    const run = await finished(c.id);
+    const item = (await get("/api/routines")).body.find((x) => x.id === c.id);
+    assert.deepEqual(Object.keys(item.lastRun).sort(), ["costUsd", "finishedAt", "id", "reason", "startedAt", "status"]);
+    assert.equal(item.lastRun.id, run.id);
+    assert.equal(item.lastRun.status, "succeeded");
+    assert.equal(item.lastRun.costUsd, run.costUsd);
+    assert.equal(typeof item.lastRun.finishedAt, "number");
+  });
+
   it("GET /api/routines/:id/runs validates limit (integer 1..500, default 50)", async () => {
     const c = await create();
     for (let i = 0; i < 3; i++) assert.equal((await post(`/api/routines/${c.id}/run`, {})).status, 200);

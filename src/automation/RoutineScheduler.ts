@@ -18,6 +18,8 @@ export const MISSED_GRACE_MS = 120_000;
 const MISSED_COUNT_CAP = 1000;
 /** Most missed slots `enqueue_missed_with_cap` replays. */
 export const CATCH_UP_CAP = 25;
+/** Most queued + running runs one routine may have under `always_enqueue`; further firings are recorded as skipped. */
+export const MAX_ACTIVE_PER_ROUTINE = 25;
 
 const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
@@ -271,6 +273,9 @@ export class RoutineScheduler {
     const active = runs.active(r.id);
     if (active && policy === "coalesce_if_active") return this.record(r, trigger, "coalesced", `coalesced into run ${active.id}`);
     if (active && policy === "skip_if_active") return this.record(r, trigger, "skipped", `previous run ${active.id} is still ${active.status}`);
+    if (policy === "always_enqueue" && runs.activeCount(r.id) >= MAX_ACTIVE_PER_ROUTINE) {
+      return this.record(r, trigger, "skipped", `queue full (${MAX_ACTIVE_PER_ROUTINE})`);
+    }
     const run = runs.create(r.id, trigger, "queued");
     this.change();
     this.o.queue.enqueue(run);
