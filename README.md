@@ -180,7 +180,7 @@ agenv update
 
 ## Architecture
 
-- **Server**: Node.js + Express + WebSocket, manages PTY sessions via node-pty
+- **Server**: TypeScript (compiled to `dist/`) on Node.js + Express + WebSocket, manages PTY sessions via node-pty — see CONTRIBUTING.md for the layout
 - **Frontend**: Vanilla JS modules, xterm.js terminals, highlight.js code rendering
 - **Desktop**: Electron wrapper with sandboxed renderer (optional, install via `npm i -g electron`)
 - **Persistence**: Encrypted session state, command history, and scrollback stored in `~/.agenv-*`

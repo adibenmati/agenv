@@ -71,7 +71,7 @@ watch: ## Start with auto-reload on file changes
 		rm -f $(PIDFILE); \
 	fi
 	nodemon \
-		--watch server.js \
+		--watch dist \
 		--watch public/ \
 		--ext js,html,css \
 		--delay 500ms \

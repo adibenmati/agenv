@@ -17,9 +17,11 @@
     "pretest": "npm run build",
     "test": "node scripts/run-tests.js",
     "prepublishOnly": "npm run build && node scripts/run-tests.js",
-    "watch": "nodemon --watch server.js --watch public/ --ext js,html,css --delay 500ms -- server.js",
+    "build:watch": "tsc -w --preserveWatchOutput",
+    "test:e2e": "node test/e2e/run-all.js",
+    "watch": "nodemon --watch dist --watch public/ --ext js,html,css --delay 500ms -- server.js",
     "electron": "electron .",
-    "electron:dev": "nodemon --watch electron.js --watch server.js --watch public/ --ext js,html,css --delay 500ms --exec \"electron .\"",
+    "electron:dev": "nodemon --watch electron.js --watch dist --watch public/ --ext js,html,css --delay 500ms --exec \"electron .\"",
     "rebuild": "electron-rebuild -f -w @lydell/node-pty",
     "dist": "electron-builder",
     "dist:win": "electron-builder --win",
@@ -38,6 +40,7 @@
       "preload.js",
       "cli.js",
       "dist/**/*",
+      "!dist/**/*.map",
       "public/**/*",
       "scripts/manage.js",
       "package.json",
@@ -107,6 +110,7 @@
     "electron.js",
     "preload.js",
     "dist/",
+    "!dist/**/*.map",
     "public/",
     "scripts/manage.js",
     "assets/",
@@ -127,6 +131,7 @@
     "@types/ws": "^8.18.2",
     "electron": "^41.2.1",
     "electron-builder": "^26.0.12",
+    "playwright-core": "1.56",
     "typescript": "^5.9.3"
   }
 }
