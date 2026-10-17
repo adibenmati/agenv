@@ -22,3 +22,10 @@ being silently changed. Each entry: where it is in the baseline (`git show pre-t
 6. **A WebSocket message of `null` crashed the server** (L3324+ `ws.on("message")`: `JSON.parse("null")` → `msg.type` throws
    inside the handler → uncaught exception). Hardened in `WsGateway`; noted here because the baseline is vulnerable — any
    authenticated client (or a tunnel user with the token) could take the server down with one frame.
+7. **Git panel: commit (and any git value with a space) was broken** — FIXED in the port, recorded because it is a bug in the
+   shipped 1.4.2. Every git route ran `spawnSync("git", [...args], { shell: true })` (cmd.exe on Windows). Node does not quote
+   arguments in that mode, so the shell split them: committing "fix the login bug" ran `git commit -m fix the login bug` and
+   failed with `error: pathspec 'the' did not match any file(s) known to git` (reproduced on the baseline); file names with
+   spaces could not be staged; and a commit message such as `"; echo x > f; "` was executed as shell syntax. `GitService`
+   runs git directly (no shell), so arguments reach git verbatim. Also hardened: `--` before user-supplied paths, and
+   option-looking branch/remote names (`--mirror`, `--orphan`, …) are rejected with 400.

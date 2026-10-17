@@ -112,6 +112,11 @@ describe("HttpError", () => {
   it("carries a status and message", () => {
     const e = new HttpError(404, "Session not found");
     assert.equal(e.status, 404); assert.equal(e.message, "Session not found"); assert.ok(e instanceof Error);
+    assert.equal(e.body, undefined);
+  });
+  it("can carry the exact response body when the route's error shape is not { error }", () => {
+    const e = new HttpError(400, "Commit message required", { ok: false, output: "Commit message required" });
+    assert.deepEqual(e.body, { ok: false, output: "Commit message required" });
   });
 });
 
