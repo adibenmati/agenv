@@ -20,7 +20,9 @@ const resume = opt("--resume");
 const fork = argv.includes("--fork-session");
 const out = (o) => process.stdout.write((typeof o === "string" ? o : JSON.stringify(o)) + "\n");
 
-const sessionId = resume && !fork ? resume : crypto.randomUUID();
+if (mode === "fail") { process.stderr.write("fake claude exploded\n"); process.exit(1); }
+
+const sessionId =resume && !fork ? resume : crypto.randomUUID();
 if (tdir) {
   const target = path.join(tdir, sessionId + ".jsonl");
   const src = resume ? path.join(tdir, resume + ".jsonl") : null;
@@ -28,8 +30,6 @@ if (tdir) {
   else if (!fs.existsSync(target)) fs.writeFileSync(target, "");
   if (prompt !== "/compact") fs.appendFileSync(target, JSON.stringify({ type: "user", message: prompt }) + "\n");
 }
-
-if (mode === "fail") { process.stderr.write("fake claude exploded\n"); process.exit(1); }
 
 out({ type: "system", subtype: "init", session_id: sessionId });
 out({ type: "assistant", message: { content: [{ type: "text", text: "working" }] }, session_id: sessionId });
