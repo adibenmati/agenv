@@ -59,6 +59,13 @@ describe("apiAuth", () => {
     assert.equal(run(auth.apiAuth, t("POST", "/api/history")).nexted, true);
     assert.equal(run(auth.apiAuth, req({ method: "POST", path: "/api/file", query: { token: "T" } })).nexted, true);   // direct client
   });
+  it("the read-only guard is case-insensitive like Express routing", () => {
+    const { auth, policy } = mk(); policy.readOnly = true;
+    const t = (method, p) => req({ method, path: p, query: { token: "T" }, headers: { "x-forwarded-for": "1.1.1.1" } });
+    for (const p of ["/API/Agents/x/run", "/Api/Sessions", "/api/AGENTS", "/API/Claude/Conversations/a/fork"]) {
+      assert.equal(run(auth.apiAuth, t("POST", p)).res.statusCode, 403, p);
+    }
+  });
   it("exposes the tunnel helpers", () => {
     const { auth, policy } = mk(); policy.readOnly = true;
     const t = req({ headers: { "x-forwarded-for": "5.5.5.5, 6.6.6.6" } });

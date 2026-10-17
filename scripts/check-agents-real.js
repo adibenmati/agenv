@@ -1,22 +1,22 @@
 #!/usr/bin/env node
 // scripts/check-agents-real.js — opt-in check of agent conversation forking against the REAL claude CLI.
-// Spends real money (haiku, hard cap --max-budget-usd 0.05 per call). Run `npm run build` first (uses dist/).
+// Spends real money (haiku, hard cap --max-budget-usd 0.05 PER CALL, up to about 5 calls, so at most about 25 cents). Run `npm run build` first (uses dist/).
 //   AGENV_REAL_CLAUDE=1 npm run check:agents-real
 // Dry mode, no money: `node scripts/check-agents-real.js --against-fake` (or AGENV_CLAUDE_BIN=<fake-claude-cli.js>).
 // Exit codes: 0 all checks passed, 1 a check failed, 2 refused to run.
 "use strict";
 const fs = require("fs"), os = require("os"), path = require("path"), crypto = require("crypto");
-const { ClaudeRunner } = require("../dist/agents/ClaudeRunner");
-const { ConversationForker } = require("../dist/agents/ConversationForker");
-const { claudePaths } = require("../dist/claude/paths");
-
 const FAKE = path.join(__dirname, "..", "test", "fixtures", "fake-claude-cli.js");
 const fake = process.argv.includes("--against-fake") || /fake-claude-cli\.js$/i.test(process.env.AGENV_CLAUDE_BIN || "");
 if (!fake && process.env.AGENV_REAL_CLAUDE !== "1") {
-  console.error("Refusing to run: this check calls the real claude CLI and spends money (about 5 cents).\n" +
+  console.error("Refusing to run: this check calls the real claude CLI and spends money (up to about 25 cents: 5 calls, each capped at 5 cents).\n" +
     "Set AGENV_REAL_CLAUDE=1 to run it, or pass --against-fake for a dry run against the fake claude.");
   process.exit(2);
 }
+
+const { ClaudeRunner } = require("../dist/agents/ClaudeRunner");
+const { ConversationForker } = require("../dist/agents/ConversationForker");
+const { claudePaths } = require("../dist/claude/paths");
 
 const BUDGET = 0.05, TIMEOUT = 3 * 60 * 1000, MODEL = "haiku";
 const plan = { mode: "plan", allowedTools: [] };
@@ -30,7 +30,7 @@ const ownState = fake && !process.env.FAKE_CLAUDE_STATE;
 const runner = new ClaudeRunner(fake
   ? { bin: FAKE, env: { FAKE_CLAUDE_STATE: stateDir } }
   : {});
-let totalCost = 0;
+let totalCost = 0, resumeIdResult = "not determined";
 // Every call is capped and uses haiku, including those made inside ConversationForker (which asks for a larger budget).
 const capped = {
   run(spec, hooks) {
@@ -44,7 +44,15 @@ const work = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agenv-real-c
 const projects = claudePaths(os.homedir()).projects;
 const ids = new Set();
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const warned = new Set();
+
+/** Only ever builds a path from a well-formed uuid; anything else is skipped with a warning. */
 function findTranscript(id) {
+  if (!UUID_RE.test(String(id))) {
+    if (!warned.has(id)) { warned.add(id); console.log(`WARN  ignoring conversation id that is not a uuid: ${JSON.stringify(String(id)).slice(0, 80)}`); }
+    return null;
+  }
   if (fake) { const f = path.join(stateDir, "transcripts", id + ".jsonl"); return fs.existsSync(f) ? f : null; }
   const direct = path.join(projects, encode(work), id + ".jsonl");
   if (fs.existsSync(direct)) return direct;
@@ -82,7 +90,9 @@ async function main() {
     const r = await capped.run({ cwd: work, prompt: "--what is the code word I gave you? Reply with only that word.", resume: forkId, permission: plan }).done;
     check(r.status === "succeeded", "flag-like prompt after -- works", r.error || "");
     if (r.conversationId) ids.add(r.conversationId);
-    console.log(`INFO  resumed run session_id: ${r.conversationId} (${r.conversationId === forkId ? "same as the resumed fork id" : "NEW id, differs from the resumed fork id " + forkId})`);
+    const same = r.conversationId === forkId;
+    resumeIdResult = same ? "same id" : "new id";
+    console.log(`RESULT: ${resumeIdResult} - resumed run session_id ${r.conversationId} ${same ? "equals" : "differs from"} the resumed id ${forkId} (agenv handles both: an agent follows the id its last successful run reports)`);
     if (!fake) check(r.text.includes(word), "fork remembers the code word", JSON.stringify(r.text.slice(0, 80)));
     else console.log("INFO  code word check skipped against the fake claude");
   }
@@ -91,7 +101,9 @@ async function main() {
   try {
     const c = await forker.fork({ sourceId, cwd: work, adoptionPrompt: "Reply with only the word ready.", compact: true });
     ids.add(c.conversationId);
-    check(true, "compact fork (/compact under --permission-mode plan)", c.conversationId);
+    const tf = findTranscript(c.conversationId);
+    const marked = !!tf && /"subtype"\s*:\s*"compact_boundary"/.test(fs.readFileSync(tf, "utf8"));
+    check(marked, "compact fork (/compact under --permission-mode plan) wrote a compact_boundary record", tf ? c.conversationId : "transcript not found for " + c.conversationId);
   } catch (e) {
     if (e.orphanConversationId) ids.add(e.orphanConversationId);
     check(false, "compact fork (/compact under --permission-mode plan)", e.message);
@@ -114,6 +126,7 @@ async function main() {
     try { fs.rmSync(work, { recursive: true, force: true }); } catch {}
     if (ownState) try { fs.rmSync(stateDir, { recursive: true, force: true }); } catch {}
     console.log(`INFO  cleanup: removed ${removed} transcript(s) and the temp folder`);
+    console.log(`RESULT: resumed run session_id: ${resumeIdResult}`);
     console.log(`INFO  total cost: $${totalCost.toFixed(4)}`);
     const ok = results.length > 0 && results.every(Boolean);
     console.log(ok ? "\nALL CHECKS PASSED" : "\nSOME CHECKS FAILED");

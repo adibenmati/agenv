@@ -14,7 +14,7 @@ afterEach(() => { while (tmp.length) fs.rmSync(tmp.pop(), { recursive: true, for
 const run = (args, env) => {
   const home = mkdir();
   const e = { ...process.env, HOME: home, USERPROFILE: home, ...env };
-  delete e.AGENV_CLAUDE_BIN; if (!("AGENV_REAL_CLAUDE" in (env || {}))) delete e.AGENV_REAL_CLAUDE;
+  delete e.AGENV_CLAUDE_BIN; delete e.FAKE_CLAUDE_MODE; delete e.FAKE_CLAUDE_STATE; if (!("AGENV_REAL_CLAUDE" in (env || {}))) delete e.AGENV_REAL_CLAUDE;
   Object.assign(e, env || {});
   return spawnSync(process.execPath, [SCRIPT, ...args], { env: e, encoding: "utf8", timeout: 60000 });
 };
@@ -45,5 +45,23 @@ describe("check-agents-real script", () => {
     assert.equal(r.status, 1);
     assert.match(r.stdout, /FAIL.*compact/i);
     assert.match(r.stdout, /FINDING/);
+  });
+});
+
+describe("check-agents-real hardening", () => {
+  it("the refusal comes before the dist requires (exit 2 even when dist is missing)", () => {
+    const src = fs.readFileSync(SCRIPT, "utf8");
+    assert.ok(src.indexOf("process.exit(2)") < src.indexOf('require("../dist/'));
+  });
+  it("prints which session_id outcome the resumed run had", () => {
+    const r = run(["--against-fake"], {});
+    assert.match(r.stdout, /RESULT: same id/);
+    const n = run(["--against-fake"], { FAKE_CLAUDE_NEWID: "1" });
+    assert.equal(n.status, 0, n.stdout + n.stderr);
+    assert.match(n.stdout, /RESULT: new id/);
+  });
+  it("the compact check asserts a compact_boundary record in the transcript", () => {
+    const r = run(["--against-fake"], {});
+    assert.match(r.stdout, /PASS.*compact_boundary/);
   });
 });

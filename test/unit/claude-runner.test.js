@@ -167,3 +167,29 @@ describe("ClaudeRunner", () => {
     assert.ok(r.error);
   });
 });
+
+describe("ClaudeRunner spawn failures on Windows", () => {
+  const missing = path.join(os.tmpdir(), "agenv-no-such-claude-bin");
+  it("ENOENT on win32 with no shim found fails with a message that names AGENV_CLAUDE_BIN", async () => {
+    const r = await new ClaudeRunner({ bin: missing, platform: "win32", resolveShim: () => null }).run(spec()).done;
+    assert.equal(r.status, "failed");
+    assert.match(r.error, /Could not start claude \(ENOENT\)/);
+    assert.match(r.error, /AGENV_CLAUDE_BIN/);
+    assert.match(r.error, /cli\.js/);
+  });
+  it("a resolver that finds a cli.js makes the run go through node (process.execPath)", async () => {
+    const state = mkdir(); let asked = 0;
+    const rn = new ClaudeRunner({ bin: missing, platform: "win32", env: { FAKE_CLAUDE_MODE: "ok", FAKE_CLAUDE_STATE: state }, resolveShim: (b) => { asked++; assert.equal(b, missing); return FAKE; } });
+    const r = await rn.run(spec({ prompt: "via shim" })).done;
+    assert.equal(r.status, "succeeded", r.error); assert.equal(asked, 1);
+    assert.equal(calls(state).length, 1); assert.equal(calls(state)[0].argv.at(-1), "via shim");
+  });
+  it("the resolver is not consulted off Windows, and the plain message is kept", async () => {
+    let asked = 0;
+    const r = await new ClaudeRunner({ bin: missing, platform: "linux", resolveShim: () => { asked++; return FAKE; } }).run(spec()).done;
+    assert.equal(r.status, "failed"); assert.equal(asked, 0); assert.match(r.error, /Could not start claude/);
+  });
+  it("never uses a shell", () => {
+    assert.ok(!/shell:\s*true/.test(fs.readFileSync(path.join(__dirname, "..", "..", "src", "agents", "ClaudeRunner.ts"), "utf8")));
+  });
+});

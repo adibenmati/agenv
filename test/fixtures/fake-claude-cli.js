@@ -31,6 +31,7 @@ if (tdir) {
   if (fork && src && fs.existsSync(src)) fs.writeFileSync(target, fs.readFileSync(src));
   else if (!fs.existsSync(target)) fs.writeFileSync(target, "");
   if (prompt !== "/compact") fs.appendFileSync(target, JSON.stringify({ type: "user", message: prompt }) + "\n");
+  else fs.appendFileSync(target, JSON.stringify({ type: "system", subtype: "compact_boundary" }) + "\n");
 }
 
 if (mode === "fail-late" || (mode === "fail-compact" && prompt === "/compact")) { process.stderr.write("fake claude died late\n"); process.exit(1); }

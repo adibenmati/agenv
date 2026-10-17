@@ -108,7 +108,7 @@ export class AuthService {
     if (this.isReadOnlyTunnel(req)) {
       const method = String(req.method || "").toUpperCase();
       if ((method === "POST" || method === "PUT" || method === "DELETE") &&
-          WRITE_PATHS.some((p) => String(req.path || "").startsWith(p))) {
+          WRITE_PATHS.some((p) => String(req.path || "").toLowerCase().startsWith(p))) {
         res.status(403).json({ error: "Read-only mode: write operations disabled via tunnel" });
         return;
       }

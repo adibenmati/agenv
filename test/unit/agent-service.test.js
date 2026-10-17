@@ -10,6 +10,7 @@ const { AgentStore } = require("../../dist/agents/AgentStore");
 const { ClaudeRunner } = require("../../dist/agents/ClaudeRunner");
 const { ConversationForker } = require("../../dist/agents/ConversationForker");
 const { AgentService } = require("../../dist/agents/AgentService");
+const { TrackedRunner } = require("../../dist/agents/TrackedRunner");
 
 const FAKE = path.join(__dirname, "..", "fixtures", "fake-claude-cli.js");
 const tmp = [];
@@ -21,7 +22,7 @@ function rig(mode = "ok", over = {}) {
   const isDir = over.isDir || ((p) => { try { return fs.statSync(p).isDirectory(); } catch { return false; } });
   const js = new JsonStore({ path: path.join(dir, "agents.enc"), crypto: new Crypto(path.join(dir, "key")), fallback: () => [] });
   const store = new AgentStore(js, isDir);
-  const runner = new ClaudeRunner({ bin: FAKE, env: { FAKE_CLAUDE_MODE: mode, FAKE_CLAUDE_STATE: state } });
+  const runner = new TrackedRunner(new ClaudeRunner({ bin: FAKE, env: { FAKE_CLAUDE_MODE: mode, FAKE_CLAUDE_STATE: state } }));
   const created = [];
   const list = over.sessions || [];
   const sessions = { create: (o) => { created.push(o); return { id: created.length, ...o }; }, get: (id) => list.find((s) => s.id === id), all: () => list };
@@ -104,15 +105,65 @@ describe("AgentService creation", () => {
   });
 });
 
+describe("AgentService source id validation", () => {
+  it("createFromConversation refuses a source id that looks like a flag (400) before any claude call", async () => {
+    for (const mode of ["fork", "fork-compact", "distill-briefing", "distill-skill"]) {
+      const r = rig();
+      await assert.rejects(r.svc.createFromConversation(conv(r, { mode, sourceConversationId: '--settings={"hooks":1}' })), (e) => e instanceof HttpError && e.status === 400, mode);
+      assert.equal(calls(r.state).length, 0); assert.equal(r.store.list().length, 0);
+    }
+  });
+  it("AgentStore.add refuses a conversation id that is not plain", () => {
+    const r = rig();
+    assert.throws(() => r.store.add(input(r.cwd), { kind: "blank" }, "--settings=x"), (e) => e.status === 400);
+    assert.equal(r.store.list().length, 0);
+  });
+});
+
+describe("AgentService.cancelAll reaches creation runs", () => {
+  it("cancelAll during a slow fork cancels it", async () => {
+    const r = rig("hang"); withSource(r.state);
+    const p = r.svc.createFromConversation(conv(r));
+    await until(() => events(r.state).length > 0);
+    r.svc.cancelAll();
+    await assert.rejects(p, (e) => e instanceof HttpError && /ancel/.test(e.message));
+    assert.equal(r.store.list().length, 0);
+  });
+});
+
 describe("AgentService terminals", () => {
   it('openTerminal creates a session in agent.cwd that runs "claude --resume <id>"', () => {
     const r = rig(); const a = r.svc.createBlank(input(r.cwd)); r.store.update(a.id, { conversationId: "c-1" });
     r.svc.openTerminal(a.id);
     assert.deepEqual(r.created, [{ cwd: r.cwd, name: "Bob", runCommand: "claude --resume c-1" }]);
   });
-  it('openTerminal on an agent with no conversation runs plain "claude"', () => {
+  it("openTerminal on a blank agent binds a fresh conversation: --session-id <uuid>, stored, then --resume", () => {
     const r = rig(); const a = r.svc.createBlank(input(r.cwd));
-    r.svc.openTerminal(a.id); assert.equal(r.created[0].runCommand, "claude");
+    r.svc.openTerminal(a.id);
+    const m = /^claude --session-id ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/.exec(r.created[0].runCommand);
+    assert.ok(m, r.created[0].runCommand);
+    assert.equal(r.store.get(a.id).conversationId, m[1]);
+    r.svc.openTerminal(a.id);
+    assert.equal(r.created[1].runCommand, `claude --resume ${m[1]}`);
+  });
+  it("openTerminal adds the briefing as a cwd-relative --append-system-prompt-file when it exists inside the folder", () => {
+    const r = rig(); const f = path.join(r.cwd, ".claude", "agenv-briefings", "Bob.md");
+    fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, "hi");
+    const a = r.svc.createBlank(input(r.cwd, { briefingFile: f }));
+    r.svc.openTerminal(a.id);
+    assert.match(r.created[0].runCommand, /^claude --session-id [0-9a-f-]{36} --append-system-prompt-file \.claude\/agenv-briefings\/Bob\.md$/);
+    r.svc.openTerminal(a.id);
+    assert.match(r.created[1].runCommand, /^claude --resume [0-9a-f-]{36} --append-system-prompt-file \.claude\/agenv-briefings\/Bob\.md$/);
+  });
+  it("openTerminal omits a briefing that is missing, outside the folder or has an unsafe path (and does not fail)", () => {
+    const r = rig();
+    const missing = r.svc.createBlank(input(r.cwd, { name: "m1", briefingFile: path.join(r.cwd, "nope.md") }));
+    const outside = path.join(mkdir(), "o.md"); fs.writeFileSync(outside, "x");
+    const out = r.svc.createBlank(input(r.cwd, { name: "m2", briefingFile: outside }));
+    const odd = path.join(r.cwd, "has space & more.md"); fs.writeFileSync(odd, "x");
+    const unsafe = r.svc.createBlank(input(r.cwd, { name: "m3", briefingFile: odd }));
+    for (const a of [missing, out, unsafe]) r.svc.openTerminal(a.id);
+    for (const c of r.created) assert.match(c.runCommand, /^claude --session-id [0-9a-f-]{36}$/);
   });
   it("openTerminal refuses a conversation id that is not plain", () => {
     const r = rig(); const a = r.svc.createBlank(input(r.cwd)); r.store.get = () => ({ ...a, conversationId: "x & calc" });   // a corrupt stored value; the store itself now refuses to write one
@@ -197,14 +248,17 @@ describe("AgentService.run", () => {
     await r.svc.run(a.id, "x");
     const cur = r.store.get(a.id); assert.equal(cur.conversationId, ""); assert.equal(typeof cur.lastRunAt, "number");
   });
-  it("a later run returning a different session_id does not change the stored id", async () => {
+  it("a later successful run returning a different session_id rebinds the agent; a failed run never changes it", async () => {
     const r = rig(); const a = r.svc.createBlank(input(r.cwd));
     const first = await r.svc.run(a.id, "one");
-    const r2 = new ClaudeRunner({ bin: FAKE, env: { FAKE_CLAUDE_MODE: "ok", FAKE_CLAUDE_STATE: r.state, FAKE_CLAUDE_NEWID: "1" } });
-    const svc2 = new AgentService({ store: r.store, forker: new ConversationForker({ runner: r2 }), runner: r2, sessions: { create() {}, get() {}, all: () => [] }, isDir: () => true });
-    const second = await svc2.run(a.id, "two");
+    const mk = (mode, env = {}) => { const rn = new ClaudeRunner({ bin: FAKE, env: { FAKE_CLAUDE_MODE: mode, FAKE_CLAUDE_STATE: r.state, ...env } });
+      return new AgentService({ store: r.store, forker: new ConversationForker({ runner: rn }), runner: rn, sessions: { create() {}, get() {}, all: () => [] }, isDir: () => true }); };
+    const second = await mk("ok", { FAKE_CLAUDE_NEWID: "1" }).run(a.id, "two");
     assert.notEqual(second.conversationId, first.conversationId);
-    assert.equal(r.store.get(a.id).conversationId, first.conversationId);
+    assert.equal(r.store.get(a.id).conversationId, second.conversationId);
+    const failed = await mk("fail", { FAKE_CLAUDE_NEWID: "1" }).run(a.id, "three");
+    assert.equal(failed.status, "failed");
+    assert.equal(r.store.get(a.id).conversationId, second.conversationId);
   });
   it("cancelAll cancels a running run and stops queued ones from spawning", async () => {
     const r = rig("hang"); const a = r.svc.createBlank(input(r.cwd));

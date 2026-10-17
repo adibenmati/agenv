@@ -213,4 +213,21 @@ describe("ConversationForker hardening", () => {
       return true;
     });
   });
+  it("the compact run's conversation id wins when it differs from the fork's", async () => {
+    const state = mkdir(); withSource(state);
+    const f = new ConversationForker({ runner: new ClaudeRunner({ bin: FAKE, env: { FAKE_CLAUDE_MODE: "ok", FAKE_CLAUDE_STATE: state, FAKE_CLAUDE_NEWID: "1" } }) });
+    const r = await f.fork({ sourceId: "src-1", cwd: mkdir(), adoptionPrompt: "x", compact: true });
+    const second = calls(state)[1].argv, firstId = second[second.indexOf("--resume") + 1];
+    assert.notEqual(r.conversationId, firstId); assert.notEqual(r.conversationId, "src-1");
+    assert.ok(fs.existsSync(path.join(state, "transcripts", r.conversationId + ".jsonl")));
+  });
+  it("the compact failure's body carries orphanConversationId for the client", async () => {
+    const state = mkdir(); withSource(state);
+    await assert.rejects(forker("fail-compact", state).fork({ sourceId: "src-1", cwd: mkdir(), adoptionPrompt: "x", compact: true }), (e) => {
+      assert.equal(e.status, 502);
+      assert.equal(e.body.orphanConversationId, e.orphanConversationId);
+      assert.equal(typeof e.body.error, "string"); assert.match(e.body.error, /died late/);
+      return true;
+    });
+  });
 });

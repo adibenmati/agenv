@@ -1,14 +1,10 @@
 import { Router } from "express";
-import { isSafeId } from "../../agents/Agent";
 import { HttpError } from "../../core/HttpError";
+import { safeId } from "../../core/ids";
 import type { AppDeps } from "../AppDeps";
 import { wrap } from "../errors";
 
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
-const safeId = (v: unknown): string => {
-  if (!isSafeId(v)) throw new HttpError(400, "invalid id");
-  return v;
-};
 
 /** Named agents: create (blank, from a session, fork or distill), duplicate, open, run; plus conversation fork and size estimate. */
 export function agentsRouter(d: AppDeps): Router {

@@ -270,6 +270,35 @@ describe("agents API with a failing claude", () => {
   });
 });
 
+describe("agents API when only the compact step fails", () => {
+  let ctx;
+  before(async () => { ctx = await boot("fail-compact"); }, { timeout: 30000 });
+  after(async () => { await stopProcess(ctx.server.proc); rmAll(ctx.dirs); });
+
+  it("502 with orphanConversationId so the client can tell the user a fork was left behind", async () => {
+    const r = await post("/api/agents/from-conversation", { name: "half", specialty: "x", sourceConversationId: "abc-123", mode: "fork-compact", cwd: ctx.work });
+    assert.equal(r.status, 502, JSON.stringify(r.body));
+    assert.match(r.body.orphanConversationId, /^[0-9a-f-]{36}$/);
+    assert.equal(typeof r.body.error, "string");
+    assert.deepEqual((await get("/api/agents")).body, []);
+  });
+});
+
+describe("agents API source id validation", () => {
+  let ctx;
+  before(async () => { ctx = await boot(); }, { timeout: 30000 });
+  after(async () => { await stopProcess(ctx.server.proc); rmAll(ctx.dirs); });
+
+  it("a flag-like sourceConversationId is a 400 and claude is never called", async () => {
+    for (const mode of ["fork", "distill-briefing"]) {
+      const r = await post("/api/agents/from-conversation", { name: "evil", specialty: "x", sourceConversationId: '--settings={"hooks":1}', mode, cwd: ctx.work });
+      assert.equal(r.status, 400, JSON.stringify(r.body));
+    }
+    assert.equal((await post("/api/claude/conversations/" + encodeURIComponent('--settings={"hooks":1}') + "/fork", { cwd: ctx.work })).status, 400);
+    assert.ok(!fs.existsSync(path.join(ctx.state, "calls.jsonl")));
+  });
+});
+
 describe("agents over a read-only tunnel", () => {
   let ctx;
   before(async () => { ctx = await boot(); }, { timeout: 30000 });
@@ -286,6 +315,8 @@ describe("agents over a read-only tunnel", () => {
       [post, `/api/agents/${a.id}/run`, { prompt: "hi" }],
       [post, `/api/agents/${a.id}/open`, {}],
       [post, "/api/claude/conversations/abc/fork", { cwd: ctx.work }],
+      [post, `/API/Agents/${a.id}/run`, { prompt: "hi" }],
+      [post, "/Api/Sessions", { cwd: ctx.work }],
     ]) {
       const r = await (b === undefined ? fn(p, tunnel) : fn(p, b, tunnel));
       assert.equal(r.status, 403, p + " -> " + r.status);

@@ -5,6 +5,7 @@ import type { Agent } from "./agents/Agent";
 import { AgentService } from "./agents/AgentService";
 import { AgentStore } from "./agents/AgentStore";
 import { ClaudeRunner } from "./agents/ClaudeRunner";
+import { TrackedRunner } from "./agents/TrackedRunner";
 import { ConversationForker } from "./agents/ConversationForker";
 import { ClaudeLinker } from "./claude/ClaudeLinker";
 import { ClaudeMdService } from "./claude/ClaudeMdService";
@@ -107,7 +108,7 @@ export function buildRuntime(o: RuntimeOptions): Runtime {
     defs: savedState && Array.isArray(savedState.sessionGroups) ? savedState.sessionGroups : [],
   });
   const analyzer = new OutputAnalyzer(bus, isRealDir);
-  const claudeRunner = new ClaudeRunner();
+  const claudeRunner = new TrackedRunner(new ClaudeRunner());
   const agents = new AgentService({
     store: agentStore, runner: claudeRunner, forker: new ConversationForker({ runner: claudeRunner }), sessions, isDir: isRealDir,
   });

@@ -1,6 +1,6 @@
-import { ChildProcess, spawn, spawnSync } from "child_process";
+import { ChildProcess, execFileSync, spawn, spawnSync } from "child_process";
 import * as fs from "fs";
-import { dirname } from "path";
+import { dirname, join } from "path";
 import { Permission } from "./Agent";
 
 export interface RunSpec {
@@ -96,13 +96,32 @@ class LiveLog {
   }
 }
 
+
+/**
+ * On Windows an npm-installed claude is a `claude.cmd` wrapper, which cannot be spawned without a shell. Finds the
+ * `cli.js` the wrapper runs (next to it, under node_modules) so it can be started through node instead. Null if not found.
+ */
+export function resolveNpmClaude(): string | null {
+  let out: string;
+  try { out = execFileSync("where", ["claude"], { encoding: "utf8", windowsHide: true, timeout: 5000, stdio: ["ignore", "pipe", "ignore"] }); } catch { return null; }
+  for (const line of out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)) {
+    const cli = join(dirname(line), "node_modules", "@anthropic-ai", "claude-code", "cli.js");
+    if (fs.existsSync(cli)) return cli;
+  }
+  return null;
+}
+
 export class ClaudeRunner {
   private bin: string;
   private env: NodeJS.ProcessEnv;
+  private platform: string;
+  private resolveShim: (bin: string) => string | null;
 
-  constructor(o: { bin?: string; env?: NodeJS.ProcessEnv } = {}) {
+  constructor(o: { bin?: string; env?: NodeJS.ProcessEnv; platform?: string; resolveShim?: (bin: string) => string | null } = {}) {
     this.bin = o.bin ?? (process.env.AGENV_CLAUDE_BIN || "claude");
     this.env = o.env ?? {};
+    this.platform = o.platform ?? process.platform;
+    this.resolveShim = o.resolveShim ?? (() => resolveNpmClaude());
   }
 
   run(spec: RunSpec, hooks: RunHooks = {}): RunHandle {
@@ -152,49 +171,68 @@ export class ClaudeRunner {
       if (!force) force = setTimeout(() => finish(null), KILL_GRACE_MS);   // a stuck pipe must not hang the caller
     };
 
-    const isJs = /\.js$/i.test(this.bin);
-    const args = buildArgs(spec);
-    try {
-      child = spawn(isJs ? process.execPath : this.bin, isJs ? [this.bin, ...args] : args, {
-        cwd: spec.cwd,
-        env: { ...process.env, ...this.env },
-        shell: false,
-        detached: process.platform !== "win32",
-        windowsHide: true,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-    } catch (e) {
-      spawnError = `Could not start claude: ${(e as Error).message}`;
+    // A launch that fails on Windows with ENOENT/EINVAL is usually an npm `claude.cmd` wrapper: retry once through its cli.js.
+    let attempt = 0, retried = false, launched = this.bin;
+    const failSpawn = (e: NodeJS.ErrnoException, mine: number): void => {
+      if (mine !== attempt || settled) return;
+      const retryable = this.platform === "win32" && (e.code === "ENOENT" || e.code === "EINVAL") && !/\.js$/i.test(launched);
+      if (retryable && !retried) {
+        retried = true;
+        const cli = this.resolveShim(this.bin);
+        if (cli) { launch(cli); return; }
+      }
+      spawnError = retryable
+        ? `Could not start claude (${e.code}). If claude was installed with npm, set AGENV_CLAUDE_BIN to ...\node_modules\@anthropic-ai\claude-code\cli.js`
+        : `Could not start claude: ${e.message}`;
       finish(null);
-      return { done, cancel: () => {} };
-    }
-
-    let pending = "";
-    const onLine = (line: string): void => {
-      if (!line.trim()) return;
-      log.add(line);
-      let ev: unknown;
-      try { ev = JSON.parse(line); } catch { return; }
-      if (ev === null || typeof ev !== "object") return;
-      if ((ev as { type?: unknown }).type === "result") result = ev as Record<string, unknown>;
-      try { hooks.onEvent?.(ev); } catch {}
     };
-    child.stdout!.setEncoding("utf8");
-    child.stdout!.on("data", (chunk: string) => {
-      pending += chunk;
-      if (pending.length > MAX_LINE && pending.indexOf("\n") < 0) { onLine(pending); pending = ""; }
-      let i: number;
-      while ((i = pending.indexOf("\n")) >= 0) { onLine(pending.slice(0, i).replace(/\r$/, "")); pending = pending.slice(i + 1); }
-    });
-    child.stderr!.setEncoding("utf8");
-    child.stderr!.on("data", (chunk: string) => {
-      if (stderr.length < 64 * 1024) stderr += chunk;
-      for (const l of chunk.split(/\r?\n/)) if (l) log.add("[stderr] " + l);
-    });
-    child.on("error", (e) => { spawnError = `Could not start claude: ${e.message}`; finish(null); });
-    child.on("close", (code) => { onLine(pending); pending = ""; finish(code); });
 
-    timer = setTimeout(() => { timedOut = true; kill(); }, spec.timeoutMs);
+    const launch = (bin: string): void => {
+      const mine = ++attempt;
+      launched = bin;
+      const isJs = /\.js$/i.test(bin);
+      const args = buildArgs(spec);
+      let c: ChildProcess;
+      try {
+        c = spawn(isJs ? process.execPath : bin, isJs ? [bin, ...args] : args, {
+          cwd: spec.cwd,
+          env: { ...process.env, ...this.env },
+          shell: false,   // never a shell: prompts are arbitrary text
+          detached: process.platform !== "win32",
+          windowsHide: true,
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+      } catch (e) { failSpawn(e as NodeJS.ErrnoException, mine); return; }
+      child = c;
+
+      let pending = "";
+      const onLine = (line: string): void => {
+        if (!line.trim()) return;
+        log.add(line);
+        let ev: unknown;
+        try { ev = JSON.parse(line); } catch { return; }
+        if (ev === null || typeof ev !== "object") return;
+        if ((ev as { type?: unknown }).type === "result") result = ev as Record<string, unknown>;
+        try { hooks.onEvent?.(ev); } catch {}
+      };
+      c.stdout!.setEncoding("utf8");
+      c.stdout!.on("data", (chunk: string) => {
+        pending += chunk;
+        if (pending.length > MAX_LINE && pending.indexOf("\n") < 0) { onLine(pending); pending = ""; }
+        let i: number;
+        while ((i = pending.indexOf("\n")) >= 0) { onLine(pending.slice(0, i).replace(/\r$/, "")); pending = pending.slice(i + 1); }
+      });
+      c.stderr!.setEncoding("utf8");
+      c.stderr!.on("data", (chunk: string) => {
+        if (stderr.length < 64 * 1024) stderr += chunk;
+        for (const l of chunk.split(/\r?\n/)) if (l) log.add("[stderr] " + l);
+      });
+      c.on("error", (e) => failSpawn(e as NodeJS.ErrnoException, mine));
+      c.on("close", (code) => { if (mine !== attempt) return; onLine(pending); pending = ""; finish(code); });
+    };
+    launch(this.bin);
+
+    if (!settled) timer = setTimeout(() => { timedOut = true; kill(); }, spec.timeoutMs);
 
     return { done, cancel: () => { if (settled || cancelled) return; cancelled = true; kill(); } };
   }

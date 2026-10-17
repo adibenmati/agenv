@@ -1,6 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
-import { isSafeId } from "../agents/Agent";
+import { isSafeId } from "../core/ids";
 import { decodeClaudeProjectPath } from "./paths";
 import type { TranscriptScanner } from "./TranscriptScanner";
 

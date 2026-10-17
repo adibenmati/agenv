@@ -20,7 +20,7 @@ async function request(path, opts) {
   try { resp = await fetch(api(path), opts); } catch (e) { throw new Error("Network error: " + e.message); }
   let data = null;
   try { data = await resp.json(); } catch {}
-  if (!resp.ok) { const err = new Error((data && data.error) || "Request failed (" + resp.status + ")"); err.status = resp.status; err.code = data && data.code; throw err; }
+  if (!resp.ok) { const err = new Error((data && data.error) || "Request failed (" + resp.status + ")"); err.status = resp.status; err.code = data && data.code; if (data && data.orphanConversationId) err.orphanConversationId = data.orphanConversationId; throw err; }
   return data;
 }
 
@@ -202,6 +202,7 @@ function openEditDialog(a) {
     <label class="ag-label">Folder<input class="ask-input ag-cwd" type="text" spellcheck="false" /></label>
     <label class="ag-label">Model (optional)<input class="ask-input ag-model" type="text" spellcheck="false" /></label>
     <label class="ag-label">Instructions<textarea class="ask-input ag-instructions" rows="3" spellcheck="false"></textarea></label>
+    <div class="ag-estimate-note">Instructions, model, extra folders and MCP config apply to headless runs only. Opening the terminal resumes the conversation (with the briefing file, if any).</div>
     <div class="ag-err" hidden></div>
     <div class="ask-actions"><button class="ask-btn" data-r="cancel">Cancel</button><button class="ask-btn primary ag-save" data-r="ok">Save</button></div>`);
   const q = (s) => ov.querySelector(s);
@@ -293,7 +294,7 @@ export async function openCreateDialog(prefill) {
   let conversations = [], sessions = [];
   let est = null, estState = "idle", estSeq = 0, busy = false, needOverwrite = false, overwriteKey = "", cwdTouched = false;
   const hints = {
-    blank: "An empty agent. Its conversation starts the first time it runs or its terminal is opened.",
+    blank: "An empty agent. Its conversation starts the first time it runs or its terminal is opened. Instructions, model, extra folders and MCP config apply to headless runs only; the terminal gets the briefing file, if any.",
     session: "Binds the conversation a session is running. No Claude call, no cost; the session keeps using that conversation.",
     conversation: "Starts from a past conversation. The source is never changed.",
     duplicate: "Copies an agent's profile and forks its conversation.",
@@ -350,6 +351,7 @@ export async function openCreateDialog(prefill) {
     h += `Estimated cost up to <span class="ag-est-cost">${esc(fmtUsd(est.estimatedCostUsd))}</span>.${esc(note)}</div>`;
     h += `<div class="ag-est-basis">${esc(est.basis || "")}</div>`;
     h += `<div class="ag-est-basis">Creating spends real tokens, nothing runs until you click Create.</div>`;
+    if (est.estimatedCostUsd > 1) h += `<div class="ag-est-warn">Estimate exceeds the $1 creation budget; the fork may fail.</div>`;
     if (est.suggestCompact && m === "fork") {
       h += `<div class="ag-compact-hint">This conversation is large. Fork + compact is recommended: the agent re-reads less on every run. <button class="ag-use-compact" type="button">Use Fork + compact</button></div>`;
     }
@@ -403,7 +405,8 @@ export async function openCreateDialog(prefill) {
     } catch (e) {
       busy = false;
       if (isDistill() && e.status === 409 && e.code === "exists") needOverwrite = true;
-      toast("Could not create the agent: " + e.message, "error");
+      const orphan = e.orphanConversationId ? " A forked conversation (" + e.orphanConversationId + ") was created before this failed; it can be deleted from Claude search." : "";
+      toast("Could not create the agent: " + e.message + orphan, "error");
       const el = q(".ag-err"); el.textContent = e.message; el.hidden = false;
       sync();
     }

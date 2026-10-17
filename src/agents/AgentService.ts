@@ -1,8 +1,11 @@
+import * as crypto from "crypto";
 import * as fs from "fs";
+import * as path from "path";
 import { HttpError } from "../core/HttpError";
 import type { Session } from "../sessions/Session";
 import type { SessionManager } from "../sessions/SessionManager";
-import { Agent, AgentInput, isSafeId, validateAgentInput } from "./Agent";
+import { safeId } from "../core/ids";
+import { Agent, AgentInput, validateAgentInput } from "./Agent";
 import type { AgentStore } from "./AgentStore";
 import type { RunResult, RunSpec, RunHandle } from "./ClaudeRunner";
 import type { ConversationForker } from "./ConversationForker";
@@ -12,7 +15,8 @@ export type CreationMode = "fork" | "fork-compact" | "distill-briefing" | "disti
 const DEFAULT_BUDGET_USD = 2;
 const DEFAULT_TIMEOUT_MS = 20 * 60 * 1000;
 
-interface Runner { run(spec: RunSpec): RunHandle }
+/** `cancelAll`, when present, also cancels runs other users of the same runner (the forker) started. */
+interface Runner { run(spec: RunSpec): RunHandle; cancelAll?(): void }
 
 export interface AgentServiceDeps {
   store: AgentStore;
@@ -58,10 +62,11 @@ export class AgentService {
   async createFromConversation(o: {
     name: string; specialty: string; sourceConversationId: string; cwd: string; mode: CreationMode; overwrite?: boolean;
   }): Promise<Agent> {
-    const base = validateAgentInput({ ...blankInput(), name: o.name, specialty: o.specialty, cwd: o.cwd }, { isDir: this.d.isDir });
-    this.assertNameFree(base.name);
     const sourceId = o.sourceConversationId;
     if (typeof sourceId !== "string" || !sourceId) throw new HttpError(400, "sourceConversationId is required");
+    safeId(sourceId, "sourceConversationId has unexpected characters");
+    const base = validateAgentInput({ ...blankInput(), name: o.name, specialty: o.specialty, cwd: o.cwd }, { isDir: this.d.isDir });
+    this.assertNameFree(base.name);
 
     if (o.mode === "fork" || o.mode === "fork-compact") {
       const compact = o.mode === "fork-compact";
@@ -111,8 +116,25 @@ export class AgentService {
   openTerminal(id: string): Session {
     const a = this.get(id);
     if (!this.d.isDir(a.cwd)) throw new HttpError(409, "the agent's folder no longer exists");
-    const cmd = a.conversationId ? `claude --resume ${safeId(a.conversationId)}` : "claude";
-    return this.d.sessions.create({ cwd: a.cwd, name: a.name, runCommand: cmd });
+    // An agent with no conversation yet gets one now, so the terminal's conversation is the one headless runs resume later.
+    const fresh = !a.conversationId;
+    const convId = fresh ? crypto.randomUUID() : safeId(a.conversationId, "conversation id has unexpected characters");
+    const briefing = this.briefingFlag(a);
+    const cmd = `claude ${fresh ? "--session-id" : "--resume"} ${convId}${briefing}`;
+    const s = this.d.sessions.create({ cwd: a.cwd, name: a.name, runCommand: cmd });
+    if (fresh) this.d.store.update(id, { conversationId: convId });
+    return s;
+  }
+
+  /** ` --append-system-prompt-file <relative path>` when the briefing exists inside the agent's folder and is a plain path; else "". */
+  private briefingFlag(a: Agent): string {
+    if (!a.briefingFile) return "";
+    const root = path.resolve(a.cwd), abs = path.resolve(root, a.briefingFile), rel = path.relative(root, abs);
+    if (!rel || rel === ".." || rel.startsWith(".." + path.sep) || path.isAbsolute(rel)) return "";
+    const fwd = rel.split(path.sep).join("/");
+    if (!/^[A-Za-z0-9_./-]+$/.test(fwd)) return "";
+    try { if (!fs.statSync(abs).isFile()) return ""; } catch { return ""; }
+    return ` --append-system-prompt-file ${fwd}`;
   }
 
   forkConversationTerminal(conversationId: string, cwd: string): Session {
@@ -154,8 +176,8 @@ export class AgentService {
     let r: RunResult;
     try { r = await handle.done; } finally { this.handles.delete(handle); }
     try {
-      // Bind a conversation only the first time, and only from a successful run.
-      const bind = !a.conversationId && r.status === "succeeded" && r.conversationId;
+      // A successful run decides the agent's conversation (a resumed run may come back on a new id); failed or cancelled ones never do.
+      const bind = r.status === "succeeded" && r.conversationId && r.conversationId !== a.conversationId;
       this.d.store.update(id, { lastRunAt: Date.now(), ...(bind ? { conversationId: r.conversationId } : {}) });
     } catch {}   // the agent may have been removed while it ran
     return r;
@@ -164,7 +186,7 @@ export class AgentService {
   /** Runs queued or running. */
   pendingRuns(): number { return this.chains.size; }
 
-  cancelAll(): void { this.epoch++; for (const h of [...this.handles]) h.cancel(); }
+  cancelAll(): void { this.epoch++; for (const h of [...this.handles]) h.cancel(); this.d.runner.cancelAll?.(); }
 
   private inUse(conversationId: string): boolean {
     return this.d.sessions.all().some((s) => s.claudeSessionId === conversationId && s.claudeRunning);
@@ -186,9 +208,4 @@ export class AgentService {
 
 function blankInput(): Omit<AgentInput, "name" | "specialty" | "cwd"> {
   return { instructions: "", briefingFile: "", addDirs: [], mcpConfig: "", model: "", permission: { mode: "acceptEdits", allowedTools: [] } };
-}
-
-function safeId(id: string): string {
-  if (!isSafeId(id)) throw new HttpError(400, "conversation id has unexpected characters");
-  return id;
 }

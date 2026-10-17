@@ -1,11 +1,12 @@
 import * as fs from "fs";
 import * as path from "path";
 import { HttpError } from "../core/HttpError";
-import { ClaudeRunner, RunResult, RunSpec } from "./ClaudeRunner";
+import { NAME_RE } from "../core/ids";
+import type { RunResult, RunSpec } from "./ClaudeRunner";
+import type { RunnerLike } from "./TrackedRunner";
 
 const CREATION_BUDGET_USD = 1;
 const CREATION_TIMEOUT_MS = 5 * 60 * 1000;
-const NAME_RE = /^[A-Za-z0-9_-]{1,48}$/;
 const DEVICE_RE = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
 
 // Creation runs must not touch the project. Note: "/compact" under plan mode is not yet verified against the real CLI (the opt-in real check in Task 7 will).
@@ -30,9 +31,9 @@ export interface DistillOptions {
 }
 
 export class ConversationForker {
-  private runner: ClaudeRunner;
+  private runner: RunnerLike;
 
-  constructor(o: { runner: ClaudeRunner }) { this.runner = o.runner; }
+  constructor(o: { runner: RunnerLike }) { this.runner = o.runner; }
 
   async fork(o: ForkOptions): Promise<{ conversationId: string; costUsd: number }> {
     const first = await this.runChecked({
@@ -51,10 +52,15 @@ export class ConversationForker {
         maxBudgetUsd: CREATION_BUDGET_USD, timeoutMs: CREATION_TIMEOUT_MS,
         });
       } catch (e) {
-        if (e instanceof HttpError) (e as HttpError & { orphanConversationId?: string }).orphanConversationId = first.conversationId;
+        if (e instanceof HttpError) {
+          const err = new HttpError(e.status, e.message, { error: e.message, orphanConversationId: first.conversationId }) as HttpError & { orphanConversationId?: string };
+          err.orphanConversationId = first.conversationId;
+          throw err;
+        }
         throw e;
       }
       costUsd += second.costUsd;
+      return { conversationId: second.conversationId || first.conversationId, costUsd };
     }
     return { conversationId: first.conversationId, costUsd };
   }

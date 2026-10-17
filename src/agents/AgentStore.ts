@@ -21,6 +21,7 @@ export class AgentStore {
 
   add(input: AgentInput, origin: AgentOrigin, conversationId = ""): Agent {
     const v = validateAgentInput(input, { isDir: this.isDir });
+    if (typeof conversationId !== "string" || (conversationId && !isSafeId(conversationId))) throw new HttpError(400, "conversationId has unexpected characters");
     const agents = this.list();
     this.assertNameFree(agents, v.name);
     const now = Date.now();
