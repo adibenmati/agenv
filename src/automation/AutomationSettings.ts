@@ -4,7 +4,10 @@ import type { JsonStore } from "../core/JsonStore";
 export interface AutomationSettingsData {
   /** Global kill switch: no scheduled, manual or catch-up run starts while true. */
   paused: boolean;
-  /** Total cost cap per day across all routines, or null for none. */
+  /**
+   * Total cost cap per day across all routines, or null for none. 0 is a valid cap that blocks every run:
+   * guards must test `!== null`, never truthiness.
+   */
   maxDailyCostUsd: number | null;
 }
 

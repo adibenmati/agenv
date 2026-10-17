@@ -13,6 +13,11 @@ export const CATCH_UPS: RoutineCatchUp[] = ["skip_missed", "enqueue_missed_with_
 
 export const MAX_NAME = 64;
 export const MAX_PROMPT = 20_000;
+export const MAX_MODEL = 100;
+export const MAX_ALLOWED_TOOLS = 200;
+export const MAX_TOOL_LEN = 200;
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
 export const DEFAULT_BUDGET_USD = 2;
 export const MAX_BUDGET_USD = 100;
 export const DEFAULT_TIMEOUT_MIN = 20;
@@ -118,6 +123,7 @@ export function validateRoutineInput(input: unknown, o: RoutineValidationOptions
   const r = input as Record<string, unknown>;
 
   const name = text(r.name, "name", 1, MAX_NAME);
+  if (CONTROL_CHARS.test(name)) bad("name must not contain control characters");
   const prompt = text(r.prompt, "prompt", 1, MAX_PROMPT);
   const cron = resolveCron(r.cron);
   const timezone = isMissing(r.timezone) ? Intl.DateTimeFormat().resolvedOptions().timeZone : r.timezone;
@@ -135,10 +141,13 @@ export function validateRoutineInput(input: unknown, o: RoutineValidationOptions
   }
 
   const permission = validatePermission(r.permission);
-  const allowBypass = bool(r.allowBypass, "allowBypass", false);
-  if (permission.mode === "bypassPermissions" && !allowBypass) {
-    bad("bypassPermissions requires allowBypass: true");
+  if (permission.allowedTools.length > MAX_ALLOWED_TOOLS || permission.allowedTools.some((t) => t.length > MAX_TOOL_LEN)) {
+    bad(`permission.allowedTools allows at most ${MAX_ALLOWED_TOOLS} entries of ${MAX_TOOL_LEN} characters`);
   }
+  const ack = bool(r.allowBypass, "allowBypass", false);
+  if (permission.mode === "bypassPermissions" && !ack) bad("bypassPermissions requires allowBypass: true");
+  // The acknowledgement only means something together with bypassPermissions; it is never stored on its own.
+  const allowBypass = permission.mode === "bypassPermissions" && ack;
 
   let maxBudgetUsd = DEFAULT_BUDGET_USD;
   if (!isMissing(r.maxBudgetUsd)) {
@@ -148,7 +157,7 @@ export function validateRoutineInput(input: unknown, o: RoutineValidationOptions
   }
 
   const maxRunsPerDay = isMissing(r.maxRunsPerDay) ? null : int(r.maxRunsPerDay, "maxRunsPerDay", 1, MAX_RUNS_PER_DAY, 0);
-  if (!isMissing(r.model) && typeof r.model !== "string") bad("model must be a string");
+  if (!isMissing(r.model) && (typeof r.model !== "string" || r.model.trim().length > MAX_MODEL)) bad(`model must be a string of at most ${MAX_MODEL} characters`);
 
   return {
     name,

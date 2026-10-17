@@ -1,6 +1,6 @@
 // test/unit/routines.test.js — Routine validation, RoutineStore and AutomationSettings
 "use strict";
-const { describe, it } = require("node:test");
+const { describe, it, after } = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("fs"), os = require("os"), path = require("path");
 const { Crypto } = require("../../dist/core/Crypto");
@@ -12,16 +12,22 @@ const { PRESETS } = require("../../dist/automation/cron");
 
 const isDir = (p) => p === "/ok" || p === "/ok2";
 const agentExists = (id) => id === "a1b2c3d4";
+// a zone that is never the machine's, so "changing" the timezone really changes it
+const OTHER_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone === "Asia/Tokyo" ? "Europe/Paris" : "Asia/Tokyo";
 const NOW = Date.UTC(2026, 9, 17, 12, 0, 0);
 const opts = { isDir, agentExists, now: NOW };
 const input = (o = {}) => ({ name: "Nightly", cron: "0 9 * * *", prompt: "do it", target: { kind: "agent", agentId: "a1b2c3d4" }, ...o });
 const status = (fn) => { try { fn(); } catch (e) { return e.status; } return null; };
 const check = (o) => validateRoutineInput(input(o), opts);
 
+const tmpDirs = [];
+const tmp = (prefix) => { const d = fs.mkdtempSync(path.join(os.tmpdir(), prefix)); tmpDirs.push(d); return d; };
+after(() => { for (const d of tmpDirs) fs.rmSync(d, { recursive: true, force: true }); });
+
 function mkEnc(dir, file) {
   return new JsonStore({ path: path.join(dir, file), crypto: new Crypto(path.join(dir, "key")), fallback: () => [] });
 }
-function mkStore(dir = fs.mkdtempSync(path.join(os.tmpdir(), "agenv-r-"))) {
+function mkStore(dir = tmp("agenv-r-")) {
   return { dir, store: new RoutineStore(mkEnc(dir, "routines.enc"), isDir, agentExists) };
 }
 
@@ -92,6 +98,30 @@ describe("validateRoutineInput", () => {
     assert.equal(r.permission.mode, "bypassPermissions"); assert.equal(r.allowBypass, true);
     assert.equal(status(() => check({ allowBypass: 1 })), 400);
   });
+  it("allowBypass is only kept when the mode is bypassPermissions", () => {
+    assert.equal(check({ allowBypass: true }).allowBypass, false);
+    assert.equal(check({ permission: { mode: "plan" }, allowBypass: true }).allowBypass, false);
+    assert.equal(check({ permission: { mode: "bypassPermissions" }, allowBypass: true }).allowBypass, true);
+  });
+  it("rejects over-long permission lists and model, control characters in the name, Infinity/-0 budgets, bare preset:", () => {
+    const tools = (n) => Array.from({ length: n }, (_, i) => `t${i}`);
+    assert.equal(check({ permission: { mode: "plan", allowedTools: tools(200) } }).permission.allowedTools.length, 200);
+    assert.equal(status(() => check({ permission: { mode: "plan", allowedTools: tools(201) } })), 400);
+    assert.equal(status(() => check({ permission: { mode: "plan", allowedTools: ["x".repeat(201)] } })), 400);
+    assert.equal(check({ permission: { mode: "plan", allowedTools: ["x".repeat(200)] } }).permission.allowedTools[0].length, 200);
+    assert.equal(check({ model: "m".repeat(100) }).model.length, 100);
+    assert.equal(status(() => check({ model: "m".repeat(101) })), 400);
+    for (const name of ["a\nb", "a\u0000b", "a\tb", "a\u007fb"]) assert.equal(status(() => check({ name })), 400, JSON.stringify(name));
+    for (const maxBudgetUsd of [Infinity, -Infinity, -0, 0]) assert.equal(status(() => check({ maxBudgetUsd })), 400, String(maxBudgetUsd));
+    assert.equal(status(() => check({ cron: "preset:" })), 400);
+    assert.equal(status(() => check({ cron: "preset" })), 400);
+  });
+  it("does not mutate the input object", () => {
+    const o = input({ cron: "preset:daily", name: "  padded  ", permission: { mode: "plan", allowedTools: [" Read "] } });
+    const copy = JSON.parse(JSON.stringify(o));
+    validateRoutineInput(o, opts);
+    assert.deepEqual(o, copy);
+  });
   it("agent target must exist, folder target must be an existing directory", () => {
     assert.equal(status(() => check({ target: { kind: "agent", agentId: "deadbeef" } })), 400);
     assert.equal(status(() => check({ target: { kind: "agent" } })), 400);
@@ -150,7 +180,7 @@ describe("RoutineStore", () => {
     assert.equal(status(() => store.setSchedule(r.id, { nextRunAt: 1, lastRunAt: NaN })), 400);
   });
   it("update re-validates only supplied editable fields (bookkeeping patch with missing folder succeeds)", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agenv-r-"));
+    const dir = tmp("agenv-r-");
     let folderOk = true, agentOk = true;
     const store = new RoutineStore(mkEnc(dir, "routines.enc"), (p) => folderOk && isDir(p), (id) => agentOk && agentExists(id));
     const f = store.add(input({ target: { kind: "folder", cwd: "/ok" } }), 1);
@@ -179,7 +209,81 @@ describe("RoutineStore", () => {
     assert.equal(store.get(r.id).cron, "0 9 * * *"); // failed updates leave the store untouched
     const ok = store.update(r.id, { permission: { mode: "bypassPermissions" }, allowBypass: true });
     assert.equal(ok.permission.mode, "bypassPermissions");
-    assert.equal(store.update(r.id, { cron: "preset:weekly" }).cron, PRESETS.weekly);
+    assert.equal(store.update(r.id, { cron: "preset:weekly", nextRunAt: 2 }).cron, PRESETS.weekly);
+  });
+  it("a stale allowBypass is never inherited: bypass -> plan -> bypass without the flag is 400", () => {
+    const { store } = mkStore();
+    const r = store.add(input({ permission: { mode: "bypassPermissions" }, allowBypass: true }), 1);
+    assert.equal(r.allowBypass, true);
+    const plan = store.update(r.id, { permission: { mode: "plan" } });
+    assert.equal(plan.allowBypass, false);
+    assert.equal(status(() => store.update(r.id, { permission: { mode: "bypassPermissions" } })), 400);
+    assert.equal(store.get(r.id).permission.mode, "plan");
+    const again = store.update(r.id, { permission: { mode: "bypassPermissions" }, allowBypass: true });
+    assert.equal(again.permission.mode, "bypassPermissions"); assert.equal(again.allowBypass, true);
+    // supplying permission without the flag never reuses the stored one, even when staying on bypass
+    assert.equal(status(() => store.update(r.id, { permission: { mode: "bypassPermissions", allowedTools: ["Read"] } })), 400);
+    // an unrelated edit keeps the acknowledged bypass
+    assert.equal(store.update(r.id, { name: "other" }).allowBypass, true);
+  });
+  it("add with a non-bypass mode and allowBypass:true stores allowBypass false", () => {
+    const { store } = mkStore();
+    assert.equal(store.add(input({ allowBypass: true }), 1).allowBypass, false);
+  });
+  it("schedule changes and enabling require a finite nextRunAt", () => {
+    const { store } = mkStore();
+    const r = store.add(input(), 1000);
+    const snap = () => JSON.stringify(store.get(r.id));
+    const before = snap();
+    for (const patch of [{ cron: "0 10 * * *" }, { cron: "preset:weekly" }, { timezone: OTHER_TZ }, { cron: "0 10 * * *", nextRunAt: null }, { cron: "0 10 * * *", nextRunAt: NaN }]) {
+      assert.equal(status(() => store.update(r.id, patch)), 400, JSON.stringify(patch));
+      assert.equal(snap(), before);
+    }
+    const u = store.update(r.id, { cron: "0 10 * * *", nextRunAt: 5000 });
+    assert.equal(u.cron, "0 10 * * *"); assert.equal(u.nextRunAt, 5000);
+    assert.equal(store.update(r.id, { timezone: OTHER_TZ, nextRunAt: 6000 }).nextRunAt, 6000);
+    // unchanged schedule values and ordinary edits need no nextRunAt
+    assert.equal(store.update(r.id, { cron: "0 10 * * *", timezone: OTHER_TZ }).nextRunAt, 6000);
+    assert.equal(store.update(r.id, { name: "n2", prompt: "p2" }).nextRunAt, 6000);
+    assert.equal(store.update(r.id, { cron: "0 10 * * *", enabled: true }).nextRunAt, 6000);
+    // enable flip
+    assert.equal(store.update(r.id, { enabled: false }).enabled, false);
+    const b2 = snap();
+    assert.equal(status(() => store.update(r.id, { enabled: true })), 400);
+    assert.equal(snap(), b2);
+    assert.equal(store.update(r.id, { enabled: true, nextRunAt: 7000 }).nextRunAt, 7000);
+    // disabling, and enabled:false on a disabled routine, need nothing
+    assert.equal(store.update(r.id, { enabled: false }).enabled, false);
+    assert.equal(store.update(r.id, { enabled: false, name: "again" }).name, "again");
+  });
+  it("update rejects null for editable fields except maxRunsPerDay, and non-object patches", () => {
+    const { store } = mkStore();
+    const r = store.add(input({ maxRunsPerDay: 5 }), 1);
+    for (const f of ["name", "prompt", "cron", "timezone", "target", "conversation", "permission", "allowBypass", "model", "maxBudgetUsd", "timeoutMin", "concurrency", "catchUp", "enabled"]) {
+      assert.equal(status(() => store.update(r.id, { [f]: null })), 400, f);
+    }
+    assert.equal(store.update(r.id, { maxRunsPerDay: null }).maxRunsPerDay, null);
+    for (const p of [null, undefined, "x", 5, []]) assert.equal(status(() => store.update(r.id, p)), 400, String(p));
+  });
+  it("switching the target kind adjusts conversation unless supplied", () => {
+    const { store } = mkStore();
+    const r = store.add(input({ conversation: "fork" }), 1);
+    assert.equal(store.update(r.id, { target: { kind: "folder", cwd: "/ok" } }).conversation, "fresh");
+    assert.equal(store.update(r.id, { target: { kind: "agent", agentId: "a1b2c3d4" } }).conversation, "agent");
+    assert.equal(store.update(r.id, { target: { kind: "agent", agentId: "a1b2c3d4" }, conversation: "fork" }).conversation, "fork");
+    // staying on an agent target keeps the chosen conversation
+    assert.equal(store.update(r.id, { target: { kind: "agent", agentId: "a1b2c3d4" } }).conversation, "fork");
+  });
+  it("update cannot set id/created, and bookkeeping-only updates do not bump updated", async () => {
+    const { store } = mkStore();
+    const r = store.add(input(), 1);
+    await new Promise((res) => setTimeout(res, 5));
+    const u = store.update(r.id, { id: "deadbeef", created: 1, nextRunAt: 3, lastRunAt: 2 });
+    assert.equal(u.id, r.id); assert.equal(u.created, r.created); assert.equal(u.updated, r.updated);
+    assert.equal(u.nextRunAt, 3);
+    const e = store.update(r.id, { id: "deadbeef", created: 1, name: "renamed" });
+    assert.equal(e.id, r.id); assert.equal(e.created, r.created); assert.ok(e.updated > r.updated);
+    assert.equal(store.get("deadbeef"), undefined);
   });
   it("remove deletes and 404s when missing", () => {
     const { store } = mkStore();
@@ -191,7 +295,7 @@ describe("RoutineStore", () => {
 });
 
 describe("AutomationSettings", () => {
-  const mk = (dir = fs.mkdtempSync(path.join(os.tmpdir(), "agenv-s-"))) =>
+  const mk = (dir = tmp("agenv-s-")) =>
     ({ dir, s: new AutomationSettings(new JsonStore({ path: path.join(dir, "auto.enc"), crypto: new Crypto(path.join(dir, "key")), fallback: () => ({}) })) });
   it("defaults to {paused:false,maxDailyCostUsd:null}", () => {
     assert.deepEqual(mk().s.get(), { paused: false, maxDailyCostUsd: null });
