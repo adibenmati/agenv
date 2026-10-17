@@ -234,7 +234,12 @@ export class AutomationService {
     this.ownershipTimer = every(() => {
       try {
         if (own.isOwner()) {
-          if (!own.heartbeat()) { this.o.scheduler.stop(); this.change(); }
+          if (!own.heartbeat()) {
+            // Demoted: nothing may start from here on. Runs already going finish and record their real result.
+            this.o.scheduler.stop();
+            for (const run of this.o.queue.clearQueued()) this.markCancelled(run.id, "ownership lost");
+            this.change();
+          }
         } else if (own.tryAcquire()) {
           this.o.scheduler.startup();
           this.o.scheduler.start();

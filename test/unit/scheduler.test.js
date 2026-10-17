@@ -642,6 +642,39 @@ describe("instance ownership of the schedules", () => {
   });
 });
 
+describe("makePreflight claims only queued rows", () => {
+  it("refuses a run whose stored status is no longer queued and leaves the row alone", async () => {
+    for (const status of ["failed", "cancelled", "running", "succeeded"]) {
+      const r = rig({ agentOpts: { auto: true } });
+      const rt = r.service.createRoutine(baseInput());
+      const run = r.runs.create(rt.id, "manual", "queued");
+      r.runs.update(run.id, { status, reason: "set elsewhere", finishedAt: status === "running" ? null : 5 });
+      const before = r.runs.get(run.id);
+      const pre = makePreflight({ runs: r.runs, routines: r.routines, guards: r.guards, now: r.clock.t ? () => r.clock.t : Date.now });
+      assert.ok(pre(run, rt), `${status}: a reason is returned`);
+      assert.deepEqual(r.runs.get(run.id), before, `${status}: untouched`);
+    }
+    const r = rig();
+    const rt = r.service.createRoutine(baseInput());
+    const run = r.runs.create(rt.id, "manual", "queued");
+    assert.equal(makePreflight({ runs: r.runs, routines: r.routines, guards: r.guards, now: () => r.clock.t })(run, rt), null);
+    assert.equal(r.runs.get(run.id).status, "running");
+  });
+
+  it("through the queue: a row another instance already failed stays failed and nothing spawns", async () => {
+    const r = rig({ agentOpts: { auto: true } });
+    const rt = r.service.createRoutine(baseInput());
+    const run = r.runs.create(rt.id, "manual", "queued");
+    r.runs.update(run.id, { status: "failed", reason: "interrupted by restart", error: "interrupted by restart", finishedAt: 5 });
+    r.queue.enqueue(run);
+    await flush();
+    const cur = r.runs.get(run.id);
+    assert.equal(cur.status, "failed");
+    assert.equal(cur.reason, "interrupted by restart");
+    assert.equal(r.agents.calls.length, 0);
+  });
+});
+
 describe("ownership heartbeat, demotion and takeover", () => {
   /** Injected interval timers the test fires by hand. */
   function fakeTimers() {
@@ -660,7 +693,7 @@ describe("ownership heartbeat, demotion and takeover", () => {
     const alive = new Set([111, 222]);
     const mk = (pid, port) => {
       const timers = fakeTimers();
-      const ownership = new AutomationOwnership({ path: lock, pid, port, now: () => oc.t, isAlive: (p) => alive.has(p) });
+      const ownership = new AutomationOwnership({ path: lock, pid, port, now: () => oc.t, monotonicNow: () => oc.t, isAlive: (p) => alive.has(p) });
       const r = rig({ ownership, timers });
       const calls = [];
       const start = r.scheduler.start.bind(r.scheduler), stop = r.scheduler.stop.bind(r.scheduler), startup = r.scheduler.startup.bind(r.scheduler);
@@ -718,8 +751,7 @@ describe("ownership heartbeat, demotion and takeover", () => {
     assert.deepEqual(B.calls, [], "a live owner keeps the schedules");
     assert.equal(B.service.ownerInfo().owner, false);
     // A is killed (Electron serverProcess.kill()): no more heartbeats, the lock stays with a pid that is still "alive" (reused)
-    oc.t += 91_000;
-    B.fake.fire();
+    for (let i = 0; i < 3; i++) { oc.t += 30_000; B.fake.fire(); }     // 90 s of an unchanging heartbeat observed
     assert.deepEqual(B.calls, ["startup", "start"]);
     assert.deepEqual(B.service.ownerInfo(), { owner: true, ownerPort: 3001 });
     assert.equal(JSON.parse(fs.readFileSync(lock, "utf8")).pid, 222);
@@ -729,6 +761,52 @@ describe("ownership heartbeat, demotion and takeover", () => {
     await B.service.dispose();
     await A.service.dispose();
     assert.equal(fs.existsSync(lock), false, "the new owner released it");
+  });
+
+  it("demotion cancels queued runs ('ownership lost') and keeps running ones; their real result clears 'interrupted'", async () => {
+    const { lock, A } = twoInstances();
+    A.service.startScheduling();
+    const rt = A.service.createRoutine(baseInput());
+    const rt2 = A.service.createRoutine(baseInput({ name: "Other", target: { kind: "agent", agentId: "ag2" } }));
+    const running = A.service.runNow(rt.id);
+    await flush();
+    assert.equal(A.runs.get(running.id).status, "running");
+    // the same agent is busy, so this one stays queued
+    const queued = A.runs.create(rt.id, "manual", "queued");
+    A.queue.enqueue(A.runs.get(queued.id));
+    await flush();
+    assert.equal(A.queue.size(), 1);
+    fs.writeFileSync(lock, JSON.stringify({ pid: 222, port: 3001, startedAt: 1, heartbeatAt: 5_000_000 }));
+    A.fake.fire();
+    assert.equal(A.queue.size(), 0, "the queue is emptied");
+    const q = A.runs.get(queued.id);
+    assert.equal(q.status, "cancelled");
+    assert.equal(q.reason, "ownership lost");
+    assert.equal(A.runs.get(running.id).status, "running", "running runs keep going");
+    // the new owner's startup() marked the running row interrupted; the real result arrives afterwards
+    A.runs.markInterrupted();
+    assert.equal(A.runs.get(running.id).reason, "interrupted by restart");
+    A.agents.finish(0);
+    await flush();
+    const done = A.runs.get(running.id);
+    assert.equal(done.status, "succeeded");
+    assert.equal(done.reason, "");
+    assert.equal(done.error, "");
+    void rt2;
+    await A.service.dispose();
+  });
+
+  it("the queue still accepts runs after a demotion drain (the instance may become the owner again)", async () => {
+    const { lock, A } = twoInstances();
+    A.service.startScheduling();
+    const rt = A.service.createRoutine(baseInput());
+    fs.writeFileSync(lock, JSON.stringify({ pid: 222, port: 3001, startedAt: 1, heartbeatAt: 5_000_000 }));
+    A.fake.fire();
+    A.queue.enqueue(A.runs.get(A.runs.create(rt.id, "manual", "queued").id));
+    await flush();
+    assert.equal(A.agents.calls.length, 1);
+    A.agents.finish(0);
+    await A.service.dispose();
   });
 
   it("dispose clears the interval timer and a disposed service never polls again", async () => {

@@ -4,7 +4,7 @@ const { describe, it, mock } = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("fs"), os = require("os"), path = require("path");
 const { Crypto } = require("../../dist/core/Crypto");
-const { JsonStore } = require("../../dist/core/JsonStore");
+const { JsonStore, sweepTempFiles } = require("../../dist/core/JsonStore");
 const { StateStore } = require("../../dist/persistence/StateStore");
 const { HistoryStore } = require("../../dist/persistence/HistoryStore");
 const { ArchiveStore } = require("../../dist/persistence/ArchiveStore");
@@ -106,6 +106,25 @@ describe("JsonStore", () => {
     const fx = path.join(__dirname, "..", "fixtures", "crypto");
     const dir = tmp(); fs.copyFileSync(path.join(fx, "cipher.json"), path.join(dir, "x.enc")); fs.copyFileSync(path.join(fx, "key"), path.join(dir, "key"));
     assert.equal(new JsonStore({ path: path.join(dir, "x.enc"), crypto: mk(dir), fallback: () => null }).load().hello, "wörld");
+  });
+});
+
+describe("sweepTempFiles", () => {
+  it("removes only ~/.agenv-*.enc.*.tmp files older than an hour", () => {
+    const d = tmp();
+    const mkf = (name, ageMs) => { const f = path.join(d, name); fs.writeFileSync(f, "x"); const t = new Date(Date.now() - ageMs); fs.utimesSync(f, t, t); return f; };
+    const H = 3600_000;
+    const oldTmp = mkf(".agenv-runs.enc.1234.abcdef0123.tmp", 2 * H);
+    const oldTmp2 = mkf(".agenv-state.enc.9.ff.tmp", 5 * H);
+    const young = mkf(".agenv-runs.enc.1234.young.tmp", 10 * 60_000);
+    const real = mkf(".agenv-runs.enc", 5 * H);
+    const lockTmp = mkf(".agenv-automation.lock.1.aa.tmp", 5 * H);
+    const other = mkf("notes.enc.1.2.tmp", 5 * H);
+    const dir = path.join(d, ".agenv-x.enc.1.2.tmp"); fs.mkdirSync(dir);
+    sweepTempFiles(d);
+    assert.deepEqual([oldTmp, oldTmp2].map(fs.existsSync), [false, false]);
+    assert.deepEqual([young, real, lockTmp, other, dir].map(fs.existsSync), [true, true, true, true, true]);
+    assert.doesNotThrow(() => sweepTempFiles(path.join(d, "missing")));
   });
 });
 

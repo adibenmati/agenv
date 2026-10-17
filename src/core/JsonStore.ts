@@ -1,4 +1,5 @@
 import * as nodeFs from "fs";
+import { join } from "path";
 import { Crypto } from "./Crypto";
 import { Fs, isTransientFsError, renameWithRetry, uniqueTmp } from "./atomicFile";
 
@@ -13,6 +14,26 @@ export interface JsonStoreOptions<T> {
   acceptLegacy?: (v: unknown) => boolean;
   /** The filesystem; injectable so tests can simulate a rename another process blocks. Defaults to node's fs. */
   fs?: Fs;
+}
+
+const TMP_PATTERN = /^\.agenv-.+\.enc\..+\.tmp$/;
+const TMP_MAX_AGE_MS = 3600_000;
+
+/**
+ * Best-effort startup sweep: removes `.agenv-*.enc.*.tmp` files (left by a crash between the temp write and the rename) that are
+ * older than an hour. Never throws; call it once, not per save.
+ */
+export function sweepTempFiles(dir: string, fsImpl: Fs = nodeFs, now: number = Date.now()): void {
+  let names: string[];
+  try { names = fsImpl.readdirSync(dir); } catch { return; }
+  for (const name of names) {
+    if (!TMP_PATTERN.test(name)) continue;
+    const f = join(dir, name);
+    try {
+      const st = fsImpl.statSync(f);
+      if (st.isFile() && now - st.mtimeMs > TMP_MAX_AGE_MS) fsImpl.unlinkSync(f);
+    } catch {}
+  }
 }
 
 /** Repository over one encrypted JSON file. */

@@ -15,12 +15,14 @@ const code = (c) => Object.assign(new Error(c), { code: c });
 /** Two instances on one lock with a shared fake clock; `alive` is the set of live pids. */
 function pair(o = {}) {
   const p = lockPath();
-  const clock = { t: 1_000_000 };
+  const clock = { t: 1_000_000, m: 50_000 };      // t: wall clock (can jump), m: monotonic clock
   const alive = new Set([111, 222]);
-  const common = { path: p, now: () => clock.t, isAlive: (pid) => alive.has(pid), ...o.common };
+  const common = { path: p, now: () => clock.t, monotonicNow: () => clock.m, isAlive: (pid) => alive.has(pid), ...o.common };
   const a = new AutomationOwnership({ ...common, pid: 111, port: 3000, ...o.a });
   const b = new AutomationOwnership({ ...common, pid: 222, port: 3001, ...o.b });
-  return { p, clock, alive, a, b };
+  /** Real time passing: both clocks move. */
+  const pass = (ms) => { clock.t += ms; clock.m += ms; };
+  return { p, clock, alive, a, b, pass };
 }
 
 describe("AutomationOwnership", () => {
@@ -53,23 +55,68 @@ describe("AutomationOwnership", () => {
     assert.deepEqual({ pid: read(p).pid, port: read(p).port }, { pid: 222, port: 3001 });
   });
 
-  it("a stale heartbeat is taken over even though its pid is alive (pid reuse after an Electron quit)", () => {
-    const { p, clock, a, b } = pair();
+  it("a live pid whose heartbeat never changes is taken over after staleMs of the non-owner's own monotonic observation", () => {
+    const { p, pass, a, b } = pair();
     a.acquire();
-    clock.t += 89_000;
-    assert.equal(b.acquire(), false, "89 s old is still fresh");
-    clock.t += 2_000;                                   // 91 s > 3 x 30 s
-    assert.equal(b.acquire(), true);
+    assert.equal(b.acquire(), false, "first sight starts the observation");
+    pass(30_000); assert.equal(b.tryAcquire(), false);
+    pass(30_000); assert.equal(b.tryAcquire(), false);
+    pass(29_000); assert.equal(b.tryAcquire(), false, "89 s observed is still fresh");
+    pass(2_000);                                        // 91 s >= 90 s
+    assert.equal(b.tryAcquire(), true);
     assert.equal(read(p).pid, 222);
   });
 
   it("staleMs is injectable", () => {
-    const { clock, a, b } = pair({ common: { staleMs: 5_000 } });
+    const { pass, a, b } = pair({ common: { staleMs: 5_000 } });
     a.acquire();
-    clock.t += 4_000;
+    b.acquire();
+    pass(4_000);
     assert.equal(b.acquire(), false);
-    clock.t += 2_000;
+    pass(2_000);
     assert.equal(b.acquire(), true);
+  });
+
+  it("system sleep: the wall clock jumps 10 min but a live owner is not taken over; it heartbeats and stays the owner", () => {
+    const { p, clock, a, b } = pair();
+    a.acquire();
+    assert.equal(b.tryAcquire(), false);
+    clock.t += 600_000; clock.m += 1_000;               // sleep: wall clock leaps, monotonic barely moves
+    assert.equal(b.tryAcquire(), false, "the old heartbeat is 10 min old by the wall clock, yet nobody is taken over");
+    assert.equal(b.isOwner(), false);
+    assert.equal(a.heartbeat(), true);
+    clock.m += 30_000; clock.t += 30_000;
+    assert.equal(b.tryAcquire(), false);
+    assert.equal(read(p).pid, 111);
+    assert.equal(a.isOwner(), true);
+  });
+
+  it("a non-owner that slept too restarts its observation window (its monotonic clock jumped more than 2 poll intervals)", () => {
+    const { p, clock, pass, a, b } = pair();
+    a.acquire();
+    b.tryAcquire();
+    pass(60_000); b.tryAcquire();                       // 60 s observed
+    clock.m += 3_600_000; clock.t += 3_600_000;         // both asleep for an hour, the owner did not get to write
+    assert.equal(b.tryAcquire(), false, "the jump restarts the window instead of counting the sleep as observed time");
+    pass(60_000); assert.equal(b.tryAcquire(), false);
+    pass(31_000); assert.equal(b.tryAcquire(), true, "a full staleMs observed after the restart");
+    assert.equal(read(p).pid, 222);
+  });
+
+  it("a changing heartbeat resets the observation; a reused pid with a frozen heartbeat is taken over after staleMs", () => {
+    const { p, pass, a, b } = pair();
+    a.acquire(); b.tryAcquire();
+    for (let i = 0; i < 4; i++) { pass(30_000); a.heartbeat(); assert.equal(b.tryAcquire(), false); }
+    for (let i = 0; i < 3; i++) { pass(30_000); b.tryAcquire(); }
+    assert.equal(read(p).pid, 222, "frozen for 90 s observed");
+  });
+
+  it("a dead pid is taken over immediately, with no observation", () => {
+    const { p, alive, a, b } = pair();
+    a.acquire();
+    alive.delete(111);
+    assert.equal(b.tryAcquire(), true);
+    assert.equal(read(p).pid, 222);
   });
 
   it("a garbage lock older than 5 s counts as stale; a younger one is a half-written file and is not touched", () => {
@@ -110,7 +157,7 @@ describe("AutomationOwnership", () => {
   });
 
   it("when the filesystem has no hard links the lock is created with an exclusive write instead", () => {
-    for (const c of ["EPERM", "ENOSYS", "EXDEV"]) {
+    for (const c of ["EPERM", "ENOSYS", "EXDEV", "ENOTSUP", "EISDIR", "EINVAL"]) {
       const p = lockPath();
       const noLinks = { ...fs, linkSync: () => { throw code(c); } };
       const a = new AutomationOwnership({ path: p, pid: 111, port: 3000, fs: noLinks });
@@ -126,7 +173,7 @@ describe("AutomationOwnership", () => {
   it("two instances racing for one stale lock produce exactly one owner (the rival takes over around the unlink and link)", () => {
     for (const hookAt of ["afterUnlink", "beforeLink"]) {
       const p = lockPath();
-      const alive = new Set([111, 222, 999]);
+      const alive = new Set([111, 222]);          // 999 is dead
       const common = { path: p, now: () => 5_000_000, isAlive: (pid) => alive.has(pid) };
       fs.writeFileSync(p, JSON.stringify({ pid: 999, port: 1, startedAt: 1, heartbeatAt: 1 }));   // long-stale heartbeat
       let b, ran = false;
@@ -212,17 +259,17 @@ describe("AutomationOwnership", () => {
   });
 
   it("tryAcquire: a non-owner takes over once the owner stopped heartbeating; a heartbeating owner keeps it", () => {
-    const { p, clock, a, b } = pair();
+    const { p, pass, a, b } = pair();
     a.acquire();
     assert.equal(b.acquire(), false);
     for (let i = 0; i < 5; i++) {                       // 150 s with a live, heartbeating owner
-      clock.t += 30_000;
+      pass(30_000);
       a.heartbeat();
       assert.equal(b.tryAcquire(), false);
     }
     assert.equal(b.isOwner(), false);
-    clock.t += 91_000;                                    // the owner went away without releasing (killed)
-    assert.equal(b.tryAcquire(), true);
+    for (let i = 0; i < 3; i++) { pass(30_000); b.tryAcquire(); }   // the owner went away without releasing (killed)
+    assert.equal(b.isOwner(), true);
     assert.equal(b.isOwner(), true);
     assert.equal(read(p).pid, 222);
     assert.equal(a.heartbeat(), false, "the old owner notices it lost the lock");
@@ -264,6 +311,21 @@ describe("AutomationOwnership", () => {
     assert.equal(a.acquire(), true);
     assert.equal(a.isOwner(), true);
     assert.equal(a.heartbeat(), true);
+  });
+
+  it("an unreadable lock (read error other than ENOENT) ages out by its mtime like garbage", () => {
+    const p = lockPath();
+    fs.writeFileSync(p, JSON.stringify({ pid: 999, port: 1, startedAt: 1, heartbeatAt: 1 }));
+    const unreadable = { ...fs, readFileSync: (f, ...r) => { if (f === p) throw code("EIO"); return fs.readFileSync(f, ...r); } };
+    const mk = (pid) => new AutomationOwnership({ path: p, pid, port: 1, isAlive: () => true, fs: unreadable });
+    assert.equal(mk(5).acquire(), false, "young: left alone");
+    age(p, 6_000);
+    assert.equal(mk(6).acquire(), true, "old: taken over");
+    // read and stat both fail: garbage older than 5 s
+    const p2 = lockPath();
+    fs.writeFileSync(p2, "x");
+    const broken = { ...fs, readFileSync: (f, ...r) => { if (f === p2) throw code("EIO"); return fs.readFileSync(f, ...r); }, statSync: (f, ...r) => { if (f === p2) throw code("EIO"); return fs.statSync(f, ...r); } };
+    assert.equal(new AutomationOwnership({ path: p2, pid: 7, port: 1, fs: broken }).acquire(), true);
   });
 
   it("processAlive: this process is alive, an unused pid is not", () => {

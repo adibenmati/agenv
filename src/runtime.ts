@@ -28,7 +28,7 @@ import { UsageService } from "./claude/UsageService";
 import { Config } from "./core/Config";
 import { Crypto } from "./core/Crypto";
 import { createRealDirChecker } from "./core/fsUtil";
-import { JsonStore } from "./core/JsonStore";
+import { JsonStore, sweepTempFiles } from "./core/JsonStore";
 import { TypedEmitter } from "./core/TypedEmitter";
 import type { ArchiveEntry, Favorite, PersistedState } from "./core/types";
 import { AiService } from "./features/AiService";
@@ -88,6 +88,7 @@ export function buildRuntime(o: RuntimeOptions): Runtime {
   const { config, homedir } = o;
   const crypto = new Crypto(path.join(homedir, ".agenv.key"));
   const claude = claudePaths(homedir);
+  sweepTempFiles(homedir);        // once: temp files a crash left between a save's write and its rename
 
   // ---- persistence ----
   const file = <T>(name: string, fallback: () => T, legacy?: { name: string; accept: (v: unknown) => boolean }): JsonStore<T> =>

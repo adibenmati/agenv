@@ -5,7 +5,7 @@ export interface LockInfo { pid: number; port: number; startedAt: number; heartb
 
 /** How often the owner rewrites the lock (and a non-owner looks at it): the scheduler's tick interval. */
 export const OWNERSHIP_TICK_MS = 30_000;
-/** A lock whose heartbeat is older than this many ticks is stale, whether or not its pid is alive. */
+/** A live owner whose heartbeat a non-owner has seen unchanged for this many ticks (on the non-owner's monotonic clock) is stale. */
 const STALE_TICKS = 3;
 /** An unreadable lock younger than this may be somebody's half-written file; it is not taken over yet. */
 const GARBAGE_GRACE_MS = 5_000;
@@ -18,8 +18,13 @@ export interface AutomationOwnershipOptions {
   pid?: number;
   /** Whether a process exists. Defaults to `process.kill(pid, 0)`; injectable for tests. */
   isAlive?: (pid: number) => boolean;
+  /** Wall clock; only used for what is written into the lock. */
   now?: () => number;
-  /** A heartbeat older than this is stale even if its pid is alive. Default 3 x 30 s = 90 s. */
+  /** Monotonic clock (default performance.now) for the staleness observation; wall-clock steps and sleep never count as staleness. */
+  monotonicNow?: () => number;
+  /** How often a non-owner polls; a gap between polls beyond 2x this means the process itself slept and the observation restarts. Default 30 s. */
+  pollMs?: number;
+  /** A heartbeat unchanged for this long (observed) is stale than this is stale even if its pid is alive. Default 3 x 30 s = 90 s. */
   staleMs?: number;
   /** The filesystem; injectable so tests can interleave two instances or simulate Windows lock errors. */
   fs?: Fs;
@@ -37,8 +42,10 @@ type Published = "ok" | "exists" | "error";
 /**
  * Only one agenv instance on a machine may run the routine schedules (two ticks would fire every routine twice). The
  * instance that creates `~/.agenv-automation.lock` owns them and rewrites it every tick (`heartbeatAt`). A lock is stale,
- * and taken over, when its heartbeat is older than 90 s (a process killed without running its exit hook, whose pid may even
- * be reused by an unrelated process), when its pid is gone, or when it is unreadable and older than 5 s.
+ * and taken over, when its pid is gone, when it is unreadable (or garbage) with a file mtime older than 5 s, or when its pid
+ * is alive but the non-owner has watched the same heartbeatAt stay unchanged for 90 s on its OWN monotonic clock (a process
+ * killed without running its exit hook, whose pid may even be reused). The wall clock is never compared, so a system sleep or
+ * a clock step cannot make a live owner look stale.
  * A runtime that never calls acquire() counts as the owner, so embedding and tests behave as before.
  */
 export class AutomationOwnership {
@@ -46,6 +53,11 @@ export class AutomationOwnership {
   private readonly startedAt: number;
   private readonly isAlive: (pid: number) => boolean;
   private readonly now: () => number;
+  private readonly mono: () => number;
+  private readonly pollMs: number;
+  /** The foreign heartbeat we are watching and when (monotonic) we first saw this exact value. */
+  private watch: { pid: number; startedAt: number; heartbeatAt: number; since: number } | null = null;
+  private lastPoll: number | null = null;
   private readonly staleMs: number;
   private readonly fs: Fs;
   private refusedBy: LockInfo | null = null;
@@ -53,6 +65,8 @@ export class AutomationOwnership {
   constructor(private readonly o: AutomationOwnershipOptions) {
     this.pid = o.pid ?? process.pid;
     this.now = o.now ?? Date.now;
+    this.mono = o.monotonicNow ?? (() => performance.now());
+    this.pollMs = o.pollMs ?? OWNERSHIP_TICK_MS;
     this.startedAt = this.now();
     this.isAlive = o.isAlive ?? processAlive;
     this.staleMs = o.staleMs ?? STALE_TICKS * OWNERSHIP_TICK_MS;
@@ -124,15 +138,32 @@ export class AutomationOwnership {
     if (seen.kind === "garbage") return seen.ageMs > GARBAGE_GRACE_MS ? "stale" : "blocked";
     const { info } = seen;
     if (info.pid === this.pid) return "ours";
-    if (Math.abs(this.now() - info.heartbeatAt) > this.staleMs) return "stale";
-    return this.isAlive(info.pid) ? "blocked" : "stale";
+    if (!this.isAlive(info.pid)) return "stale";
+    return this.observedStale(info) ? "stale" : "blocked";
+  }
+
+  /**
+   * Whether a live foreign owner has stopped heartbeating, judged only by this process's monotonic clock: the same heartbeatAt
+   * must have been seen for staleMs. A gap of more than 2 poll intervals since our last look means WE were suspended, so the
+   * window restarts (the owner may have been suspended too and has not had its chance to write).
+   */
+  private observedStale(info: LockInfo): boolean {
+    const m = this.mono();
+    const w = this.watch;
+    const slept = this.lastPoll !== null && m - this.lastPoll > 2 * this.pollMs;
+    this.lastPoll = m;
+    if (!w || slept || w.pid !== info.pid || w.startedAt !== info.startedAt || w.heartbeatAt !== info.heartbeatAt) {
+      this.watch = { pid: info.pid, startedAt: info.startedAt, heartbeatAt: info.heartbeatAt, since: m };
+      return false;
+    }
+    return m - w.since >= this.staleMs;
   }
 
   private inspect(): Seen {
     let text: string;
     try { text = this.fs.readFileSync(this.o.path, "utf8"); } catch (e) {
       if ((e as NodeJS.ErrnoException).code === "ENOENT") return { kind: "none" };
-      return { kind: "garbage", ageMs: 0 };                       // present but unreadable right now: do not touch it yet
+      return { kind: "garbage", ageMs: this.fileAge() };          // present but unreadable: it ages out by its mtime like any garbage
     }
     try {
       const v = JSON.parse(text) as Partial<LockInfo>;
@@ -145,8 +176,11 @@ export class AutomationOwnership {
         } };
       }
     } catch {}
-    try { return { kind: "garbage", ageMs: this.now() - this.fs.statSync(this.o.path).mtimeMs }; } catch { return { kind: "none" }; }
+    return { kind: "garbage", ageMs: this.fileAge() };
   }
+
+  /** Age of the lock file by its mtime; Infinity when it cannot be statted (nothing is left to wait for). */
+  private fileAge(): number { try { return this.now() - this.fs.statSync(this.o.path).mtimeMs; } catch { return Infinity; } }
 
   private mtime(): number { try { return this.fs.statSync(this.o.path).mtimeMs; } catch { return 0; } }
 
@@ -159,7 +193,7 @@ export class AutomationOwnership {
       try { this.fs.linkSync(tmp, this.o.path); return "ok"; } catch (e) {
         const code = (e as NodeJS.ErrnoException).code;
         if (code === "EEXIST") return "exists";
-        if (code !== "EPERM" && code !== "ENOSYS" && code !== "EXDEV" && code !== "ENOTSUP") return "error";
+        if (code !== "EPERM" && code !== "ENOSYS" && code !== "EXDEV" && code !== "ENOTSUP" && code !== "EISDIR" && code !== "EINVAL") return "error";
       }
       try { this.fs.writeFileSync(this.o.path, body, { encoding: "utf8", flag: "wx", mode: 0o600 }); return "ok"; } catch (e) {
         return (e as NodeJS.ErrnoException).code === "EEXIST" ? "exists" : "error";

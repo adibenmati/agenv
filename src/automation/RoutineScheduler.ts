@@ -34,7 +34,7 @@ export function reservedUsd(runs: Pick<RunStore, "list">, routines: Pick<Routine
 }
 
 export interface PreflightOptions {
-  runs: Pick<RunStore, "list" | "update">;
+  runs: Pick<RunStore, "list" | "update" | "get">;
   routines: Pick<RoutineStore, "get">;
   guards: Pick<AutomationGuards, "check">;
   now: () => number;
@@ -45,8 +45,13 @@ export interface PreflightOptions {
  * marked the run running with startedAt = now, so the next dequeue's guard check counts this run (runs/day) and reserves its
  * budget (cost cap) even though its process has not spawned yet.
  */
+/** The preflight's refusal for a run whose stored row is no longer queued; the row is left exactly as it is. */
+export const NOT_QUEUED = "run is no longer queued";
+
 export function makePreflight(o: PreflightOptions): (run: Run, routine: Routine) => string | null {
   return (run, routine) => {
+    // Another instance's startup may have failed or cancelled this row already: never flip it back to running.
+    if (o.runs.get(run.id)?.status !== "queued") return NOT_QUEUED;
     const g = o.guards.check(routine, run.trigger, { reservedUsd: reservedUsd(o.runs, o.routines, run.id) });
     if (!g.ok) return g.reason;
     o.runs.update(run.id, { status: "running", startedAt: o.now() });
@@ -74,6 +79,7 @@ export function createRunQueue(o: RunQueueWiring): RunQueue {
 
   const settle = (run: Run, routine: Routine | undefined, outcome: RunOutcome): void => {
     try {
+      if (outcome.status === "skipped" && outcome.reason === NOT_QUEUED) return;   // somebody else already closed this row
       finishRun(o.runs, run, routine ?? ({ maxBudgetUsd: DEFAULT_BUDGET_USD } as Routine), outcome, o.now);
       if (outcome.status === "skipped") {
         o.runs.update(run.id, { startedAt: null });          // the dequeue claim marked it started; it never ran

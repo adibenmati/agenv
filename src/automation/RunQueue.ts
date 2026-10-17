@@ -58,6 +58,13 @@ export class RunQueue {
     return dropped;
   }
 
+  /** Drops the runs that have not started (returned so the caller can mark them cancelled); running ones and later enqueue() calls are unaffected. */
+  clearQueued(): Run[] {
+    const dropped = this.waiting.splice(0);
+    this.settleIdle();
+    return dropped;
+  }
+
   size(): number { return this.waiting.length; }
   running(): number { return this.active.size; }
 

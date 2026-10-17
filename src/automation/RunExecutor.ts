@@ -115,7 +115,7 @@ export function applyResult(runs: Pick<RunStore, "update">, run: Run, routine: R
   const costUsd = result.status === "timed_out" ? Math.max(result.costUsd, routine.maxBudgetUsd) : result.costUsd;
   return runs.update(run.id, {
     status: result.status,
-    ...(result.note ? { reason: result.note } : {}),
+    reason: result.note ?? "",       // also clears an "interrupted" wording a taking-over instance wrote while this run was still going
     finishedAt: now(),
     durationMs: result.durationMs,
     costUsd,
