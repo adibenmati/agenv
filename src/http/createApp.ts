@@ -2,6 +2,7 @@ import express from "express";
 import type { AppDeps } from "./AppDeps";
 import { errorMiddleware } from "./errors";
 import { aiRouter } from "./routes/ai";
+import { agentsRouter } from "./routes/agents";
 import { claudeRouter } from "./routes/claude";
 import { filesRouter } from "./routes/files";
 import { gitRouter } from "./routes/git";
@@ -37,6 +38,7 @@ export function createApp(d: AppDeps): express.Express {
   app.use(searchRouter(d));
   app.use(systemRouter(d));
   app.use(claudeRouter(d));
+  app.use(agentsRouter(d));
   app.use(aiRouter(d));
   app.use(promptsRouter(d));
   app.use(ngrokRouter(d));

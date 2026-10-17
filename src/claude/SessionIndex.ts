@@ -28,6 +28,16 @@ export interface IndexedSession {
 }
 
 interface FileEntry { size: number; mtimeMs: number; session: IndexedSession | null }
+/** Effective $/M-token rates for Claude Code with ephemeral caching, by model family (opus when unknown). */
+export function costRates(model: string | null | undefined): { cIn: number; cCacheRead: number; cOut: number } {
+  if (model?.includes("sonnet")) return { cIn: 3, cCacheRead: 0.02, cOut: 8 };
+  if (model?.includes("haiku")) return { cIn: 0.25, cCacheRead: 0.002, cOut: 0.65 };
+  return { cIn: 15, cCacheRead: 0.10, cOut: 40 };
+}
+
+export const COMPACT_SUGGEST_BYTES = 400 * 1024;
+export interface ConversationEstimate { sizeBytes: number; approxTokens: number; suggestCompact: boolean; estimatedCostUsd: number }
+
 /** Bump when the shape of an indexed session changes, so old caches are rebuilt. */
 const INDEX_VERSION = 2;
 
@@ -169,10 +179,8 @@ export class SessionIndex {
 
     // Cost estimate — effective rates for Claude Code with ephemeral caching
     // Cache writes are free (ephemeral 5-min), cache reads ~1% input, output discounted
-    let cIn = 15, cCacheRead = 0.10, cOut = 40; // opus $/M (effective)
     const m = model as string | null;
-    if (m?.includes("sonnet")) { cIn = 3; cCacheRead = 0.02; cOut = 8; }
-    if (m?.includes("haiku")) { cIn = 0.25; cCacheRead = 0.002; cOut = 0.65; }
+    const { cIn, cCacheRead, cOut } = costRates(m);
     const cost = Math.round((
       (freshInTok / 1e6 * cIn) +           // fresh (uncached) input at full rate
       (cacheReadTok / 1e6 * cCacheRead) +   // cache reads at ~1% of input (ephemeral)
@@ -221,6 +229,28 @@ export class SessionIndex {
       }
       return { ...s, score };
     }).filter((s) => s.score > 0).sort((a, b) => b.score - a.score).slice(0, 50);
+  }
+
+  /**
+   * Rough size of a conversation's transcript and what one more turn over it would cost (all of it as fresh input),
+   * or null when no transcript has that id.
+   */
+  async estimate(id: string): Promise<ConversationEstimate | null> {
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(id)) return null;
+    let dirs: string[] = [];
+    try { dirs = await fs.promises.readdir(this.p.projects); } catch { return null; }
+    for (const d of dirs) {
+      let st: fs.Stats;
+      try { st = await fs.promises.stat(path.join(this.p.projects, d, id + ".jsonl")); } catch { continue; }
+      if (!st.isFile()) continue;
+      const model = this.list?.find((s) => s.id === id && s.project === d)?.model;
+      const approxTokens = Math.round(st.size / 4);
+      return {
+        sizeBytes: st.size, approxTokens, suggestCompact: st.size >= COMPACT_SUGGEST_BYTES,
+        estimatedCostUsd: Math.round(approxTokens / 1e6 * costRates(model).cIn * 10000) / 10000,
+      };
+    }
+    return null;
   }
 
   /** A conversation's first 100 user messages and assistant replies (text only), or null for an unknown id. */
