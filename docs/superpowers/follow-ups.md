@@ -36,3 +36,12 @@ being silently changed. Each entry: where it is in the baseline (`git show pre-t
    (`/api/file` is on the read-only list) is the only guard — consider confining file routes to session folders.
 9. **Session 0 clips are saved in the upload folder, not its `.clips`** (`POST /api/clip`: `if (sessionId)` is false for 0).
    Ported as-is.
+10. **`/api/ai/ask` runs the `agent` and `model` values through a shell** (`AiService`, baseline L2662–2731: `spawn(cmd, args,
+    { shell: true })` with `cmd = agent` and `--model <model>` unquoted). A shell is needed on Windows because agent CLIs
+    installed with npm are `.cmd` shims, so it is ported as-is; the consequence is that a client can run any command
+    through this route (it can through a terminal too, but not through a read-only tunnel — `/api/ai` is not on the
+    read-only write list). Suggested: allow-list the agent names and validate the model against `^[\w.:\[\]/-]+$`.
+11. **The CPU figure in the status bar is the average since boot**, not current load (`getSystemStats`, L654–670 sums
+    `os.cpus()[].times`, which are cumulative). Ported as-is (`SystemStats`); a real reading needs two samples a moment apart.
+12. **`ngrok` is spawned without a shell**, so an npm-installed `ngrok.cmd` shim cannot be started on Windows (ENOENT, "Is ngrok
+    installed?"). Ported as-is.
