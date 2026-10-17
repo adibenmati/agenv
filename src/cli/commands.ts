@@ -6,7 +6,7 @@ import { Config } from "../core/Config";
 import { hashPassword } from "../core/password";
 
 // dist/cli/commands.js → package.json two levels up
-const PKG_VERSION: string = require(path.join(__dirname, "..", "..", "package.json")).version;
+export const PKG_VERSION: string = require(path.join(__dirname, "..", "..", "package.json")).version;
 
 const HELP = `
   Agenv v${PKG_VERSION} — The agent development environment

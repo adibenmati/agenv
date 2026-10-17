@@ -55,7 +55,7 @@ describe("detectTool", () => {
 
 describe("SessionManager", () => {
   it("restore keeps ids, allocates the next id after the max, and spawns no shells", () => {
-    const { m, spawned } = rig(); m.restore([rec(3), rec(7)]);
+    const { m, spawned } = rig(); assert.equal(m.restore([rec(3), rec(7)]), 2, "reports how many tabs it restored");
     assert.deepEqual(m.all().map((s) => s.id).sort(), [3, 7]); assert.equal(m.nextId, 8); assert.equal(spawned.length, 0);
     assert.equal(m.get(3).live, false);
   });

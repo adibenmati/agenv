@@ -53,3 +53,13 @@ being silently changed. Each entry: where it is in the baseline (`git show pre-t
     session name or path containing `$&`, `$1` or `` $` `` was rewritten, and `JSON.stringify` output containing `</script>`
     (e.g. a session named `</script><script>…`) ended the script tag early. The port uses a replacer function and escapes `<`
     as `<`; the parsed data is identical.
+15. **Ctrl+C in the launching terminal can never quit the server** (baseline L1068–1072 + L3446–3470). `agenv` puts a TTY stdin in raw
+    mode (so Ctrl+C arrives as data, not SIGINT) and the Windows handler that was meant to catch it tests `data[0] === 3`
+    — but `setEncoding("utf8")` makes `data` a string, so that comparison is never true (same for the `q` shortcut). The banner's
+    "Press Ctrl+C twice to exit" therefore only works when stdin is not a TTY. The dead handler is omitted from the port (identical
+    behavior); `agenv stop` and POST /api/shutdown are the working ways out. Suggested: handle "\x03" via `charCodeAt`.
+16. **A second `agenv` on a taken port used to crash with a stack trace, delete the first one's PID file and rewrite its state** —
+    FIXED in the port: it now prints "Port N is already in use", exits 1, removes only a PID file that is its own, and
+    saves nothing until it is actually listening (`StateStore.hold/release`). Also fixed: `ws` re-emitted the server's
+    listen error on the WebSocketServer, which had no listener (`WsGateway`).
+17. **The startup banner's right border was one column short** (`pad` made content lines `w+1` wide inside a `w+2` frame) — fixed.

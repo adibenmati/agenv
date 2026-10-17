@@ -10,16 +10,31 @@ interface StateFile { load(): PersistedState | null; save(v: PersistedState | nu
 export class StateStore {
   private timer: NodeJS.Timeout | null = null;
   private pending = false;
+  private held = false;
 
   constructor(private readonly file: StateFile, private readonly snapshot: () => PersistedState, private readonly debounceMs = 1000) {}
 
   load(): PersistedState | null { return this.file.load(); }
 
+  /**
+   * Stop writing until release(). Used during startup so a launch that then fails (e.g. the port is taken by
+   * another agenv) never overwrites the state of the one that is running.
+   */
+  hold(): void { this.held = true; }
+
+  /** Resume writing and save the current state. */
+  release(): void {
+    this.held = false;
+    this.save();
+  }
+
   saveNow(): void {
+    if (this.held) return;
     try { this.file.save(this.snapshot()); } catch {}
   }
 
   save(): void {
+    if (this.held) return;
     if (this.timer) { this.pending = true; return; }
     this.saveNow();
     this.timer = setTimeout(() => {

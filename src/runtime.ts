@@ -55,8 +55,8 @@ export interface Runtime extends AppDeps {
   bus: TypedEmitter<SessionEvents>;
   /** What was saved by the previous run, for index.ts to restore from. */
   savedState: PersistedState | null;
-  /** Stop timers, watchers and sockets owned by the runtime. Does not touch shells or saved state. */
-  dispose(): void;
+  /** Stop timers, watchers and sockets owned by the runtime and resolve once the server has closed. Does not touch shells or saved state. */
+  dispose(): Promise<void>;
 }
 
 /**
@@ -141,14 +141,18 @@ export function buildRuntime(o: RuntimeOptions): Runtime {
 
   return {
     ...deps, app, server, bus, savedState,
-    dispose(): void {
+    dispose(): Promise<void> {
       linker.stop();
       gateway.dispose();
       auth.dispose();
       analyzer.dispose();
       ngrok.dispose();
       pages.dispose();
-      try { server.close(); (server as any).closeAllConnections?.(); } catch {}
+      if (!server.listening) return Promise.resolve();
+      return new Promise((resolve) => {
+        server.close(() => resolve());
+        (server as any).closeAllConnections?.();   // open WebSockets would otherwise keep the server from closing
+      });
     },
   };
 }

@@ -60,6 +60,9 @@ export class WsGateway {
     this.maxBuffered = Math.max(64 * 1024, o.maxBuffered ?? (parseInt(process.env.AGENV_WS_MAX_BUFFERED || "", 10) || 4 * 1024 * 1024));
 
     this.wss = new WebSocketServer({ server: o.server, path: "/ws", maxPayload: 16 * 1024 * 1024 });
+    // ws re-emits the HTTP server's errors (e.g. EADDRINUSE) on itself; with no listener that is an uncaught
+    // exception. The server's own error handler (index.ts) is what reports and handles them.
+    this.wss.on("error", () => {});
     this.wss.on("connection", (ws, req) => this.handleConnection(ws, req));
 
     o.bus.on("output", this.onOutput);

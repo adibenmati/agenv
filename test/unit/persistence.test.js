@@ -56,6 +56,18 @@ describe("StateStore", () => {
       mock.timers.tick(1000); assert.equal(writes, 2);
     } finally { mock.timers.reset(); }
   });
+  it("hold() stops every write until release(), which then saves the current state once", () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      const saved = []; let n = 0;
+      const st = new StateStore({ load: () => null, save: (v) => saved.push(v.workspaceLayout) }, () => ({ sessions: [], workspaceLayout: ++n, sessionGroups: [] }), 1000);
+      st.hold(); st.save(); st.saveNow(); st.save(); mock.timers.tick(5000);
+      assert.deepEqual(saved, [], "nothing is written while held");
+      st.release(); assert.equal(saved.length, 1, "release writes once"); assert.equal(saved[0], 1, "with the state as it is then");
+      st.save(); assert.equal(saved.length, 1, "and the debounce window that release opened applies");
+      mock.timers.tick(1000); assert.equal(saved.length, 2);
+    } finally { mock.timers.reset(); }
+  });
   it("saveNow writes the current snapshot and a failing write never throws", () => {
     const saved = []; let fail = false;
     const st = new StateStore({ load: () => null, save: (v) => { if (fail) throw new Error("disk full"); saved.push(v); } },
