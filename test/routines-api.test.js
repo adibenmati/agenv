@@ -454,7 +454,13 @@ describe("routines API cancel and delete of a running run", () => {
 
 describe("routines: only one agenv instance runs the schedules", () => {
   const LOCK = ".agenv-automation.lock";
-  const readLock = (ctx) => JSON.parse(fs.readFileSync(path.join(ctx.home, LOCK), "utf8"));
+  // The owner rewrites the lock by rename; on Windows a read can hit the swap for a moment, so retry briefly.
+  const readLock = (ctx) => {
+    for (let i = 0; ; i++) {
+      try { return JSON.parse(fs.readFileSync(path.join(ctx.home, LOCK), "utf8")); }
+      catch (e) { if (i >= 40) throw e; Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25); }
+    }
+  };
 
   it("the first instance owns the lock and reports itself as the owner", async () => {
     const ctx = await boot();
