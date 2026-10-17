@@ -1,7 +1,7 @@
 import * as crypto from "crypto";
 import { HttpError } from "../core/HttpError";
 import type { JsonStore } from "../core/JsonStore";
-import { Agent, AgentInput, AgentOrigin, validateAgentInput, validateOrigin } from "./Agent";
+import { Agent, AgentInput, AgentOrigin, isSafeId, validateAgentInput, validateOrigin } from "./Agent";
 
 /** Named agents (~/.agenv-agents.enc). Names are unique case-insensitively; every mutation is persisted. */
 export class AgentStore {
@@ -38,6 +38,7 @@ export class AgentStore {
     const defined = Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)) as Partial<Agent>;
     const { conversationId, lastRunAt, origin, ...editable } = defined;
     if (conversationId !== undefined && typeof conversationId !== "string") throw new HttpError(400, "conversationId must be a string");
+    if (conversationId && !isSafeId(conversationId)) throw new HttpError(400, "conversationId has unexpected characters");
     if (lastRunAt !== undefined && lastRunAt !== null && !(typeof lastRunAt === "number" && Number.isFinite(lastRunAt))) throw new HttpError(400, "lastRunAt must be a number or null");
     if (origin !== undefined) validateOrigin(origin);
     if (Object.keys(editable).length) {

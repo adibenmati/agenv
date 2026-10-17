@@ -115,7 +115,7 @@ describe("AgentService terminals", () => {
     r.svc.openTerminal(a.id); assert.equal(r.created[0].runCommand, "claude");
   });
   it("openTerminal refuses a conversation id that is not plain", () => {
-    const r = rig(); const a = r.svc.createBlank(input(r.cwd)); r.store.update(a.id, { conversationId: "x & calc" });
+    const r = rig(); const a = r.svc.createBlank(input(r.cwd)); r.store.get = () => ({ ...a, conversationId: "x & calc" });   // a corrupt stored value; the store itself now refuses to write one
     assert.throws(() => r.svc.openTerminal(a.id), (e) => e.status === 400); assert.equal(r.created.length, 0);
   });
   it("forkConversationTerminal refuses ids that look like flags", () => {

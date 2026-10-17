@@ -1,5 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
+import { isSafeId } from "../agents/Agent";
 import { decodeClaudeProjectPath } from "./paths";
 import type { TranscriptScanner } from "./TranscriptScanner";
 
@@ -236,7 +237,7 @@ export class SessionIndex {
    * or null when no transcript has that id.
    */
   async estimate(id: string): Promise<ConversationEstimate | null> {
-    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(id)) return null;
+    if (!isSafeId(id)) return null;
     let dirs: string[] = [];
     try { dirs = await fs.promises.readdir(this.p.projects); } catch { return null; }
     for (const d of dirs) {

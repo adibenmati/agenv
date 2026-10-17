@@ -2,7 +2,7 @@ import * as fs from "fs";
 import { HttpError } from "../core/HttpError";
 import type { Session } from "../sessions/Session";
 import type { SessionManager } from "../sessions/SessionManager";
-import { Agent, AgentInput, validateAgentInput } from "./Agent";
+import { Agent, AgentInput, isSafeId, validateAgentInput } from "./Agent";
 import type { AgentStore } from "./AgentStore";
 import type { RunResult, RunSpec, RunHandle } from "./ClaudeRunner";
 import type { ConversationForker } from "./ConversationForker";
@@ -11,7 +11,6 @@ export type CreationMode = "fork" | "fork-compact" | "distill-briefing" | "disti
 
 const DEFAULT_BUDGET_USD = 2;
 const DEFAULT_TIMEOUT_MS = 20 * 60 * 1000;
-const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 
 interface Runner { run(spec: RunSpec): RunHandle }
 
@@ -190,6 +189,6 @@ function blankInput(): Omit<AgentInput, "name" | "specialty" | "cwd"> {
 }
 
 function safeId(id: string): string {
-  if (!ID_RE.test(id)) throw new HttpError(400, "conversation id has unexpected characters");
+  if (!isSafeId(id)) throw new HttpError(400, "conversation id has unexpected characters");
   return id;
 }

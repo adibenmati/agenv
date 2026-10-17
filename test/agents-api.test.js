@@ -31,13 +31,14 @@ async function boot(mode = "ok") {
       PATH: stub + path.delimiter + process.env.PATH,
     },
   });
-  return { server, home, state, work };
+  return { server, home, state, work, stub, dirs: [home, state, work, stub] };
 }
+const rmAll = (dirs) => { for (const d of dirs) { try { fs.rmSync(d, { recursive: true, force: true }); } catch {} } };
 
 describe("agents API", () => {
   let ctx;
   before(async () => { ctx = await boot(); }, { timeout: 30000 });
-  after(async () => { await stopProcess(ctx.server.proc); });
+  after(async () => { await stopProcess(ctx.server.proc); rmAll(ctx.dirs); });
 
   const agent = (name, extra = {}) => ({ name, specialty: "tests", cwd: ctx.work, ...extra });
 
@@ -140,6 +141,70 @@ describe("agents API", () => {
     assert.equal(last.length, dd + 2);
   });
 
+  it("PUT edits profile fields but cannot set conversationId, lastRunAt, origin, id or created", async () => {
+    const a = (await post("/api/agents", agent("guarded"))).body;
+    const evil = "--dangerously-skip-permissions";
+    const r = await put(`/api/agents/${a.id}`, {
+      specialty: "edited", conversationId: evil, lastRunAt: 5, origin: { kind: "duplicate", sourceAgentId: "z" }, id: "hacked", created: 1,
+    });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(r.body.specialty, "edited");
+    assert.equal(r.body.conversationId, "");
+    assert.equal(r.body.id, a.id);
+    assert.equal(r.body.created, a.created);
+    assert.equal(r.body.lastRunAt, null);
+    assert.deepEqual(r.body.origin, { kind: "blank" });
+    assert.equal((await post(`/api/agents/${a.id}/run`, { prompt: "go" })).status, 200);
+    assert.ok(!JSON.stringify(calls(ctx.state).pop().argv).includes(evil));
+  });
+
+  it("body must be a JSON object, not an array", async () => {
+    assert.equal((await post("/api/agents", [1, 2])).status, 400);
+    const a = (await post("/api/agents", agent("arr"))).body;
+    assert.equal((await put(`/api/agents/${a.id}`, [])).status, 400);
+  });
+
+  it("from-session: 400 for a bad sessionId, 404 unknown, 409 unlinked", async () => {
+    for (const sessionId of [undefined, "x", 1.5, null, "1"]) {
+      const r = await post("/api/agents/from-session", { sessionId, name: "fs", specialty: "x" });
+      assert.equal(r.status, 400, JSON.stringify(sessionId) + " -> " + r.status);
+    }
+    assert.equal((await post("/api/agents/from-session", { sessionId: 987654, name: "fs", specialty: "x" })).status, 404);
+    const s = (await post("/api/sessions", { name: "plain", cwd: ctx.work })).body;
+    const r = await post("/api/agents/from-session", { sessionId: s.id, name: "fs", specialty: "x" });
+    assert.equal(r.status, 409, JSON.stringify(r.body));
+    await del(`/api/sessions/${s.id}`);
+  });
+
+  it("from-session binds the Claude conversation linked to a session", async () => {
+    const id = "99999999-2222-4333-8444-555555555555";
+    const dir = path.join(ctx.home, ".claude", "projects", "C--linked");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, id + ".jsonl"), JSON.stringify({ type: "user", sessionId: id, message: { role: "user", content: "hi" } }) + "\n");
+    const s = (await post("/api/sessions", { name: "linked", cwd: ctx.work })).body;
+    await post("/api/history", { command: `claude --resume ${id}`, sessionId: s.id });
+    const r = await post("/api/agents/from-session", { sessionId: s.id, name: "fromsess", specialty: "x" });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(r.body.conversationId, id);
+    await del(`/api/sessions/${s.id}`);
+  });
+
+  it("fork-compact and distill-skill modes work; an invalid mode is a 400", async () => {
+    const src = (await post("/api/agents", agent("modesrc"))).body;
+    const sourceId = (await post(`/api/agents/${src.id}/run`, { prompt: "hello" })).body.conversationId;
+    const base = { specialty: "m", sourceConversationId: sourceId, cwd: ctx.work };
+    const fc = await post("/api/agents/from-conversation", { ...base, name: "fcompact", mode: "fork-compact" });
+    assert.equal(fc.status, 200, JSON.stringify(fc.body));
+    assert.equal(fc.body.origin.compacted, true);
+    assert.notEqual(fc.body.conversationId, sourceId);
+    assert.ok(calls(ctx.state).some((c) => c.argv.includes("--") && c.argv[c.argv.indexOf("--") + 1] === "/compact"));
+    const ds = await post("/api/agents/from-conversation", { ...base, name: "dskill", mode: "distill-skill" });
+    assert.equal(ds.status, 200, JSON.stringify(ds.body));
+    assert.ok(fs.existsSync(path.join(ctx.work, ".claude", "skills", "dskill", "SKILL.md")));
+    assert.equal(ds.body.origin.artifact, "skill");
+    assert.equal((await post("/api/agents/from-conversation", { ...base, name: "badmode", mode: "nope" })).status, 400);
+  });
+
   it("a run without a prompt is a 400", async () => {
     const a = (await post("/api/agents", agent("quiet"))).body;
     assert.equal((await post(`/api/agents/${a.id}/run`, {})).status, 400);
@@ -155,9 +220,9 @@ describe("conversation estimate", () => {
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, BIG + ".jsonl"), "x".repeat(500 * 1024));
     fs.writeFileSync(path.join(dir, SMALL + ".jsonl"), "x".repeat(10 * 1024));
-    ctx = { home, server: await startServer({ home }) };
+    ctx = { home, server: await startServer({ home }), dirs: [home] };
   }, { timeout: 30000 });
-  after(async () => { await stopProcess(ctx.server.proc); });
+  after(async () => { await stopProcess(ctx.server.proc); rmAll(ctx.dirs); });
 
   it("suggests compacting a 500 KB transcript but not a 10 KB one", async () => {
     const big = await get(`/api/claude/conversations/${BIG}/estimate`);
@@ -166,6 +231,7 @@ describe("conversation estimate", () => {
     assert.equal(big.body.approxTokens, Math.round(500 * 1024 / 4));
     assert.equal(big.body.suggestCompact, true);
     assert.ok(big.body.estimatedCostUsd > 0);
+    assert.match(big.body.basis, /^upper-bound: all context priced as fresh input/);
     const small = await get(`/api/claude/conversations/${SMALL}/estimate`);
     assert.equal(small.body.suggestCompact, false);
     assert.equal(small.body.sizeBytes, 10 * 1024);
@@ -181,23 +247,30 @@ describe("conversation estimate", () => {
 describe("agents API with a failing claude", () => {
   let ctx;
   before(async () => { ctx = await boot("fail"); }, { timeout: 30000 });
-  after(async () => { await stopProcess(ctx.server.proc); });
+  after(async () => { await stopProcess(ctx.server.proc); rmAll(ctx.dirs); });
 
   it("from-conversation gives a JSON error and leaves no agent behind", async () => {
     const r = await post("/api/agents/from-conversation", {
       name: "doomed", specialty: "x", sourceConversationId: "abc-123", mode: "fork", cwd: ctx.work,
     });
-    assert.ok(r.status >= 400, "status " + r.status);
+    assert.equal(r.status, 502, JSON.stringify(r.body));
     assert.equal(typeof r.body.error, "string");
     assert.ok(!r.body.error.includes("    at "));
     assert.deepEqual((await get("/api/agents")).body, []);
+  });
+
+  it("a failed run is still HTTP 200; the status field carries the failure", async () => {
+    const a = (await post("/api/agents", { name: "failer", specialty: "x", cwd: ctx.work })).body;
+    const r = await post(`/api/agents/${a.id}/run`, { prompt: "go" });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(r.body.status, "failed");
   });
 });
 
 describe("agents over a read-only tunnel", () => {
   let ctx;
   before(async () => { ctx = await boot(); }, { timeout: 30000 });
-  after(async () => { await stopProcess(ctx.server.proc); });
+  after(async () => { await stopProcess(ctx.server.proc); rmAll(ctx.dirs); });
 
   it("blocks writes under /api/agents and /api/claude/conversations but allows reads", async () => {
     const a = (await post("/api/agents", { name: "kept", specialty: "x", cwd: ctx.work })).body;

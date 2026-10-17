@@ -103,6 +103,15 @@ describe("AgentStore", () => {
     assert.equal(store.update(a.id, { lastRunAt: 7 }).lastRunAt, 7);
     assert.equal(store.update(a.id, { conversationId: "" }).conversationId, "");
   });
+  it("update rejects a conversationId that is not a plain id", () => {
+    const { store } = mkStore();
+    const a = store.add(input(), blank);
+    for (const v of ["--dangerously-skip-permissions", "-x", "a b", "a/b", "..", ".x", "x".repeat(129)]) {
+      assert.equal(status(() => store.update(a.id, { conversationId: v })), 400, v);
+    }
+    assert.equal(store.get(a.id).conversationId, "");
+    assert.equal(store.update(a.id, { conversationId: "11111111-2222-4333-8444-555555555555" }).conversationId, "11111111-2222-4333-8444-555555555555");
+  });
   it("update ignores undefined values; permission rejects arrays", () => {
     const { store } = mkStore();
     const a = store.add(input(), blank);
