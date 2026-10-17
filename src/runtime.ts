@@ -7,6 +7,7 @@ import { AgentStore } from "./agents/AgentStore";
 import { ClaudeRunner } from "./agents/ClaudeRunner";
 import { TrackedRunner } from "./agents/TrackedRunner";
 import { ConversationForker } from "./agents/ConversationForker";
+import { ChangeBatcher } from "./automation/ChangeBatcher";
 import { AutomationGuards } from "./automation/AutomationGuards";
 import { AutomationService } from "./automation/AutomationService";
 import { AutomationSettings } from "./automation/AutomationSettings";
@@ -136,7 +137,9 @@ export function buildRuntime(o: RuntimeOptions): Runtime {
   const gateway = new WsGateway({ server, sessions, auth, policy: ngrok, bus });
 
   // ---- automation (routines): the tick is started by index.ts once the server listens, never here ----
-  const runsChanged = (): void => gateway.broadcastEvent("runs-updated");
+  // A tick or catch-up burst changes many rows at once: one broadcast per burst.
+  const runsBroadcast = new ChangeBatcher(() => gateway.broadcastEvent("runs-updated"));
+  const runsChanged = (): void => runsBroadcast.notify();
   const clock = (): number => Date.now();
   const guards = new AutomationGuards({ settings: automationSettings, runs: runStore, now: clock });
   const executor = new AgentRunExecutor({

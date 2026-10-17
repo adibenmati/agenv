@@ -15,6 +15,7 @@ const { AgentRunExecutor } = require("../../dist/automation/RunExecutor");
 const { nextCronTime } = require("../../dist/automation/cron");
 const { RoutineScheduler, createRunQueue, makePreflight } = require("../../dist/automation/RoutineScheduler");
 const { AutomationService } = require("../../dist/automation/AutomationService");
+const { ChangeBatcher } = require("../../dist/automation/ChangeBatcher");
 
 const tmpDirs = [];
 const tmp = () => { const d = fs.mkdtempSync(path.join(os.tmpdir(), "agenv-sched-")); tmpDirs.push(d); return d; };
@@ -69,7 +70,7 @@ function rig(o = {}) {
   const saves = { n: 0 };
   const counted = (name, fb) => { const s = jsonStore(dir, name, fb); const save = s.save.bind(s); s.save = (v) => { saves.n++; return save(v); }; return s; };
   const changes = { n: 0 };
-  const onChange = () => { changes.n++; };
+  const onChange = o.onChange ?? (() => { changes.n++; });
   const isDir = o.isDir ?? (() => true), agentExists = o.agentExists ?? (() => true);
   const routines = new RoutineStore(counted("routines.enc", () => []), isDir, agentExists);
   const runs = new RunStore({ store: counted("runs.enc", () => []), logDir: path.join(dir, "logs") });
@@ -78,8 +79,8 @@ function rig(o = {}) {
   const agents = o.agents ?? fakeAgents(o.agentOpts);
   const executor = o.executor ?? new AgentRunExecutor({ agents, runs, now, preflight: makePreflight({ runs, routines, guards, now }) });
   const queue = createRunQueue({ limit: o.limit ?? 2, routines, runs, executor, now, onChange });
-  const scheduler = new RoutineScheduler({ routines, runs, guards, queue, now, onChange, missedGraceMs: o.grace, log: () => {} });
-  const service = new AutomationService({ routines, runs, settings, scheduler, queue, agents, isDir, agentExists, now, onChange });
+  const scheduler = new RoutineScheduler({ routines, runs, guards, queue, now, onChange, missedGraceMs: o.grace, tickMs: o.tickMs, log: () => {} });
+  const service = new AutomationService({ routines, runs, settings, scheduler, queue, agents, isDir, agentExists, now, onChange, timers: o.timers });
   return { dir, clock, saves, changes, routines, runs, settings, guards, agents, executor, queue, scheduler, service, reopen: (name, fb) => jsonStore(dir, name, fb) };
 }
 const due = (r, rt, plusMs = 1000) => { r.clock.t = rt.nextRunAt + plusMs; };
@@ -311,12 +312,15 @@ describe("startup and catch-up", () => {
     const rt = r.service.createRoutine(baseInput({ cron: "0 9 * * *" }));
     r.clock.t = rt.nextRunAt + 3 * DAY + 2 * HOUR;
     r.scheduler.startup(); await flush();
-    assert.equal(r.runs.list(rt.id).length, 0);
+    const rows = r.runs.list(rt.id);
+    assert.equal(rows.length, 1, "one visible row, no process");
+    assert.equal(rows[0].status, "skipped"); assert.match(rows[0].reason, /missed 4 slots while agenv was not running \(skip_missed\)/);
+    assert.equal(r.agents.calls.length, 0);
     const next = r.routines.get(rt.id).nextRunAt;
     assert.equal(next, nextCronTime("0 9 * * *", "UTC", r.clock.t));
     assert.ok(next > r.clock.t);
     r.scheduler.tick(); await flush();
-    assert.equal(r.runs.list(rt.id).length, 0, "and nothing fires afterwards for the missed slots");
+    assert.equal(r.runs.list(rt.id).length, 1, "and nothing fires afterwards for the missed slots");
   });
 
   it("enqueue_missed_with_cap replays at most 25", async () => {
@@ -325,10 +329,14 @@ describe("startup and catch-up", () => {
     r.clock.t = rt.nextRunAt + 100 * HOUR + 5 * 60000;
     r.scheduler.startup();
     await flush(200);
-    const runs = r.runs.list(rt.id, 500);
+    const all = r.runs.list(rt.id, 500);
+    const runs = all.filter((x) => x.status !== "skipped");
     assert.equal(runs.length, 25);
     assert.ok(runs.every((x) => x.trigger === "catch_up"));
     assert.equal(r.agents.calls.length, 25);
+    const note = all.filter((x) => x.status === "skipped");
+    assert.equal(note.length, 1, "one row records the dropped slots");
+    assert.match(note[0].reason, /catch-up: ran 25 of 101 missed slots/); assert.equal(note[0].startedAt, null);
     assert.equal(r.routines.get(rt.id).nextRunAt, nextCronTime("0 * * * *", "UTC", r.clock.t));
   });
 
@@ -356,20 +364,22 @@ describe("startup and catch-up", () => {
     const rt = r.service.createRoutine(baseInput());
     due(r, rt, 10000); r.scheduler.tick(); await flush();
     assert.equal(r.runs.list(rt.id).length, 1);
-    r.clock.t += 8 * HOUR;                                 // the laptop slept
+    r.clock.t += 8 * HOUR + 30 * 60000;                    // the laptop slept
     r.scheduler.tick(); await flush();
-    assert.equal(r.runs.list(rt.id).length, 1, "missed slots fire nothing");
+    assert.equal(r.runs.list(rt.id).length, 2, "missed slots fire nothing; one row says so");
+    assert.equal(r.agents.calls.length, 1);
+    assert.match(r.runs.list(rt.id)[0].reason, /missed 8 slots/);
     const next = r.routines.get(rt.id).nextRunAt;
     assert.equal(next, nextCronTime("0 * * * *", "UTC", r.clock.t));
     r.scheduler.tick(); r.scheduler.tick(); await flush();
-    assert.equal(r.runs.list(rt.id).length, 1);
+    assert.equal(r.runs.list(rt.id).length, 2);
   });
 
   it("an 8-hour clock jump with enqueue_missed_with_cap replays the missed slots once", async () => {
     const r = rig({ agentOpts: { auto: true } });
     const rt = r.service.createRoutine(baseInput({ catchUp: "enqueue_missed_with_cap" }));
     due(r, rt, 10000); r.scheduler.tick(); await flush();
-    r.clock.t += 8 * HOUR;
+    r.clock.t += 8 * HOUR + 30 * 60000;
     r.scheduler.tick(); await flush(60);
     const catchUps = r.runs.list(rt.id, 100).filter((x) => x.trigger === "catch_up");
     assert.equal(catchUps.length, 8);
@@ -562,6 +572,144 @@ describe("AutomationService runs", () => {
     assert.throws(() => r.service.openRun(mk(forkRt, fin).id), (e) => e.status === 404, "finished without a conversation");
     assert.throws(() => r.service.openRun(mk(forkRt, { status: "running", startedAt: 1 }).id), (e) => e.status === 409, "not finished, no conversation yet");
     assert.throws(() => r.service.openRun("aaaaaaaaaaaa"), (e) => e.status === 404);
+  });
+});
+
+describe("startup honours the grace window", () => {
+  it("startup 10 s after a slot fires it exactly once (normal run, not a catch-up)", async () => {
+    const r = rig({ agentOpts: { auto: true } });
+    const rt = r.service.createRoutine(baseInput());
+    due(r, rt, 10000);
+    r.scheduler.startup(); await flush();
+    const runs = r.runs.list(rt.id);
+    assert.equal(runs.length, 1); assert.equal(runs[0].trigger, "schedule"); assert.equal(runs[0].status, "succeeded");
+    assert.equal(r.agents.calls.length, 1);
+    assert.equal(r.routines.get(rt.id).nextRunAt, nextCronTime("0 * * * *", "UTC", r.clock.t));
+    r.scheduler.tick(); await flush();
+    assert.equal(r.runs.list(rt.id).length, 1, "and the slot does not fire again");
+  });
+
+  it("startup 10 minutes after a slot under skip_missed fires nothing and jumps to the next future slot", async () => {
+    const r = rig({ agentOpts: { auto: true } });
+    const rt = r.service.createRoutine(baseInput());
+    due(r, rt, 10 * 60000);
+    r.scheduler.startup(); await flush();
+    const runs = r.runs.list(rt.id);
+    assert.equal(r.agents.calls.length, 0);
+    assert.equal(runs.length, 1); assert.equal(runs[0].status, "skipped");
+    assert.match(runs[0].reason, /missed 1 slot while agenv was not running \(skip_missed\)/);
+    assert.equal(runs[0].startedAt, null, "not counted as started");
+    assert.equal(r.routines.get(rt.id).nextRunAt, nextCronTime("0 * * * *", "UTC", r.clock.t));
+  });
+
+  it("with enqueue_missed_with_cap a slot within the grace is one normal firing and only older slots are replayed", async () => {
+    const r = rig({ agentOpts: { auto: true } });
+    const rt = r.service.createRoutine(baseInput({ catchUp: "enqueue_missed_with_cap" }));
+    r.clock.t = rt.nextRunAt + 3 * HOUR + 10000;           // 09:00 10:00 11:00 missed, 12:00 is 10 s old
+    r.scheduler.startup(); await flush(60);
+    const runs = r.runs.list(rt.id, 50);
+    assert.equal(runs.length, 4, "no double run for the 12:00 slot");
+    assert.equal(runs.filter((x) => x.trigger === "schedule").length, 1);
+    assert.equal(runs.filter((x) => x.trigger === "catch_up").length, 3);
+    assert.equal(r.agents.calls.length, 4);
+  });
+
+  it("the grace scales with a custom tick interval (max(120 s, 4 x interval)) unless set explicitly", async () => {
+    const late = 300000;
+    const slow = rig({ agentOpts: { auto: true }, tickMs: 100000 });          // grace 400 s
+    const a = slow.service.createRoutine(baseInput());
+    due(slow, a, late); slow.scheduler.tick(); await flush();
+    assert.equal(slow.runs.list(a.id)[0].trigger, "schedule", "300 s late is within a 400 s grace");
+    const normal = rig({ agentOpts: { auto: true } });                         // grace 120 s
+    const b = normal.service.createRoutine(baseInput());
+    due(normal, b, late); normal.scheduler.tick(); await flush();
+    assert.equal(normal.agents.calls.length, 0, "300 s late is missed at the default interval");
+    const explicit = rig({ agentOpts: { auto: true }, tickMs: 100000, grace: 1000 });
+    const c = explicit.service.createRoutine(baseInput());
+    due(explicit, c, late); explicit.scheduler.tick(); await flush();
+    assert.equal(explicit.agents.calls.length, 0, "an explicit missedGraceMs wins");
+    const started = rig({ agentOpts: { auto: true } });                        // start(interval) scales it too
+    const d = started.service.createRoutine(baseInput());
+    timers.push(() => started.scheduler.stop());
+    started.scheduler.start(100000); started.scheduler.stop();
+    due(started, d, late); started.scheduler.tick(); await flush();
+    assert.equal(started.agents.calls.length, 1);
+  });
+});
+
+describe("clock jumps, invalid schedules and visibility", () => {
+  it("a backward clock jump recomputes a nextRunAt that is later than the next real slot", async () => {
+    const r = rig({ agentOpts: { auto: true } });
+    const rt = r.service.createRoutine(baseInput({ cron: "0 9 * * *" }));
+    r.routines.setSchedule(rt.id, { nextRunAt: r.clock.t + 3 * DAY });
+    r.scheduler.tick(); await flush();
+    assert.equal(r.routines.get(rt.id).nextRunAt, nextCronTime("0 9 * * *", "UTC", r.clock.t));
+    assert.equal(r.runs.list(rt.id).length, 0);
+    const before = r.saves.n;
+    r.scheduler.tick();
+    assert.equal(r.saves.n, before, "a correct nextRunAt is left alone");
+  });
+
+  it("an unparseable schedule records one skipped \"invalid schedule\" run and stops the routine", async () => {
+    const r = rig({ agentOpts: { auto: true } });
+    const rt = r.service.createRoutine(baseInput());
+    r.reopen("routines.enc", () => []).save([{ ...rt, cron: "not a cron", nextRunAt: r.clock.t - 1000 }]);
+    r.scheduler.tick(); r.scheduler.tick(); await flush();
+    const runs = r.runs.list(rt.id);
+    assert.equal(runs.length, 1);
+    assert.equal(runs[0].status, "skipped"); assert.match(runs[0].reason, /^invalid schedule: /);
+    assert.equal(r.routines.get(rt.id).nextRunAt, null);
+    assert.equal(r.agents.calls.length, 0);
+  });
+
+  it("catch-up writes at most one visible row per routine per event", async () => {
+    const r = rig({ agentOpts: { auto: true } });
+    const rt = r.service.createRoutine(baseInput({ cron: "*/5 * * * *" }));
+    r.clock.t = rt.nextRunAt + 3 * DAY + 150000;
+    r.scheduler.startup(); r.scheduler.tick(); r.scheduler.startup(); await flush();
+    const rows = r.runs.list(rt.id, 50);
+    assert.equal(rows.length, 1);
+    assert.match(rows[0].reason, /missed 865 slots/);
+  });
+});
+
+describe("change batching", () => {
+  it("ChangeBatcher emits once for a burst and again for a later one", () => {
+    let emitted = 0; const deferred = [];
+    const b = new ChangeBatcher(() => { emitted++; }, (fn) => deferred.push(fn));
+    for (let i = 0; i < 26; i++) b.notify();
+    assert.equal(deferred.length, 1); assert.equal(emitted, 0);
+    deferred.shift()();
+    assert.equal(emitted, 1);
+    b.notify(); assert.equal(deferred.length, 1);
+    b.flush(); assert.equal(emitted, 2, "flush() emits at once");
+    deferred.shift()(); assert.equal(emitted, 2, "the deferred call after a flush is a no-op");
+  });
+
+  it("26 changes in one tick produce one broadcast", async () => {
+    let emitted = 0; const deferred = [];
+    const batcher = new ChangeBatcher(() => { emitted++; }, (fn) => deferred.push(fn));
+    const r = rig({ agentOpts: { auto: true }, onChange: () => batcher.notify() });
+    const rt = r.service.createRoutine(baseInput({ catchUp: "enqueue_missed_with_cap" }));
+    deferred.length = 0; emitted = 0; batcher.flush(); emitted = 0;
+    r.clock.t = rt.nextRunAt + 40 * HOUR + 5 * 60000;     // 41 missed slots: 25 replayed + a note row
+    r.scheduler.tick();
+    assert.equal(r.runs.list(rt.id, 100).length, 26);
+    deferred.splice(0).forEach((f) => f());
+    assert.equal(emitted, 1);
+  });
+});
+
+describe("dispose timers", () => {
+  it("dispose leaves no pending timer", async () => {
+    const live = new Set(), created = []; let id = 0;
+    const fake = { set: (fn, ms) => { const h = { id: ++id, fn, ms }; live.add(h); created.push(ms); return h; }, clear: (h) => { live.delete(h); } };
+    const r = rig({ limit: 1, timers: fake });
+    const rt = r.service.createRoutine(baseInput());
+    r.service.runNow(rt.id); await flush();
+    await r.service.dispose();
+    assert.ok(created.includes(3000), "dispose's bounded wait goes through the injected timers");
+    assert.equal(live.size, 0, [...live].map((h) => h.ms).join(","));
   });
 });
 

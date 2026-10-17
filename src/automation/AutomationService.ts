@@ -12,6 +12,7 @@ import { MAX_RUNS, Run, RunStore } from "./RunStore";
 
 /** How long cancel / delete / dispose wait for a killed process to be recorded. */
 const SETTLE_TIMEOUT_MS = 10_000;
+const DISPOSE_WAIT_MS = 3000;
 const isActive = (r: Run): boolean => r.status === "queued" || r.status === "running";
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -25,13 +26,21 @@ export interface AutomationServiceOptions {
   isDir: (p: string) => boolean;
   agentExists: (id: string) => boolean;
   now: () => number;
+  /** Timer functions for dispose's bounded wait; injectable so tests can prove none is left pending. */
+  timers?: { set(fn: () => void, ms: number): unknown; clear(handle: unknown): void };
   /** Called after any routine, run or settings change (wired to gateway.broadcastEvent("runs-updated")). */
   onChange: () => void;
 }
 
 /** What the HTTP layer calls: routines, runs, logs and the global switches. Every method throws HttpError for bad input. */
+const realTimers = {
+  set(fn: () => void, ms: number): unknown { const t = setTimeout(fn, ms); t.unref?.(); return t; },
+  clear(h: unknown): void { clearTimeout(h as NodeJS.Timeout); },
+};
+
 export class AutomationService {
-  constructor(private readonly o: AutomationServiceOptions) {}
+  private readonly timers: NonNullable<AutomationServiceOptions["timers"]>;
+  constructor(private readonly o: AutomationServiceOptions) { this.timers = o.timers ?? realTimers; }
 
   // ---- routines ----
 
@@ -145,7 +154,9 @@ export class AutomationService {
   async dispose(): Promise<void> {
     this.o.scheduler.stop();
     for (const run of this.o.queue.drain()) this.markCancelled(run.id, "cancelled (server stopping)");
-    await Promise.race([this.o.queue.idle(), sleep(3000).then(() => undefined)]);
+    let handle: unknown;
+    const timeout = new Promise<void>((resolve) => { handle = this.timers.set(resolve, DISPOSE_WAIT_MS); });
+    try { await Promise.race([this.o.queue.idle(), timeout]); } finally { this.timers.clear(handle); }
     this.change();
   }
 

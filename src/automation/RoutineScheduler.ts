@@ -8,8 +8,13 @@ import { RunQueue } from "./RunQueue";
 import { MAX_RUNS, Run, RunStore, RunTrigger } from "./RunStore";
 
 export const TICK_MS = 30_000;
-/** A due routine more than this late (a sleeping laptop, a clock jump) is a missed run, handled by its catch-up policy. */
+/**
+ * A due routine more than this late (a sleeping laptop, a clock jump) is a missed run, handled by its catch-up policy.
+ * This is the minimum: the effective grace is max(120 s, 4 x tick interval), so a custom interval scales it.
+ */
 export const MISSED_GRACE_MS = 120_000;
+/** Missed slots are counted (for the visible note) up to this many; more shows as "N+". */
+const MISSED_COUNT_CAP = 1000;
 /** Most missed slots `enqueue_missed_with_cap` replays. */
 export const CATCH_UP_CAP = 25;
 
@@ -106,8 +111,10 @@ export interface RoutineSchedulerOptions {
   queue: RunQueue;
   now: () => number;
   onChange: () => void;
-  /** Lateness beyond which a due routine counts as missed instead of firing. Default 2 minutes. */
+  /** Lateness beyond which a due routine counts as missed instead of firing. Default max(120 s, 4 x tick interval). */
   missedGraceMs?: number;
+  /** The tick interval the grace scales with until start(intervalMs) says otherwise. Default 30 s. */
+  tickMs?: number;
   log?: (msg: string) => void;
 }
 
@@ -117,44 +124,50 @@ export interface RoutineSchedulerOptions {
  */
 export class RoutineScheduler {
   private timer: NodeJS.Timeout | null = null;
-  private readonly grace: number;
+  private intervalMs: number;
   private readonly log: (msg: string) => void;
 
   constructor(private readonly o: RoutineSchedulerOptions) {
-    this.grace = o.missedGraceMs ?? MISSED_GRACE_MS;
+    this.intervalMs = o.tickMs ?? TICK_MS;
     this.log = o.log ?? ((m) => console.error(`[agenv] ${m}`));
   }
 
-  /** Fires every enabled routine whose slot has come; one that is far overdue (clock jump, sleep) follows its catch-up policy. */
+  private graceMs(): number { return this.o.missedGraceMs ?? Math.max(MISSED_GRACE_MS, 4 * this.intervalMs); }
+
+  /**
+   * Fires every enabled routine whose slot has come (up to the grace late); one that is further overdue (clock jump, sleep)
+   * follows its catch-up policy. A routine whose nextRunAt is later than the next real slot (the clock moved back) gets it recomputed.
+   */
   tick(): void {
     const now = this.o.now();
-    let due: Routine[];
-    try { due = this.o.routines.list().filter((r) => r.enabled && r.nextRunAt !== null && r.nextRunAt <= now); } catch (e) {
+    let routines: Routine[];
+    try { routines = this.o.routines.list().filter((r) => r.enabled && r.nextRunAt !== null); } catch (e) {
       this.log(`scheduler could not read routines: ${errMsg(e)}`);
       return;
     }
-    for (const r of due) {
+    for (const r of routines) {
       try {
-        if (now - (r.nextRunAt as number) > this.grace) this.catchUp(r, now);
-        else { this.claim(r, now); this.dispatch(r, "schedule"); }
+        if ((r.nextRunAt as number) <= now) this.handleDue(r, now);
+        else this.fixBackwardJump(r, now);
       } catch (e) { this.log(`routine ${r.id} could not be fired: ${errMsg(e)}`); }
     }
   }
 
-  /** After a restart: close runs the dead server left active, then apply each routine's catch-up policy to slots it missed. */
+  /** After a restart: close runs the dead server left active, then treat every due routine exactly as the tick would. */
   startup(): void {
     let interrupted = 0;
     try { interrupted = this.o.runs.markInterrupted(); } catch (e) { this.log(`could not close interrupted runs: ${errMsg(e)}`); }
     const now = this.o.now();
     for (const r of this.o.routines.list()) {
-      if (!r.enabled || r.nextRunAt === null || r.nextRunAt >= now) continue;
-      try { this.catchUp(r, now); } catch (e) { this.log(`catch-up of routine ${r.id} failed: ${errMsg(e)}`); }
+      if (!r.enabled || r.nextRunAt === null || r.nextRunAt > now) continue;
+      try { this.handleDue(r, now); } catch (e) { this.log(`catch-up of routine ${r.id} failed: ${errMsg(e)}`); }
     }
     if (interrupted) this.change();
   }
 
   start(intervalMs: number = TICK_MS): void {
     if (this.timer) return;
+    this.intervalMs = intervalMs;
     this.timer = setInterval(() => {
       try { this.tick(); } catch (e) { this.log(`scheduler tick failed: ${errMsg(e)}`); }
     }, intervalMs);
@@ -172,32 +185,73 @@ export class RoutineScheduler {
    */
   runManually(routine: Routine): Run { return this.dispatch(routine, "manual", true); }
 
-  /** Persists the next future slot. Must happen before the run is created. */
-  private claim(r: Routine, now: number): void {
-    let next: number | null;
-    try { next = nextCronTime(r.cron, r.timezone, now); } catch { next = null; }
-    this.o.routines.setSchedule(r.id, { nextRunAt: next });
+  /** A due routine: on time (within the grace) it fires as a normal scheduled run, otherwise its slots were missed. */
+  private handleDue(r: Routine, now: number): void {
+    if (now - (r.nextRunAt as number) <= this.graceMs()) {
+      if (this.claim(r, now)) this.dispatch(r, "schedule");
+    } else this.catchUp(r, now);
   }
 
-  /** The routine's slot(s) passed unnoticed: claim the next future slot, then replay (or not) what was missed. */
+  /**
+   * Persists the next future slot. Must happen before the run is created. False when the schedule cannot be evaluated:
+   * the routine is then stopped (nextRunAt null) and the failure is recorded once as a skipped run.
+   */
+  private claim(r: Routine, now: number): boolean {
+    let next: number | null;
+    try { next = nextCronTime(r.cron, r.timezone, now); } catch (e) { this.invalidSchedule(r, e); return false; }
+    this.o.routines.setSchedule(r.id, { nextRunAt: next });
+    return true;
+  }
+
+  private invalidSchedule(r: Routine, e: unknown): void {
+    this.o.routines.setSchedule(r.id, { nextRunAt: null });
+    this.record(r, "schedule", "skipped", `invalid schedule: ${errMsg(e)}`);
+  }
+
+  private fixBackwardJump(r: Routine, now: number): void {
+    let next: number | null;
+    try { next = nextCronTime(r.cron, r.timezone, now); } catch { return; }
+    if (next !== null && (r.nextRunAt as number) > next) this.o.routines.setSchedule(r.id, { nextRunAt: next });
+  }
+
+  /**
+   * The routine's slot(s) passed unnoticed (more than the grace ago). Ruling (spec section 5.6 vs the brief): `skip_missed`
+   * means slots older than the grace are NOT run, not even once; the routine just jumps to its next future slot. A slot
+   * within the grace is not missed: it fires as one normal scheduled run (never twice for one slot).
+   * `enqueue_missed_with_cap` replays the earliest 25 missed slots as `catch_up` runs. Either way one visible `skipped` row
+   * says what was not run, and the next future slot is claimed before any run is created.
+   */
   private catchUp(r: Routine, now: number): void {
+    const windowStart = now - this.graceMs();
+    const replay = r.catchUp === "enqueue_missed_with_cap";
     const slots: number[] = [];
-    if (r.catchUp === "enqueue_missed_with_cap") {
+    let missed = 0, current = false;
+    try {
       let s: number | null = r.nextRunAt;
-      while (s !== null && s <= now && slots.length < CATCH_UP_CAP) {
-        slots.push(s);
+      while (s !== null && s < windowStart && missed < MISSED_COUNT_CAP) {
+        if (slots.length < CATCH_UP_CAP) slots.push(s);
+        missed++;
         s = nextCronTime(r.cron, r.timezone, s);
       }
+      const first = nextCronTime(r.cron, r.timezone, windowStart - 1);
+      current = first !== null && first <= now;
+    } catch (e) { this.invalidSchedule(r, e); return; }
+    if (!this.claim(r, now)) return;
+    const n = missed >= MISSED_COUNT_CAP ? `${missed}+` : String(missed);
+    if (replay) {
+      for (let i = 0; i < slots.length; i++) {
+        try { this.dispatch(r, "catch_up"); } catch (e) { this.log(`catch-up run of routine ${r.id} failed: ${errMsg(e)}`); }
+      }
+      if (missed > slots.length) this.record(r, "catch_up", "skipped", `catch-up: ran ${slots.length} of ${n} missed slots`);
+    } else if (missed > 0) {
+      this.record(r, "catch_up", "skipped", `missed ${n} slot${missed === 1 ? "" : "s"} while agenv was not running (skip_missed)`);
     }
-    this.claim(r, now);
-    for (let i = 0; i < slots.length; i++) {
-      try { this.dispatch(r, "catch_up"); } catch (e) { this.log(`catch-up run of routine ${r.id} failed: ${errMsg(e)}`); }
-    }
+    if (current) this.dispatch(r, "schedule", false, replay && slots.length > 0);   // queued behind the replay, not coalesced into it
     this.change();
   }
 
   /** Guards, then the concurrency policy, then the queue. Catch-up runs always queue (they are a replay of distinct slots). */
-  private dispatch(r: Routine, trigger: RunTrigger, manual = false): Run {
+  private dispatch(r: Routine, trigger: RunTrigger, manual = false, forceQueue = false): Run {
     const { runs } = this.o;
     let verdict: { ok: true } | { ok: false; reason: string };
     try {
@@ -207,7 +261,7 @@ export class RoutineScheduler {
       if (manual) throw new HttpError(409, verdict.reason);
       return this.record(r, trigger, "skipped", verdict.reason);
     }
-    const policy = trigger === "catch_up" ? "always_enqueue" : r.concurrency;
+    const policy = trigger === "catch_up" || forceQueue ? "always_enqueue" : r.concurrency;
     const active = runs.active(r.id);
     if (active && policy === "coalesce_if_active") return this.record(r, trigger, "coalesced", `coalesced into run ${active.id}`);
     if (active && policy === "skip_if_active") return this.record(r, trigger, "skipped", `previous run ${active.id} is still ${active.status}`);
