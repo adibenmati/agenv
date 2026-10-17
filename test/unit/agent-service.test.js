@@ -317,3 +317,156 @@ describe("AgentService.remove", () => {
     assert.equal(calls(r.state).length, 1);
   });
 });
+
+describe("AgentService conversation modes and overrides", () => {
+  const argAt = (argv, f) => argv[argv.indexOf(f) + 1];
+  const bound = (r, conv = "c-1", o = {}) => { withSource(r.state, conv); const a = r.svc.createBlank(input(r.cwd, o)); r.store.update(a.id, { conversationId: conv }); return a; };
+
+  it("conversation fork resumes with --fork-session and leaves the agent's conversationId unchanged", async () => {
+    const r = rig(); const a = bound(r);
+    const res = await r.svc.run(a.id, "hi", { conversation: "fork" });
+    assert.equal(res.status, "succeeded");
+    const argv = calls(r.state)[0].argv;
+    assert.equal(argAt(argv, "--resume"), "c-1"); assert.ok(argv.includes("--fork-session"));
+    assert.ok(res.conversationId && res.conversationId !== "c-1");
+    const cur = r.store.get(a.id);
+    assert.equal(cur.conversationId, "c-1"); assert.equal(typeof cur.lastRunAt, "number");
+  });
+  it("conversation fork on an agent with no conversation, or one without a transcript, runs fresh", async () => {
+    const r = rig(); const blank = r.svc.createBlank(input(r.cwd));
+    const res = await r.svc.run(blank.id, "hi", { conversation: "fork" });
+    assert.equal(res.status, "succeeded");
+    assert.ok(!calls(r.state)[0].argv.includes("--resume")); assert.ok(!calls(r.state)[0].argv.includes("--fork-session"));
+    assert.equal(r.store.get(blank.id).conversationId, "");
+    const ghost = r.svc.createBlank(input(r.cwd, { name: "Ghost" })); r.store.update(ghost.id, { conversationId: "no-transcript" });
+    await r.svc.run(ghost.id, "hi", { conversation: "fork" });
+    const argv = calls(r.state)[1].argv;
+    assert.ok(!argv.includes("--resume")); assert.ok(!argv.includes("--fork-session"));
+    assert.equal(r.store.get(ghost.id).conversationId, "no-transcript");
+  });
+  it("conversation fresh runs without --resume and does not rebind", async () => {
+    const r = rig(); const a = bound(r);
+    const res = await r.svc.run(a.id, "hi", { conversation: "fresh" });
+    assert.equal(res.status, "succeeded");
+    assert.ok(!calls(r.state)[0].argv.includes("--resume"));
+    assert.ok(res.conversationId && res.conversationId !== "c-1");
+    assert.equal(r.store.get(a.id).conversationId, "c-1");
+    const blank = r.svc.createBlank(input(r.cwd, { name: "Sue" }));
+    await r.svc.run(blank.id, "hi", { conversation: "fresh" });
+    assert.equal(r.store.get(blank.id).conversationId, ""); assert.equal(typeof r.store.get(blank.id).lastRunAt, "number");
+  });
+  it("conversation agent (explicit) still resumes and rebinds", async () => {
+    const r = rig(); const a = r.svc.createBlank(input(r.cwd));
+    const first = await r.svc.run(a.id, "one", { conversation: "agent" });
+    assert.equal(r.store.get(a.id).conversationId, first.conversationId);
+  });
+  it("permission and model overrides reach argv for that run only", async () => {
+    const r = rig(); const a = r.svc.createBlank(input(r.cwd, { model: "opus", permission: { mode: "acceptEdits", allowedTools: [] } }));
+    await r.svc.run(a.id, "one", { permission: { mode: "dontAsk", allowedTools: ["Read"] }, model: "haiku" });
+    await r.svc.run(a.id, "two");
+    const [one, two] = calls(r.state).map((c) => c.argv);
+    assert.equal(argAt(one, "--permission-mode"), "dontAsk"); assert.equal(argAt(one, "--allowedTools"), "Read"); assert.equal(argAt(one, "--model"), "haiku");
+    assert.equal(argAt(two, "--permission-mode"), "acceptEdits"); assert.ok(!two.includes("--allowedTools")); assert.equal(argAt(two, "--model"), "opus");
+    assert.equal(r.store.get(a.id).model, "opus"); assert.equal(r.store.get(a.id).permission.mode, "acceptEdits");
+  });
+  it("fork run waits for a running agent run (no overlap, ordering from events.jsonl)", async () => {
+    const r = rig("slow"); const a = bound(r);
+    const pA = r.svc.run(a.id, "A"), pF = r.svc.run(a.id, "F", { conversation: "fork" });
+    await Promise.all([pA, pF]);
+    assert.deepEqual(events(r.state).map((e) => e.ev + e.prompt), ["startA", "endA", "startF", "endF"]);
+    assert.equal(r.svc.pendingRuns(), 0);
+  });
+  it("fork run also waits for another agent's run on the same conversation", async () => {
+    const r = rig("slow"); const a = bound(r);
+    const b = r.svc.createBlank(input(r.cwd, { name: "Sue" })); r.store.update(b.id, { conversationId: "c-1" });
+    await Promise.all([r.svc.run(a.id, "A"), r.svc.run(b.id, "F", { conversation: "fork" })]);
+    assert.deepEqual(events(r.state).map((e) => e.ev + e.prompt), ["startA", "endA", "startF", "endF"]);
+  });
+  it("fresh run waits for the same agent's other runs", async () => {
+    const r = rig("slow"); const a = bound(r);
+    await Promise.all([r.svc.run(a.id, "A"), r.svc.run(a.id, "X", { conversation: "fresh" })]);
+    assert.deepEqual(events(r.state).map((e) => e.ev + e.prompt), ["startA", "endA", "startX", "endX"]);
+  });
+  it("fork refuses with 409 while the source conversation is open in a running terminal; fresh does not", async () => {
+    const r = rig("ok", { sessions: [{ id: 1, claudeSessionId: "c-1", claudeRunning: true }] }); const a = bound(r);
+    await assert.rejects(r.svc.run(a.id, "hi", { conversation: "fork" }), (e) => e instanceof HttpError && e.status === 409 && /terminal/.test(e.message));
+    assert.equal(calls(r.state).length, 0);
+    assert.equal((await r.svc.run(a.id, "hi", { conversation: "fresh" })).status, "succeeded");
+  });
+  it("a failed fork never reports the source conversation as its own", async () => {
+    const r = rig("fail"); const a = bound(r);
+    const res = await r.svc.run(a.id, "hi", { conversation: "fork" });
+    assert.equal(res.status, "failed"); assert.equal(res.conversationId, "");
+    assert.equal(r.store.get(a.id).conversationId, "c-1");
+  });
+  it("fork and fresh runs queued before cancelAll do not spawn", async () => {
+    const r = rig("hang"); const a = bound(r);
+    const p = r.svc.run(a.id, "x", { conversation: "fork" }), q = r.svc.run(a.id, "y", { conversation: "fresh" });
+    await until(() => events(r.state).length > 0);
+    r.svc.cancelAll();
+    assert.equal((await p).status, "cancelled"); assert.equal((await q).status, "cancelled");
+    assert.equal(calls(r.state).length, 1);
+  });
+});
+
+describe("AgentService.runInFolder", () => {
+  const spec = (o = {}) => ({ permission: { mode: "plan", allowedTools: [] }, maxBudgetUsd: 1.5, timeoutMs: 60000, ...o });
+  const argAt = (argv, f) => argv[argv.indexOf(f) + 1];
+  it("runs in that cwd with the spec's permission, model and budget, without resume", async () => {
+    const r = rig(); const log = path.join(mkdir(), "run.log");
+    const res = await r.svc.runInFolder(r.cwd, "-x go", spec({ model: "haiku", logPath: log }));
+    assert.equal(res.status, "succeeded"); assert.ok(res.conversationId);
+    const c = calls(r.state)[0];
+    assert.equal(c.cwd, fs.realpathSync(r.cwd));
+    assert.equal(argAt(c.argv, "--permission-mode"), "plan"); assert.equal(argAt(c.argv, "--model"), "haiku");
+    assert.equal(argAt(c.argv, "--max-budget-usd"), "1.5"); assert.ok(!c.argv.includes("--resume")); assert.equal(c.argv.at(-1), "-x go");
+    assert.ok(fs.existsSync(log));
+  });
+  it("rejects a missing folder with 409 and an empty prompt with 400, spawning nothing", async () => {
+    const r = rig();
+    await assert.rejects(r.svc.runInFolder(path.join(r.cwd, "gone"), "hi", spec()), (e) => e instanceof HttpError && e.status === 409);
+    await assert.rejects(r.svc.runInFolder(r.cwd, "  ", spec()), (e) => e instanceof HttpError && e.status === 400);
+    assert.equal(calls(r.state).length, 0);
+  });
+  it("serialises runs of one folder (ordering from events.jsonl) and drains the chain", async () => {
+    const r = rig("slow");
+    await Promise.all([r.svc.runInFolder(r.cwd, "A", spec()), r.svc.runInFolder(path.join(r.cwd, "."), "B", spec())]);
+    assert.deepEqual(events(r.state).map((e) => e.ev + e.prompt), ["startA", "endA", "startB", "endB"]);
+    await until(() => r.svc.pendingRuns() === 0);
+  });
+  it("runs in different folders do not wait for each other", async () => {
+    const r = rig("slow"); const other = mkdir();
+    await Promise.all([r.svc.runInFolder(r.cwd, "A", spec()), r.svc.runInFolder(other, "B", spec())]);
+    assert.deepEqual(events(r.state).map((e) => e.ev), ["start", "start", "end", "end"]);
+  });
+  it("a failed folder run does not block the next", async () => {
+    const r = rig("fail");
+    const p = r.svc.runInFolder(r.cwd, "one", spec()), q = r.svc.runInFolder(r.cwd, "two", spec());
+    assert.equal((await p).status, "failed"); assert.equal((await q).status, "failed");
+    assert.equal(calls(r.state).length, 2);
+  });
+  it("cancelAll cancels a folder run and queued folder runs do not spawn", async () => {
+    const r = rig("hang");
+    const p = r.svc.runInFolder(r.cwd, "x", spec()), q = r.svc.runInFolder(r.cwd, "y", spec());
+    await until(() => events(r.state).length > 0);
+    r.svc.cancelAll();
+    assert.equal((await p).status, "cancelled"); assert.equal((await q).status, "cancelled");
+    assert.equal(calls(r.state).length, 1);
+  });
+});
+
+describe("AgentService.openConversation and isConversationBusy", () => {
+  it('openConversation builds "claude --resume <id>" in the folder and rejects an unsafe id (400)', () => {
+    const r = rig();
+    r.svc.openConversation("c-3", r.cwd);
+    assert.deepEqual(r.created, [{ cwd: r.cwd, name: "", runCommand: "claude --resume c-3" }]);
+    for (const bad of ["--foo", "x & calc", ""]) assert.throws(() => r.svc.openConversation(bad, r.cwd), (e) => e instanceof HttpError && e.status === 400, bad);
+    assert.throws(() => r.svc.openConversation("c-3", path.join(r.cwd, "gone")), (e) => e.status === 400);
+    assert.equal(r.created.length, 1);
+  });
+  it("isConversationBusy reflects a running terminal session", () => {
+    const r = rig("ok", { sessions: [{ id: 1, claudeSessionId: "c-1", claudeRunning: true }] });
+    assert.equal(r.svc.isConversationBusy("c-1"), true); assert.equal(r.svc.isConversationBusy("c-2"), false);
+    r.list[0].claudeRunning = false; assert.equal(r.svc.isConversationBusy("c-1"), false);
+  });
+});

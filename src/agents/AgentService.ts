@@ -7,7 +7,7 @@ import type { SessionManager } from "../sessions/SessionManager";
 import { safeId } from "../core/ids";
 import { claudePaths, findTranscript } from "../claude/paths";
 import * as os from "os";
-import { Agent, AgentInput, validateAgentInput } from "./Agent";
+import { Agent, AgentInput, Permission, validateAgentInput } from "./Agent";
 import type { AgentStore } from "./AgentStore";
 import type { RunResult, RunSpec, RunHandle } from "./ClaudeRunner";
 import type { ConversationForker } from "./ConversationForker";
@@ -29,6 +29,17 @@ export interface AgentServiceDeps {
   isDir: (p: string) => boolean;
   /** Claude's projects folder, used to tell whether a stored conversation has a transcript. Defaults to the real one. */
   projectsDir?: string;
+}
+
+export type ConversationMode = "agent" | "fork" | "fresh";
+
+/** Per-run settings on top of the agent's. `permission` and `model` replace the agent's for that run only. */
+export interface RunOverrides extends Partial<RunSpec> { conversation?: ConversationMode; permission?: Permission; model?: string }
+
+export interface FolderRunSpec { permission: Permission; model?: string; maxBudgetUsd: number; timeoutMs: number; logPath?: string }
+
+function cancelledBeforeStart(): RunResult {
+  return { status: "cancelled", conversationId: "", text: "", costUsd: 0, numTurns: 0, durationMs: 0, exitCode: null, error: "Cancelled before it started" };
 }
 
 export function adoptionPrompt(name: string, specialty: string): string {
@@ -153,46 +164,76 @@ export class AgentService {
     return this.d.sessions.create({ cwd, name: "", runCommand: `claude --resume ${safeId(conversationId)} --fork-session` });
   }
 
-  async run(id: string, prompt: string, overrides: Partial<RunSpec> = {}): Promise<RunResult> {
+  /** Opens an existing conversation (for example a fork or fresh run's) as an ordinary terminal session. */
+  openConversation(conversationId: string, cwd: string): Session {
+    const id = safeId(conversationId, "conversation id has unexpected characters");
+    if (!this.d.isDir(cwd)) throw new HttpError(400, "cwd is not an existing folder");
+    return this.d.sessions.create({ cwd, name: "", runCommand: `claude --resume ${id}` });
+  }
+
+  async run(id: string, prompt: string, overrides: RunOverrides = {}): Promise<RunResult> {
     const first = this.get(id);
     if (typeof prompt !== "string" || !prompt.trim()) throw new HttpError(400, "prompt is required");
     if (!this.d.isDir(first.cwd)) throw new HttpError(409, `the agent's folder no longer exists: ${first.cwd}`);
+    const mode = overrides.conversation ?? "agent";
+    if (mode !== "agent" && mode !== "fork" && mode !== "fresh") throw new HttpError(400, "conversation mode is not valid");
     const epoch = this.epoch;
     // One writer per agent (outer chain, fixed key) and per conversation (inner chain, key resolved when the job starts,
-    // so a conversation bound by an earlier run is still honoured).
+    // so a conversation bound by an earlier run is still honoured). A fresh run touches no existing conversation.
     return await this.enqueue(`agent:${first.id}`, async () => {
       const cur = this.get(id);
-      const exec = (): Promise<RunResult> => this.execute(id, prompt, overrides, epoch);
-      return cur.conversationId ? this.enqueue(cur.conversationId, exec) : exec();
+      const exec = (): Promise<RunResult> => this.execute(id, prompt, overrides, mode, epoch);
+      return mode !== "fresh" && cur.conversationId ? this.enqueue(cur.conversationId, exec) : exec();
     });
   }
 
-  private async execute(id: string, prompt: string, overrides: Partial<RunSpec>, epoch: number): Promise<RunResult> {
-    if (epoch !== this.epoch) {
-      return { status: "cancelled", conversationId: "", text: "", costUsd: 0, numTurns: 0, durationMs: 0, exitCode: null, error: "Cancelled before it started" };
-    }
+  /** Runs a prompt in a folder with no agent and no resumed conversation. Runs in one folder never overlap. */
+  async runInFolder(cwd: string, prompt: string, spec: FolderRunSpec): Promise<RunResult> {
+    if (typeof prompt !== "string" || !prompt.trim()) throw new HttpError(400, "prompt is required");
+    if (typeof cwd !== "string" || !cwd) throw new HttpError(400, "cwd is required");
+    const abs = path.resolve(cwd);
+    if (!this.d.isDir(abs)) throw new HttpError(409, `the folder no longer exists: ${abs}`);
+    const epoch = this.epoch;
+    return await this.enqueue(`folder:${abs}`, async () => {
+      if (epoch !== this.epoch) return cancelledBeforeStart();
+      if (!this.d.isDir(abs)) throw new HttpError(409, `the folder no longer exists: ${abs}`);
+      return this.track(this.d.runner.run({
+        cwd: abs, prompt, permission: spec.permission, model: spec.model || undefined,
+        maxBudgetUsd: spec.maxBudgetUsd, timeoutMs: spec.timeoutMs, logPath: spec.logPath,
+      }));
+    });
+  }
+
+  private async track(handle: RunHandle): Promise<RunResult> {
+    this.handles.add(handle);
+    try { return await handle.done; } finally { this.handles.delete(handle); }
+  }
+
+  private async execute(id: string, prompt: string, overrides: RunOverrides, mode: ConversationMode, epoch: number): Promise<RunResult> {
+    if (epoch !== this.epoch) return cancelledBeforeStart();
     const a = this.get(id);
     if (!this.d.isDir(a.cwd)) throw new HttpError(409, `the agent's folder no longer exists: ${a.cwd}`);
-    if (a.conversationId && this.inUse(a.conversationId)) {
+    if (mode !== "fresh" && a.conversationId && this.inUse(a.conversationId)) {
       throw new HttpError(409, "the conversation is open in a running terminal session; close it or wait before running the agent");
     }
-    // A stored conversation that never got a transcript cannot be resumed: run a fresh one (its id is bound below).
-    const resumable = !!a.conversationId && this.hasTranscript(a.conversationId, a.cwd);
-    const handle = this.d.runner.run({
-      cwd: a.cwd, prompt, resume: resumable ? a.conversationId : undefined, permission: a.permission,
-      model: a.model, instructions: a.instructions, briefingFile: a.briefingFile, addDirs: a.addDirs, mcpConfig: a.mcpConfig,
+    // A stored conversation that never got a transcript cannot be resumed: run a fresh one (its id is bound below, "agent" mode only).
+    const resumable = mode !== "fresh" && !!a.conversationId && this.hasTranscript(a.conversationId, a.cwd);
+    const r = await this.track(this.d.runner.run({
+      cwd: a.cwd, prompt, resume: resumable ? a.conversationId : undefined, fork: resumable && mode === "fork" ? true : undefined,
+      permission: overrides.permission ?? a.permission,
+      model: overrides.model || a.model, instructions: a.instructions, briefingFile: a.briefingFile, addDirs: a.addDirs, mcpConfig: a.mcpConfig,
       maxBudgetUsd: overrides.maxBudgetUsd ?? DEFAULT_BUDGET_USD,
       timeoutMs: overrides.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       logPath: overrides.logPath,
-    });
-    this.handles.add(handle);
-    let r: RunResult;
-    try { r = await handle.done; } finally { this.handles.delete(handle); }
+    }));
     try {
-      // A successful run decides the agent's conversation (a resumed run may come back on a new id); failed or cancelled ones never do.
-      const bind = r.status === "succeeded" && r.conversationId && r.conversationId !== a.conversationId;
+      // Only an "agent" run's successful result decides the agent's conversation (a resumed run may come back on a new id);
+      // failed or cancelled ones never do, and neither do fork or fresh runs.
+      const bind = mode === "agent" && r.status === "succeeded" && r.conversationId && r.conversationId !== a.conversationId;
       this.d.store.update(id, { lastRunAt: Date.now(), ...(bind ? { conversationId: r.conversationId } : {}) });
     } catch {}   // the agent may have been removed while it ran
+    // A failed fork has no conversation of its own: never hand back the source as if it were the run's.
+    if (mode === "fork" && resumable && r.conversationId === a.conversationId) return { ...r, conversationId: "" };
     return r;
   }
 
@@ -200,6 +241,9 @@ export class AgentService {
   pendingRuns(): number { return this.chains.size; }
 
   cancelAll(): void { this.epoch++; for (const h of [...this.handles]) h.cancel(); this.d.runner.cancelAll?.(); }
+
+  /** True while the conversation is open in a running terminal session. */
+  isConversationBusy(conversationId: string): boolean { return this.inUse(conversationId); }
 
   private inUse(conversationId: string): boolean {
     return this.d.sessions.all().some((s) => s.claudeSessionId === conversationId && s.claudeRunning);
