@@ -4,7 +4,7 @@ const { describe, it, mock } = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("fs"), os = require("os"), path = require("path");
 const { Crypto } = require("../../dist/core/Crypto");
-const { JsonStore } = require("../../dist/core/JsonStore");
+const { JsonStore, sweepTempFiles } = require("../../dist/core/JsonStore");
 const { StateStore } = require("../../dist/persistence/StateStore");
 const { HistoryStore } = require("../../dist/persistence/HistoryStore");
 const { ArchiveStore } = require("../../dist/persistence/ArchiveStore");
@@ -36,10 +36,95 @@ describe("JsonStore", () => {
     const s = new JsonStore({ path: path.join(d, "a.enc"), crypto: mk(d), fallback: () => ["fb"], legacyPath: legacy, acceptLegacy: (v) => Array.isArray(v) && v.length > 0 });
     assert.deepEqual(s.load(), ["fb"]); assert.ok(fs.existsSync(legacy));
   });
+  it("save writes a unique <path>.<pid>.<random>.tmp and renames it over the target; no .tmp is left behind", () => {
+    const d = tmp(); const p = path.join(d, "a.enc"); const s = new JsonStore({ path: p, crypto: mk(d), fallback: () => [] });
+    const seen = [];
+    const original = fs.renameSync;
+    const rename = mock.method(fs, "renameSync", (from, to) => { seen.push([from, to]); return original.call(fs, from, to); });
+    try { s.save([1]); } finally { rename.mock.restore(); }
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0][1], p);
+    assert.match(path.basename(seen[0][0]), new RegExp("^a\.enc\." + process.pid + "\.[0-9a-f]{8,}\.tmp$"));
+    assert.deepEqual(fs.readdirSync(d).filter((f) => f.endsWith(".tmp")), []);
+    assert.deepEqual(s.load(), [1]);
+  });
+  it("a failing rename leaves the old file intact and removes the temp file", () => {
+    const d = tmp(); const p = path.join(d, "a.enc"); const s = new JsonStore({ path: p, crypto: mk(d), fallback: () => [] });
+    s.save(["old"]);
+    const before = fs.readFileSync(p, "utf8");
+    const rename = mock.method(fs, "renameSync", () => { throw new Error("EXDEV simulated"); });
+    try { assert.throws(() => s.save(["new"]), /EXDEV simulated/); } finally { rename.mock.restore(); }
+    assert.equal(fs.readFileSync(p, "utf8"), before, "the target is byte-for-byte the old file");
+    assert.deepEqual(s.load(), ["old"]);
+    assert.deepEqual(fs.readdirSync(d).filter((f) => f.endsWith(".tmp")), []);
+  });
+  it("two saves use different temp names", () => {
+    const d = tmp(); const p = path.join(d, "a.enc"); const s = new JsonStore({ path: p, crypto: mk(d), fallback: () => [] });
+    const seen = [];
+    const original = fs.renameSync;
+    const rename = mock.method(fs, "renameSync", (from, to) => { seen.push(from); return original.call(fs, from, to); });
+    try { s.save([1]); s.save([2]); } finally { rename.mock.restore(); }
+    assert.equal(seen.length, 2);
+    assert.notEqual(seen[0], seen[1]);
+  });
+  it("a rename that fails briefly with EPERM/EBUSY/EACCES is retried and the save stays atomic (injected fs)", () => {
+    for (const c of ["EPERM", "EBUSY", "EACCES"]) {
+      const d = tmp(); const p = path.join(d, "a.enc");
+      let fails = 2, renames = 0, direct = 0;
+      const ifs = { ...fs,
+        renameSync: (f, t) => { renames++; if (fails-- > 0) throw Object.assign(new Error(c), { code: c }); return fs.renameSync(f, t); },
+        writeFileSync: (f, ...a) => { if (f === p) direct++; return fs.writeFileSync(f, ...a); } };
+      const s = new JsonStore({ path: p, crypto: mk(d), fallback: () => [], fs: ifs });
+      s.save(["new"]);
+      assert.equal(renames, 3, c);
+      assert.equal(direct, 0, "no direct write was needed");
+      assert.deepEqual(s.load(), ["new"]);
+      assert.deepEqual(fs.readdirSync(d).filter((f) => f.endsWith(".tmp")), []);
+    }
+  });
+  it("when the rename keeps failing with EPERM the save falls back to a direct write (no worse than before atomic saves)", () => {
+    const d = tmp(); const p = path.join(d, "a.enc");
+    let renames = 0;
+    const ifs = { ...fs, renameSync: () => { renames++; throw Object.assign(new Error("EPERM"), { code: "EPERM" }); } };
+    const s = new JsonStore({ path: p, crypto: mk(d), fallback: () => [], fs: ifs });
+    s.save(["old"]);
+    s.save(["new"]);
+    assert.ok(renames >= 5, "the retries ran first");
+    assert.deepEqual(s.load(), ["new"], "the new content was written");
+    assert.deepEqual(fs.readdirSync(d).filter((f) => f.endsWith(".tmp")), [], "the temp file was removed");
+  });
+  it("signature() changes with every save and with an outside modification, and is null for a missing file", () => {
+    const d = tmp(); const p = path.join(d, "a.enc"); const s = new JsonStore({ path: p, crypto: mk(d), fallback: () => [] });
+    assert.equal(s.signature(), null);
+    s.save([1]); const a = s.signature(); assert.ok(a);
+    assert.equal(s.signature(), a, "stable while untouched");
+    s.save([1, 2, 3]); const b = s.signature(); assert.notEqual(b, a);
+    const t = new Date(Date.now() + 5000); fs.utimesSync(p, t, t);
+    assert.notEqual(s.signature(), b, "mtime alone is enough");
+  });
   it("reads files written by the old server (compatibility fixture)", () => {
     const fx = path.join(__dirname, "..", "fixtures", "crypto");
     const dir = tmp(); fs.copyFileSync(path.join(fx, "cipher.json"), path.join(dir, "x.enc")); fs.copyFileSync(path.join(fx, "key"), path.join(dir, "key"));
     assert.equal(new JsonStore({ path: path.join(dir, "x.enc"), crypto: mk(dir), fallback: () => null }).load().hello, "wörld");
+  });
+});
+
+describe("sweepTempFiles", () => {
+  it("removes only ~/.agenv-*.enc.*.tmp files older than an hour", () => {
+    const d = tmp();
+    const mkf = (name, ageMs) => { const f = path.join(d, name); fs.writeFileSync(f, "x"); const t = new Date(Date.now() - ageMs); fs.utimesSync(f, t, t); return f; };
+    const H = 3600_000;
+    const oldTmp = mkf(".agenv-runs.enc.1234.abcdef0123.tmp", 2 * H);
+    const oldTmp2 = mkf(".agenv-state.enc.9.ff.tmp", 5 * H);
+    const young = mkf(".agenv-runs.enc.1234.young.tmp", 10 * 60_000);
+    const real = mkf(".agenv-runs.enc", 5 * H);
+    const lockTmp = mkf(".agenv-automation.lock.1.aa.tmp", 5 * H);
+    const other = mkf("notes.enc.1.2.tmp", 5 * H);
+    const dir = path.join(d, ".agenv-x.enc.1.2.tmp"); fs.mkdirSync(dir);
+    sweepTempFiles(d);
+    assert.deepEqual([oldTmp, oldTmp2].map(fs.existsSync), [false, false]);
+    assert.deepEqual([young, real, lockTmp, other, dir].map(fs.existsSync), [true, true, true, true, true]);
+    assert.doesNotThrow(() => sweepTempFiles(path.join(d, "missing")));
   });
 });
 

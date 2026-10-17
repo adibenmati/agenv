@@ -1,6 +1,6 @@
 # agenv: scheduled routines — design
 
-Date: 2026-10-17 · Status: **amended 2026-10-17 (routines now target agents) — needs re-approval** · Target release: 1.7.0 · Builds on the TypeScript backend (1.5.0, merged, unreleased) and on **agents** (`2026-10-17-agents-design.md`, 1.6.0)
+Date: 2026-10-17 · Status: **implemented in the 1.7.0 branch (`feat/routines-impl`); not yet merged or published** · Target release: 1.7.0 · Builds on the TypeScript backend (1.5.0, merged, unreleased) and on **agents** (`2026-10-17-agents-design.md`, 1.6.0)
 
 ## 1. Goal and intent
 
@@ -28,7 +28,7 @@ Creating, forking and compacting agents/conversations belongs to the agents spec
 
 - **Routine** — a named schedule + prompt + folder + target + permission settings.
 - **Run** — one execution of a routine (scheduled, manual, or catch-up). Has a status, cost, duration, log.
-- **Executor** — how a run actually executes. 1.7.0 ships `HeadlessClaudeExecutor`, a thin layer over the agents' shared runner.
+- **Executor** — how a run actually executes. 1.7.0 ships `AgentRunExecutor`, a thin layer over `AgentService` and the agents' shared runner.
 - **Automation switch** — a global "Pause all automation" flag plus global caps, checked before any run starts.
 
 ## 3. Data model
@@ -42,15 +42,15 @@ Creating, forking and compacting agents/conversations belongs to the agents spec
 | `enabled` | scheduler ignores disabled routines |
 | `cron`, `timezone` | 5-field cron (presets: hourly, daily 09:00, weekdays 09:00, weekly Mon 09:00) + IANA timezone (default: the machine's) |
 | `prompt` | what the agent is asked to do (≤ 20 000 chars) |
-| `target` | `{ kind: "agent", agentId }` (**the normal case**: folder, conversation, instructions, extra sources, MCP config and model come from the agent); or `{ kind: "folder", cwd }` for a one-off routine without an agent (new conversation) |
+| `target` | `{ kind: "agent", agentId }` (**the normal case**: folder, conversation, instructions, extra sources, MCP config and model come from the agent); or `{ kind: "folder", cwd }` for a one-off routine without an agent (new conversation); `cwd` must be an absolute path and is stored normalised |
 | `conversation` | for agent targets: `"agent"` (default) — resume the agent's own conversation, so its context accumulates (runs for one conversation are serialised); `"fork"` — run in a throw-away fork of the agent's conversation each time, leaving the agent's conversation untouched; `"fresh"` — a new conversation each run |
-| `permission` | `{ mode: "plan" | "acceptEdits" | "dontAsk" | "bypassPermissions", allowedTools: string[] }` — see §6; defaults to the agent's permission, overridable per routine |
+| `permission` | `{ mode: "plan" | "acceptEdits" | "dontAsk" | "bypassPermissions", allowedTools: string[] }` — see §6; defaults to `acceptEdits` when the routine does not set one. The agent's own permission is **not** inherited |
 | `model` | optional `--model` override of the agent's |
-| `maxBudgetUsd` | per-run cap passed as `--max-budget-usd` (default **2**) |
+| `maxBudgetUsd` | per-run cap passed as `--max-budget-usd` (default **2**). The CLI checks it after each turn, so a run can overshoot slightly |
 | `timeoutMin` | kill a run after this long (default 20, max 120) |
 | `concurrency` | `coalesce_if_active` (default) \| `skip_if_active` \| `always_enqueue` |
 | `catchUp` | `skip_missed` (default) \| `enqueue_missed_with_cap` (cap 25, never for schedules firing more often than hourly) |
-| `maxRunsPerDay` | optional per-routine cap |
+| `maxRunsPerDay` | optional per-routine cap; "a day" runs from machine-local midnight (as does the global daily cost cap) |
 | `nextRunAt`, `lastRunAt` | persisted so a restart neither re-fires nor forgets |
 
 `Run` (history in `~/.agenv-runs.enc`, newest 500; per-run log in `~/.agenv-runs/<runId>.log`, ≤ 5 MB, tail kept):
@@ -63,21 +63,23 @@ cron.ts               parse + next-fire calculation in an IANA zone (the tested 
 Routine.ts            types + validation (cron, timezone, limits, enums)
 RoutineStore.ts       CRUD over JsonStore<Routine[]>
 RunStore.ts           run history (JsonStore) + log files
-RunExecutor.ts        interface (Strategy): execute(run, routine, hooks) → { status, costUsd, ... }
-HeadlessClaudeExecutor.ts   resolves the routine's agent (or folder) and delegates to the agents' shared `ClaudeRunner`
+RunExecutor.ts        interface (Strategy): execute(run, routine, hooks) → { status, costUsd, ... }; AgentRunExecutor resolves the routine's agent (or folder) and delegates to `AgentService`, which uses the agents' shared `ClaudeRunner`
                       (`src/agents/ClaudeRunner.ts`: arguments, spawn, stream-json log, tree-kill, timeout, budget) — no second copy
-RunQueue.ts           FIFO with a global parallel limit (default 2) and per-routine "active" lookup
+RunQueue.ts           FIFO with a global parallel limit (default 2); a run whose agent/folder already has a started run stays queued (keyOf) and later runs with other keys start first, so a busy agent never holds a slot
 RoutineScheduler.ts   30 s tick; claims due routines; applies concurrency/catch-up policies and the guards
 AutomationGuards.ts   global pause, daily run/cost caps, per-routine daily cap — checked before a run starts
+AutomationOwnership.ts  ~/.agenv-automation.lock: only one agenv instance on a machine runs the schedules
 ```
-They are wired in `runtime.ts` like every other service and publish `run:update` events on a small typed bus; the
-existing `WsGateway.broadcastEvent("runs-updated")` tells open browsers to refetch (no new socket protocol).
+They are wired in `runtime.ts` like every other service. There is no `run:update` bus: every routine, run or settings change
+calls one `onChange`, which a `ChangeBatcher` turns into a single `WsGateway.broadcastEvent("runs-updated")` per burst,
+and open browsers refetch (no new socket protocol).
 
 HTTP (`src/http/routes/routines.ts`, authenticated; writes added to the tunnel read-only list):
 `GET/POST /api/routines`, `PUT/DELETE /api/routines/:id`, `POST /api/routines/:id/run` (run now),
 `GET /api/routines/:id/runs`, `GET /api/runs/:id`, `GET /api/runs/:id/log?tail=`, `POST /api/runs/:id/cancel`,
 `POST /api/runs/:id/open` (creates a normal session in the run's folder running `claude --resume <conversationId>`),
-`GET/PUT /api/automation` (pause flag, global caps).
+`GET/PUT /api/automation` (pause flag, global caps; GET also says whether this instance owns the schedules: `owner`, `ownerPort`).
+`GET /api/routines` carries each routine's newest run (`lastRun`) and its `activeRuns` count, so the panel needs no per-routine call.
 
 ## 5. How a run works
 
@@ -92,15 +94,18 @@ HTTP (`src/http/routes/routines.ts`, authenticated; writes added to the tunnel r
 4. **Execute.** The queue starts it when a slot is free:
    `claude -p --output-format stream-json --verbose --resume <conversationId> --permission-mode <mode> [--allowedTools …]
    [--model …] [--append-system-prompt …] [--append-system-prompt-file …] [--add-dir …] [--mcp-config …]
-   --max-budget-usd <n>`, prompt on stdin, `cwd` = the **agent's folder** (agents spec §5). With `conversation: "fork"` the
+   --max-budget-usd <n> -- <prompt>`, the prompt is passed as an argument after `--` (not on stdin), `cwd` = the **agent's folder** (agents spec §5). With `conversation: "fork"` the
    resume adds `--fork-session`; with `"fresh"` there is no `--resume`.
-   stdout lines go to the run's log and a few fields (turns, partial text) update the Run live.
+   The executor does not spawn anything itself: it delegates to `AgentService` (`run` / `runInFolder`), which uses the shared `ClaudeRunner`.
+   stdout lines go to the run's log, which the panel tails. The Run record itself (turns, cost, summary) is written once, when the run finishes: turns and partial text are not updated live.
 5. **Finish.** The final `result` event gives cost, turns, conversation id and text. The Run becomes
    `succeeded`/`failed`; a timeout kills the whole process tree (`taskkill /T /F` on Windows) → `timed_out`;
    cancel does the same → `cancelled`. If the agent had no conversation yet, the new one is saved on the agent. (Verified result
    fields: `result`, `session_id`, `total_cost_usd`, `num_turns`, `duration_ms`, `is_error`.)
-6. **Missed runs.** At startup, a routine whose `nextRunAt` is in the past follows its `catchUp` policy: `skip_missed`
-   fires once and jumps ahead; `enqueue_missed_with_cap` replays up to 25 (never for sub-hourly schedules).
+6. **Missed runs.** At startup, a routine whose `nextRunAt` is in the past follows its `catchUp` policy: `skip_missed`:
+   slots older than the grace window (max(2 min, 4 x tick interval)) are not run; the schedule jumps to the next future slot; a visible skipped
+   row records how many were missed. A slot within the grace fires normally (so a quick restart still fires it, once). `enqueue_missed_with_cap`
+   replays up to 25 of the missed slots (never for sub-hourly schedules).
 7. **Open interactively.** The agent's "Open terminal": an ordinary agenv session running `claude --resume <conversationId>`
    in the agent's folder — from there it is a normal terminal (the Claude linking picks it up). For `"fork"` runs it opens the run's fork.
 
@@ -110,8 +115,9 @@ HTTP (`src/http/routes/routines.ts`, authenticated; writes added to the tunnel r
   **default**), *Allowlist* (`dontAsk` + `allowedTools`, e.g. `Bash(git status)`), *Skip all permissions*
   (`bypassPermissions`). Skip-all needs an explicit checkbox and a warning that the agent can run any command unattended;
   it is never the default and is never set implicitly.
-- **Budgets:** per-run `--max-budget-usd` (default $2), optional per-routine runs/day, global daily cost cap
-  (`automation.maxDailyCostUsd`, default none) — all checked *before* spawning.
+- **Budgets:** per-run `--max-budget-usd` (default $2; the CLI checks it after each turn, so a run can overshoot slightly),
+  optional per-routine runs/day, global daily cost cap (`automation.maxDailyCostUsd`, default none) — all checked *before*
+  spawning, against machine-local midnight.
 - **Global pause** stops the scheduler and refuses manual runs until resumed; running runs are not killed unless asked.
 - **Isolation:** the child gets the server's environment minus agenv's own token; logs are capped; the routines API sits
   behind the same auth, rate limit and tunnel read-only rule as everything else.

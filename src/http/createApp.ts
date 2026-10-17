@@ -8,6 +8,7 @@ import { filesRouter } from "./routes/files";
 import { gitRouter } from "./routes/git";
 import { ngrokRouter } from "./routes/ngrok";
 import { promptsRouter } from "./routes/prompts";
+import { routinesRouter } from "./routes/routines";
 import { searchRouter } from "./routes/search";
 import { sessionsRouter } from "./routes/sessions";
 import { systemRouter } from "./routes/system";
@@ -39,6 +40,7 @@ export function createApp(d: AppDeps): express.Express {
   app.use(systemRouter(d));
   app.use(claudeRouter(d));
   app.use(agentsRouter(d));
+  app.use(routinesRouter(d));
   app.use(aiRouter(d));
   app.use(promptsRouter(d));
   app.use(ngrokRouter(d));

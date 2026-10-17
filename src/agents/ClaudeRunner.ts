@@ -28,6 +28,8 @@ export interface RunResult {
   durationMs: number;
   exitCode: number | null;
   error?: string;
+  /** Not from the runner: AgentService adds a remark about how the run started (for example that a stored conversation was lost). */
+  note?: string;
 }
 
 export interface RunHooks { onEvent?: (e: unknown) => void }
@@ -71,7 +73,12 @@ class LiveLog {
   constructor(private path: string | undefined) {
     this.ok = !!path;
     if (path) {
-      try { fs.mkdirSync(dirname(path), { recursive: true }); fs.writeFileSync(path, ""); } catch { this.ok = false; }
+      // Logs hold prompts and tool output: private to the user where the platform has file modes.
+      try {
+        fs.mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+        fs.writeFileSync(path, "", { mode: 0o600 });
+        if (process.platform !== "win32") fs.chmodSync(path, 0o600);   // a file that already existed keeps its old mode otherwise
+      } catch { this.ok = false; }
     }
   }
   add(text: string): void {

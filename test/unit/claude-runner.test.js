@@ -1,6 +1,6 @@
 // test/unit/claude-runner.test.js — buildArgs and the headless ClaudeRunner against the fake claude
 "use strict";
-const { describe, it, afterEach } = require("node:test");
+const { describe, it, afterEach, mock } = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("fs"), os = require("os"), path = require("path");
 const { buildArgs, ClaudeRunner } = require("../../dist/agents/ClaudeRunner");
@@ -136,6 +136,27 @@ describe("ClaudeRunner", () => {
     await until(() => fs.existsSync(logPath) && fs.readFileSync(logPath, "utf8").includes("SLOW-FIRST-LINE"));
     assert.equal(finished, false);
     assert.equal((await h.done).status, "succeeded");
+  });
+  it("asks for a private log: the folder is created with mode 0o700 and the file with 0o600", async () => {
+    const logPath = path.join(mkdir(), "runs-dir", "run.log");
+    const mkdirs = [], writes = [];
+    const origMkdir = fs.mkdirSync, origWrite = fs.writeFileSync;
+    mock.method(fs, "mkdirSync", (p, o) => { mkdirs.push([String(p), o]); return origMkdir.call(fs, p, o); });
+    mock.method(fs, "writeFileSync", (p, d, o) => { writes.push([String(p), o]); return origWrite.call(fs, p, d, o); });
+    try { await runner("ok", mkdir()).run(spec({ logPath })).done; } finally { mock.restoreAll(); }
+    const dirCall = mkdirs.find(([p]) => p === path.dirname(logPath));
+    assert.ok(dirCall, "the log folder is created by the runner");
+    assert.equal(dirCall[1].mode, 0o700);
+    assert.equal(dirCall[1].recursive, true);
+    const fileCall = writes.find(([p]) => p === logPath);
+    assert.ok(fileCall, "the log file is created by the runner");
+    assert.equal(fileCall[1].mode, 0o600);
+  });
+  it("on POSIX the log folder is drwx------ and the file -rw-------", { skip: process.platform === "win32" && "POSIX file modes do not exist on Windows" }, async () => {
+    const logPath = path.join(mkdir(), "runs-dir", "run.log");
+    await runner("ok", mkdir()).run(spec({ logPath })).done;
+    assert.equal(fs.statSync(path.dirname(logPath)).mode & 0o777, 0o700);
+    assert.equal(fs.statSync(logPath).mode & 0o777, 0o600);
   });
   it("a normal success run logs every event line and prefixes stderr", async () => {
     const logPath = path.join(mkdir(), "run.log");

@@ -156,6 +156,21 @@ describe("AgentService conversations without a transcript", () => {
     assert.ok(res.conversationId && res.conversationId !== UUID);
     assert.equal(r.store.get(a.id).conversationId, res.conversationId);
   });
+  it("run: a stored conversation that cannot be resumed is reported in result.note; a resumed or blank one is not", async () => {
+    const note = "started a fresh conversation (previous one not found)";
+    const proj = mkdir(); const r = rig("ok", { projectsDir: proj });
+    const ghost = r.svc.createBlank(input(r.cwd)); r.store.update(ghost.id, { conversationId: UUID });
+    assert.equal((await r.svc.run(ghost.id, "hi")).note, note);
+    const ghost2 = r.svc.createBlank(input(r.cwd, { name: "Ghost2" })); r.store.update(ghost2.id, { conversationId: UUID });
+    assert.equal((await r.svc.run(ghost2.id, "hi", { conversation: "fork" })).note, note);
+    const blank = r.svc.createBlank(input(r.cwd, { name: "Blank" }));
+    assert.equal((await r.svc.run(blank.id, "hi")).note, undefined, "nothing was lost for an agent with no conversation");
+    const ghost3 = r.svc.createBlank(input(r.cwd, { name: "Ghost3" })); r.store.update(ghost3.id, { conversationId: UUID });
+    assert.equal((await r.svc.run(ghost3.id, "hi", { conversation: "fresh" })).note, undefined, "a fresh run never wanted the old one");
+    const proj2 = mkdir(); withTranscript(proj2, UUID); const r2 = rig("ok", { projectsDir: proj2 });
+    const ok = r2.svc.createBlank(input(r2.cwd)); r2.store.update(ok.id, { conversationId: UUID });
+    assert.equal((await r2.svc.run(ok.id, "hi")).note, undefined);
+  });
   it("run: stored id with a transcript resumes it", async () => {
     const proj = mkdir(); withTranscript(proj, UUID); const r = rig("ok", { projectsDir: proj });
     const a = r.svc.createBlank(input(r.cwd)); r.store.update(a.id, { conversationId: UUID });
@@ -315,5 +330,221 @@ describe("AgentService.remove", () => {
     r.svc.remove(a.id);
     assert.equal(r.store.list().length, 0); assert.ok(fs.existsSync(t));
     assert.equal(calls(r.state).length, 1);
+  });
+});
+
+describe("AgentService conversation modes and overrides", () => {
+  const argAt = (argv, f) => argv[argv.indexOf(f) + 1];
+  const bound = (r, conv = "c-1", o = {}) => { withSource(r.state, conv); const a = r.svc.createBlank(input(r.cwd, o)); r.store.update(a.id, { conversationId: conv }); return a; };
+
+  it("conversation fork resumes with --fork-session and leaves the agent's conversationId unchanged", async () => {
+    const r = rig(); const a = bound(r);
+    const res = await r.svc.run(a.id, "hi", { conversation: "fork" });
+    assert.equal(res.status, "succeeded");
+    const argv = calls(r.state)[0].argv;
+    assert.equal(argAt(argv, "--resume"), "c-1"); assert.ok(argv.includes("--fork-session"));
+    assert.ok(res.conversationId && res.conversationId !== "c-1");
+    const cur = r.store.get(a.id);
+    assert.equal(cur.conversationId, "c-1"); assert.equal(typeof cur.lastRunAt, "number");
+  });
+  it("conversation fork on an agent with no conversation, or one without a transcript, runs fresh", async () => {
+    const r = rig(); const blank = r.svc.createBlank(input(r.cwd));
+    const res = await r.svc.run(blank.id, "hi", { conversation: "fork" });
+    assert.equal(res.status, "succeeded");
+    assert.ok(!calls(r.state)[0].argv.includes("--resume")); assert.ok(!calls(r.state)[0].argv.includes("--fork-session"));
+    assert.equal(r.store.get(blank.id).conversationId, "");
+    const ghost = r.svc.createBlank(input(r.cwd, { name: "Ghost" })); r.store.update(ghost.id, { conversationId: "no-transcript" });
+    await r.svc.run(ghost.id, "hi", { conversation: "fork" });
+    const argv = calls(r.state)[1].argv;
+    assert.ok(!argv.includes("--resume")); assert.ok(!argv.includes("--fork-session"));
+    assert.equal(r.store.get(ghost.id).conversationId, "no-transcript");
+  });
+  it("conversation fresh runs without --resume and does not rebind", async () => {
+    const r = rig(); const a = bound(r);
+    const res = await r.svc.run(a.id, "hi", { conversation: "fresh" });
+    assert.equal(res.status, "succeeded");
+    assert.ok(!calls(r.state)[0].argv.includes("--resume"));
+    assert.ok(res.conversationId && res.conversationId !== "c-1");
+    assert.equal(r.store.get(a.id).conversationId, "c-1");
+    const blank = r.svc.createBlank(input(r.cwd, { name: "Sue" }));
+    await r.svc.run(blank.id, "hi", { conversation: "fresh" });
+    assert.equal(r.store.get(blank.id).conversationId, ""); assert.equal(typeof r.store.get(blank.id).lastRunAt, "number");
+  });
+  it("conversation agent (explicit) still resumes and rebinds", async () => {
+    const r = rig(); const a = r.svc.createBlank(input(r.cwd));
+    const first = await r.svc.run(a.id, "one", { conversation: "agent" });
+    assert.equal(r.store.get(a.id).conversationId, first.conversationId);
+  });
+  it("permission and model overrides reach argv for that run only", async () => {
+    const r = rig(); const a = r.svc.createBlank(input(r.cwd, { model: "opus", permission: { mode: "acceptEdits", allowedTools: [] } }));
+    await r.svc.run(a.id, "one", { permission: { mode: "dontAsk", allowedTools: ["Read"] }, model: "haiku" });
+    await r.svc.run(a.id, "two");
+    const [one, two] = calls(r.state).map((c) => c.argv);
+    assert.equal(argAt(one, "--permission-mode"), "dontAsk"); assert.equal(argAt(one, "--allowedTools"), "Read"); assert.equal(argAt(one, "--model"), "haiku");
+    assert.equal(argAt(two, "--permission-mode"), "acceptEdits"); assert.ok(!two.includes("--allowedTools")); assert.equal(argAt(two, "--model"), "opus");
+    assert.equal(r.store.get(a.id).model, "opus"); assert.equal(r.store.get(a.id).permission.mode, "acceptEdits");
+  });
+  it("fork run waits for a running agent run (no overlap, ordering from events.jsonl)", async () => {
+    const r = rig("slow"); const a = bound(r);
+    const pA = r.svc.run(a.id, "A"), pF = r.svc.run(a.id, "F", { conversation: "fork" });
+    await Promise.all([pA, pF]);
+    assert.deepEqual(events(r.state).map((e) => e.ev + e.prompt), ["startA", "endA", "startF", "endF"]);
+    assert.equal(r.svc.pendingRuns(), 0);
+  });
+  it("fork run also waits for another agent's run on the same conversation", async () => {
+    const r = rig("slow"); const a = bound(r);
+    const b = r.svc.createBlank(input(r.cwd, { name: "Sue" })); r.store.update(b.id, { conversationId: "c-1" });
+    await Promise.all([r.svc.run(a.id, "A"), r.svc.run(b.id, "F", { conversation: "fork" })]);
+    assert.deepEqual(events(r.state).map((e) => e.ev + e.prompt), ["startA", "endA", "startF", "endF"]);
+  });
+  it("fresh run waits for the same agent's other runs", async () => {
+    const r = rig("slow"); const a = bound(r);
+    await Promise.all([r.svc.run(a.id, "A"), r.svc.run(a.id, "X", { conversation: "fresh" })]);
+    assert.deepEqual(events(r.state).map((e) => e.ev + e.prompt), ["startA", "endA", "startX", "endX"]);
+  });
+  it("fork refuses with 409 while the source conversation is open in a running terminal; fresh does not", async () => {
+    const r = rig("ok", { sessions: [{ id: 1, claudeSessionId: "c-1", claudeRunning: true }] }); const a = bound(r);
+    await assert.rejects(r.svc.run(a.id, "hi", { conversation: "fork" }), (e) => e instanceof HttpError && e.status === 409 && /terminal/.test(e.message));
+    assert.equal(calls(r.state).length, 0);
+    assert.equal((await r.svc.run(a.id, "hi", { conversation: "fresh" })).status, "succeeded");
+  });
+  it("a failed fork never reports the source conversation as its own", async () => {
+    const r = rig("fail"); const a = bound(r);
+    const res = await r.svc.run(a.id, "hi", { conversation: "fork" });
+    assert.equal(res.status, "failed"); assert.equal(res.conversationId, "");
+    assert.equal(r.store.get(a.id).conversationId, "c-1");
+  });
+  it("fork and fresh runs queued before cancelAll do not spawn", async () => {
+    const r = rig("hang"); const a = bound(r);
+    const p = r.svc.run(a.id, "x", { conversation: "fork" }), q = r.svc.run(a.id, "y", { conversation: "fresh" });
+    await until(() => events(r.state).length > 0);
+    r.svc.cancelAll();
+    assert.equal((await p).status, "cancelled"); assert.equal((await q).status, "cancelled");
+    assert.equal(calls(r.state).length, 1);
+  });
+});
+
+describe("AgentService.runInFolder", () => {
+  const spec = (o = {}) => ({ permission: { mode: "plan", allowedTools: [] }, maxBudgetUsd: 1.5, timeoutMs: 60000, ...o });
+  const argAt = (argv, f) => argv[argv.indexOf(f) + 1];
+  it("runs in that cwd with the spec's permission, model and budget, without resume", async () => {
+    const r = rig(); const log = path.join(mkdir(), "run.log");
+    const res = await r.svc.runInFolder(r.cwd, "-x go", spec({ model: "haiku", logPath: log }));
+    assert.equal(res.status, "succeeded"); assert.ok(res.conversationId);
+    const c = calls(r.state)[0];
+    assert.equal(c.cwd, fs.realpathSync(r.cwd));
+    assert.equal(argAt(c.argv, "--permission-mode"), "plan"); assert.equal(argAt(c.argv, "--model"), "haiku");
+    assert.equal(argAt(c.argv, "--max-budget-usd"), "1.5"); assert.ok(!c.argv.includes("--resume")); assert.equal(c.argv.at(-1), "-x go");
+    assert.ok(fs.existsSync(log));
+  });
+  it("rejects a missing folder with 409 and an empty prompt with 400, spawning nothing", async () => {
+    const r = rig();
+    await assert.rejects(r.svc.runInFolder(path.join(r.cwd, "gone"), "hi", spec()), (e) => e instanceof HttpError && e.status === 409);
+    await assert.rejects(r.svc.runInFolder(r.cwd, "  ", spec()), (e) => e instanceof HttpError && e.status === 400);
+    assert.equal(calls(r.state).length, 0);
+  });
+  it("a relative folder is a 400 (it would resolve against the server's working directory)", async () => {
+    const r = rig();
+    for (const rel of ["sub", ".", "./x", "../x"]) {
+      await assert.rejects(r.svc.runInFolder(rel, "hi", spec()), (e) => e instanceof HttpError && e.status === 400 && /absolute/.test(e.message), rel);
+    }
+    assert.equal(calls(r.state).length, 0);
+  });
+  it("serialises runs of one folder (ordering from events.jsonl) and drains the chain", async () => {
+    const r = rig("slow");
+    await Promise.all([r.svc.runInFolder(r.cwd, "A", spec()), r.svc.runInFolder(path.join(r.cwd, "."), "B", spec())]);
+    assert.deepEqual(events(r.state).map((e) => e.ev + e.prompt), ["startA", "endA", "startB", "endB"]);
+    await until(() => r.svc.pendingRuns() === 0);
+  });
+  it("runs in different folders do not wait for each other", async () => {
+    const r = rig("slow"); const other = mkdir();
+    await Promise.all([r.svc.runInFolder(r.cwd, "A", spec()), r.svc.runInFolder(other, "B", spec())]);
+    assert.deepEqual(events(r.state).map((e) => e.ev), ["start", "start", "end", "end"]);
+  });
+  it("a failed folder run does not block the next", async () => {
+    const r = rig("fail");
+    const p = r.svc.runInFolder(r.cwd, "one", spec()), q = r.svc.runInFolder(r.cwd, "two", spec());
+    assert.equal((await p).status, "failed"); assert.equal((await q).status, "failed");
+    assert.equal(calls(r.state).length, 2);
+  });
+  it("cancelAll cancels a folder run and queued folder runs do not spawn", async () => {
+    const r = rig("hang");
+    const p = r.svc.runInFolder(r.cwd, "x", spec()), q = r.svc.runInFolder(r.cwd, "y", spec());
+    await until(() => events(r.state).length > 0);
+    r.svc.cancelAll();
+    assert.equal((await p).status, "cancelled"); assert.equal((await q).status, "cancelled");
+    assert.equal(calls(r.state).length, 1);
+  });
+});
+
+describe("AgentService.openConversation and isConversationBusy", () => {
+  it('openConversation builds "claude --resume <id>" in the folder and rejects an unsafe id (400)', () => {
+    const r = rig();
+    r.svc.openConversation("c-3", r.cwd);
+    assert.deepEqual(r.created, [{ cwd: r.cwd, name: "", runCommand: "claude --resume c-3" }]);
+    for (const bad of ["--foo", "x & calc", ""]) assert.throws(() => r.svc.openConversation(bad, r.cwd), (e) => e instanceof HttpError && e.status === 400, bad);
+    assert.throws(() => r.svc.openConversation("c-3", path.join(r.cwd, "gone")), (e) => e.status === 400);
+    assert.equal(r.created.length, 1);
+  });
+  it("isConversationBusy reflects a running terminal session", () => {
+    const r = rig("ok", { sessions: [{ id: 1, claudeSessionId: "c-1", claudeRunning: true }] });
+    assert.equal(r.svc.isConversationBusy("c-1"), true); assert.equal(r.svc.isConversationBusy("c-2"), false);
+    r.list[0].claudeRunning = false; assert.equal(r.svc.isConversationBusy("c-1"), false);
+  });
+});
+
+describe("AgentService per-run cancellation (cancelToken and onHandle)", () => {
+  const spec = (o = {}) => ({ permission: { mode: "plan", allowedTools: [] }, maxBudgetUsd: 1.5, timeoutMs: 60000, ...o });
+  const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  it("onHandle gets a cancel function as the process starts; calling it cancels only that run", async () => {
+    const r = rig("hang"); const a = r.svc.createBlank(input(r.cwd));
+    let cancel = null;
+    const p = r.svc.run(a.id, "x", { onHandle: (c) => { cancel = c; } });
+    await until(() => cancel !== null && events(r.state).length > 0);
+    assert.equal(typeof cancel, "function");
+    cancel();
+    assert.equal((await p).status, "cancelled");
+    assert.equal(calls(r.state).length, 1);
+  });
+  it("cancelling one run leaves a concurrent run of another agent alone", async () => {
+    const r = rig("slow"); const a = r.svc.createBlank(input(r.cwd)); const b = r.svc.createBlank(input(mkdir(), { name: "Sue" }));
+    let cancelA = null;
+    const pa = r.svc.run(a.id, "A", { onHandle: (c) => { cancelA = c; } });
+    const pb = r.svc.run(b.id, "B");
+    await until(() => cancelA !== null && events(r.state).length >= 2);
+    cancelA();
+    assert.equal((await pa).status, "cancelled");
+    assert.equal((await pb).status, "succeeded");
+  });
+  it("a run whose cancelToken is set while it waits in the queue resolves cancelled without spawning", async () => {
+    const r = rig("slow"); const a = r.svc.createBlank(input(r.cwd));
+    const token = { cancelled: false };
+    const p = r.svc.run(a.id, "first"), q = r.svc.run(a.id, "second", { cancelToken: token });
+    token.cancelled = true;
+    assert.equal((await p).status, "succeeded");
+    const res = await q;
+    assert.equal(res.status, "cancelled");
+    assert.equal(calls(r.state).length, 1);
+  });
+  it("a token already cancelled never spawns, for agent and folder runs", async () => {
+    const r = rig(); const a = r.svc.createBlank(input(r.cwd));
+    assert.equal((await r.svc.run(a.id, "x", { cancelToken: { cancelled: true } })).status, "cancelled");
+    assert.equal((await r.svc.runInFolder(r.cwd, "x", spec({ cancelToken: { cancelled: true } }))).status, "cancelled");
+    assert.equal(calls(r.state).length, 0);
+  });
+  it("runInFolder reports a cancel handle and cancelling it kills the process tree", async () => {
+    const r = rig("hang"); let cancel = null;
+    const p = r.svc.runInFolder(r.cwd, "x", spec({ onHandle: (c) => { cancel = c; } }));
+    await until(() => cancel !== null && fs.existsSync(path.join(r.state, "child.pid")));
+    const child = Number(fs.readFileSync(path.join(r.state, "child.pid"), "utf8"));
+    assert.ok(alive(child));
+    cancel();
+    assert.equal((await p).status, "cancelled");
+    await until(() => !alive(child));
+  });
+  it("an onHandle that throws does not break the run", async () => {
+    const r = rig(); const a = r.svc.createBlank(input(r.cwd));
+    const res = await r.svc.run(a.id, "x", { onHandle: () => { throw new Error("boom"); } });
+    assert.equal(res.status, "succeeded");
   });
 });
