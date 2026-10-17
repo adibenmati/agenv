@@ -175,7 +175,7 @@ describe("ClaudeRunner spawn failures on Windows", () => {
     assert.equal(r.status, "failed");
     assert.match(r.error, /Could not start claude \(ENOENT\)/);
     assert.match(r.error, /AGENV_CLAUDE_BIN/);
-    assert.match(r.error, /cli\.js/);
+    assert.ok(r.error.includes(String.raw`node_modules\@anthropic-ai\claude-code\cli.js`), r.error);
   });
   it("a resolver that finds a cli.js makes the run go through node (process.execPath)", async () => {
     const state = mkdir(); let asked = 0;

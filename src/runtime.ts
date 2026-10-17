@@ -110,7 +110,7 @@ export function buildRuntime(o: RuntimeOptions): Runtime {
   const analyzer = new OutputAnalyzer(bus, isRealDir);
   const claudeRunner = new TrackedRunner(new ClaudeRunner());
   const agents = new AgentService({
-    store: agentStore, runner: claudeRunner, forker: new ConversationForker({ runner: claudeRunner }), sessions, isDir: isRealDir,
+    store: agentStore, runner: claudeRunner, forker: new ConversationForker({ runner: claudeRunner }), sessions, isDir: isRealDir, projectsDir: claude.projects,
   });
 
   // ---- tunnel, security, transport ----

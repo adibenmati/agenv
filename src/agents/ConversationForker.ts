@@ -9,7 +9,9 @@ const CREATION_BUDGET_USD = 1;
 const CREATION_TIMEOUT_MS = 5 * 60 * 1000;
 const DEVICE_RE = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
 
-// Creation runs must not touch the project. Note: "/compact" under plan mode is not yet verified against the real CLI (the opt-in real check in Task 7 will).
+// Creation runs must not touch the project. Verified with the real CLI (opt-in check): forking under plan mode works, a flag-like prompt after "--" works, the fork keeps the
+// conversation, the source transcript stays unchanged, and a resumed run reports the SAME session id. "/compact" under plan mode is still
+// UNVERIFIED: that check was inconclusive because the total spend ceiling was reached before it ran.
 const READ_ONLY = { mode: "plan" as const, allowedTools: [] as string[] };
 
 export const DISTILL_PROMPT = [

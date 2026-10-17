@@ -26,7 +26,7 @@ function rig(mode = "ok", over = {}) {
   const created = [];
   const list = over.sessions || [];
   const sessions = { create: (o) => { created.push(o); return { id: created.length, ...o }; }, get: (id) => list.find((s) => s.id === id), all: () => list };
-  const svc = new AgentService({ store, forker: new ConversationForker({ runner }), runner, sessions, isDir });
+  const svc = new AgentService({ store, forker: new ConversationForker({ runner }), runner, sessions, isDir, projectsDir: over.projectsDir || state });   // the fake keeps transcripts in <state>/transcripts, which then looks like a project folder
   return { svc, store, state, cwd, created, list, runner };
 }
 const calls = (state) => { const f = path.join(state, "calls.jsonl"); return fs.existsSync(f) ? fs.readFileSync(f, "utf8").trim().split("\n").map((l) => JSON.parse(l)) : []; };
@@ -131,6 +131,40 @@ describe("AgentService.cancelAll reaches creation runs", () => {
   });
 });
 
+describe("AgentService conversations without a transcript", () => {
+  const UUID = "11111111-2222-3333-4444-555555555555";
+  const withTranscript = (proj, id) => { fs.mkdirSync(path.join(proj, "p"), { recursive: true }); fs.writeFileSync(path.join(proj, "p", id + ".jsonl"), "{}"); };
+  it("openTerminal: stored id without a transcript starts it again with --session-id (same id)", () => {
+    const proj = mkdir(); const r = rig("ok", { projectsDir: proj });
+    const a = r.svc.createBlank(input(r.cwd)); r.store.update(a.id, { conversationId: UUID });
+    r.svc.openTerminal(a.id);
+    assert.equal(r.created[0].runCommand, `claude --session-id ${UUID}`);
+    assert.equal(r.store.get(a.id).conversationId, UUID);
+  });
+  it("openTerminal: stored id with a transcript resumes", () => {
+    const proj = mkdir(); withTranscript(proj, UUID); const r = rig("ok", { projectsDir: proj });
+    const a = r.svc.createBlank(input(r.cwd)); r.store.update(a.id, { conversationId: UUID });
+    r.svc.openTerminal(a.id);
+    assert.equal(r.created[0].runCommand, `claude --resume ${UUID}`);
+  });
+  it("run: stored id without a transcript runs fresh (no --resume) and binds the id the run returns", async () => {
+    const proj = mkdir(); const r = rig("ok", { projectsDir: proj });
+    const a = r.svc.createBlank(input(r.cwd)); r.store.update(a.id, { conversationId: UUID });
+    const res = await r.svc.run(a.id, "hi");
+    assert.equal(res.status, "succeeded");
+    assert.ok(!calls(r.state)[0].argv.includes("--resume"));
+    assert.ok(res.conversationId && res.conversationId !== UUID);
+    assert.equal(r.store.get(a.id).conversationId, res.conversationId);
+  });
+  it("run: stored id with a transcript resumes it", async () => {
+    const proj = mkdir(); withTranscript(proj, UUID); const r = rig("ok", { projectsDir: proj });
+    const a = r.svc.createBlank(input(r.cwd)); r.store.update(a.id, { conversationId: UUID });
+    await r.svc.run(a.id, "hi");
+    const argv = calls(r.state)[0].argv;
+    assert.equal(argv[argv.indexOf("--resume") + 1], UUID);
+  });
+});
+
 describe("AgentService terminals", () => {
   it('openTerminal creates a session in agent.cwd that runs "claude --resume <id>"', () => {
     const r = rig(); const a = r.svc.createBlank(input(r.cwd)); r.store.update(a.id, { conversationId: "c-1" });
@@ -143,6 +177,7 @@ describe("AgentService terminals", () => {
     const m = /^claude --session-id ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/.exec(r.created[0].runCommand);
     assert.ok(m, r.created[0].runCommand);
     assert.equal(r.store.get(a.id).conversationId, m[1]);
+    withSource(r.state, m[1]);   // claude wrote the transcript
     r.svc.openTerminal(a.id);
     assert.equal(r.created[1].runCommand, `claude --resume ${m[1]}`);
   });
@@ -152,6 +187,7 @@ describe("AgentService terminals", () => {
     const a = r.svc.createBlank(input(r.cwd, { briefingFile: f }));
     r.svc.openTerminal(a.id);
     assert.match(r.created[0].runCommand, /^claude --session-id [0-9a-f-]{36} --append-system-prompt-file \.claude\/agenv-briefings\/Bob\.md$/);
+    withSource(r.state, r.store.get(a.id).conversationId);
     r.svc.openTerminal(a.id);
     assert.match(r.created[1].runCommand, /^claude --resume [0-9a-f-]{36} --append-system-prompt-file \.claude\/agenv-briefings\/Bob\.md$/);
   });

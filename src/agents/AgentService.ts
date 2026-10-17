@@ -5,6 +5,8 @@ import { HttpError } from "../core/HttpError";
 import type { Session } from "../sessions/Session";
 import type { SessionManager } from "../sessions/SessionManager";
 import { safeId } from "../core/ids";
+import { claudePaths, findTranscript } from "../claude/paths";
+import * as os from "os";
 import { Agent, AgentInput, validateAgentInput } from "./Agent";
 import type { AgentStore } from "./AgentStore";
 import type { RunResult, RunSpec, RunHandle } from "./ClaudeRunner";
@@ -12,6 +14,7 @@ import type { ConversationForker } from "./ConversationForker";
 
 export type CreationMode = "fork" | "fork-compact" | "distill-briefing" | "distill-skill";
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DEFAULT_BUDGET_USD = 2;
 const DEFAULT_TIMEOUT_MS = 20 * 60 * 1000;
 
@@ -24,6 +27,8 @@ export interface AgentServiceDeps {
   runner: Runner;
   sessions: Pick<SessionManager, "create" | "get" | "all">;
   isDir: (p: string) => boolean;
+  /** Claude's projects folder, used to tell whether a stored conversation has a transcript. Defaults to the real one. */
+  projectsDir?: string;
 }
 
 export function adoptionPrompt(name: string, specialty: string): string {
@@ -119,11 +124,17 @@ export class AgentService {
     // An agent with no conversation yet gets one now, so the terminal's conversation is the one headless runs resume later.
     const fresh = !a.conversationId;
     const convId = fresh ? crypto.randomUUID() : safeId(a.conversationId, "conversation id has unexpected characters");
+    // A stored id whose terminal was closed before any message has no transcript: start it again with the same id.
+    const reuse = !fresh && UUID_RE.test(convId) && !this.hasTranscript(convId, a.cwd);
     const briefing = this.briefingFlag(a);
-    const cmd = `claude ${fresh ? "--session-id" : "--resume"} ${convId}${briefing}`;
+    const cmd = `claude ${fresh || reuse ? "--session-id" : "--resume"} ${convId}${briefing}`;
     const s = this.d.sessions.create({ cwd: a.cwd, name: a.name, runCommand: cmd });
     if (fresh) this.d.store.update(id, { conversationId: convId });
     return s;
+  }
+
+  private hasTranscript(id: string, cwd: string): boolean {
+    return findTranscript(this.d.projectsDir ?? claudePaths(os.homedir()).projects, id, cwd) !== null;
   }
 
   /** ` --append-system-prompt-file <relative path>` when the briefing exists inside the agent's folder and is a plain path; else "". */
@@ -165,8 +176,10 @@ export class AgentService {
     if (a.conversationId && this.inUse(a.conversationId)) {
       throw new HttpError(409, "the conversation is open in a running terminal session; close it or wait before running the agent");
     }
+    // A stored conversation that never got a transcript cannot be resumed: run a fresh one (its id is bound below).
+    const resumable = !!a.conversationId && this.hasTranscript(a.conversationId, a.cwd);
     const handle = this.d.runner.run({
-      cwd: a.cwd, prompt, resume: a.conversationId || undefined, permission: a.permission,
+      cwd: a.cwd, prompt, resume: resumable ? a.conversationId : undefined, permission: a.permission,
       model: a.model, instructions: a.instructions, briefingFile: a.briefingFile, addDirs: a.addDirs, mcpConfig: a.mcpConfig,
       maxBudgetUsd: overrides.maxBudgetUsd ?? DEFAULT_BUDGET_USD,
       timeoutMs: overrides.timeoutMs ?? DEFAULT_TIMEOUT_MS,

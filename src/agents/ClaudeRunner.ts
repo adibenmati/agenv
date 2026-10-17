@@ -182,7 +182,7 @@ export class ClaudeRunner {
         if (cli) { launch(cli); return; }
       }
       spawnError = retryable
-        ? `Could not start claude (${e.code}). If claude was installed with npm, set AGENV_CLAUDE_BIN to ...\node_modules\@anthropic-ai\claude-code\cli.js`
+        ? `Could not start claude (${e.code}). If claude was installed with npm, set AGENV_CLAUDE_BIN to ${String.raw`...\node_modules\@anthropic-ai\claude-code\cli.js`}`
         : `Could not start claude: ${e.message}`;
       finish(null);
     };

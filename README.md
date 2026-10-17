@@ -83,6 +83,8 @@ Create an agent in one of these ways:
 
 Creating from a conversation uses real tokens. The UI shows an upper-bound estimate before you confirm. Forks and distills run read-only (`--permission-mode plan`), the source conversation is never altered, and a failed creation never creates an agent. A fork that succeeded before a later step (compact) failed may remain as a Claude conversation; the error then reports its id (`orphanConversationId`) so you can delete it. Over a read-only ngrok tunnel, agent writes and runs are blocked.
 
+Maintainers can verify fork/compact against the real CLI with `AGENV_REAL_CLAUDE=1 AGENV_REAL_CAP=0.12 npm run check:agents-real` (build first). The per-call cap is $0.05 by default, but real calls from a normal environment cost about $0.10 because your MCP servers and plugins inflate the prompt, hence `AGENV_REAL_CAP=0.12`. A total ceiling of $0.30 (`AGENV_REAL_CEILING`) stops the run, so a full run can end INCONCLUSIVE.
+
 On Windows, if Claude was installed with npm and agents cannot start it, set `AGENV_CLAUDE_BIN` to the `cli.js` of the package (for example `...\node_modules\@anthropic-ai\claude-code\cli.js`); agenv also tries to find it next to `claude.cmd` by itself. Terminal and headless runs differ: instructions, model, extra folders and MCP config apply to headless runs only, while the terminal resumes the conversation and adds the briefing file.
 
 ### Desktop app

@@ -60,6 +60,14 @@ describe("check-agents-real hardening", () => {
     assert.equal(n.status, 0, n.stdout + n.stderr);
     assert.match(n.stdout, /RESULT: new id/);
   });
+  it("a spend ceiling makes the unfinished check INCONCLUSIVE, never a /compact FINDING", () => {
+    const r = run(["--against-fake"], { AGENV_REAL_CEILING: "0.04" });   // the fake reports $0.0123 per call
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /INCONCLUSIVE.*compact/i);
+    assert.match(r.stdout, /spend ceiling/);
+    assert.doesNotMatch(r.stdout, /FINDING/);
+    assert.doesNotMatch(r.stdout, /FAIL/);
+  });
   it("the compact check asserts a compact_boundary record in the transcript", () => {
     const r = run(["--against-fake"], {});
     assert.match(r.stdout, /PASS.*compact_boundary/);
