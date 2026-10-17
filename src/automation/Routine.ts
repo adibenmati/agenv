@@ -1,3 +1,4 @@
+import * as path from "path";
 import { HttpError } from "../core/HttpError";
 import { Permission, validatePermission } from "../agents/Agent";
 import { isValidTimeZone, minGapMinutes, nextCronTime, PRESETS } from "./cron";
@@ -111,8 +112,10 @@ function validateTarget(v: unknown, o: RoutineValidationOptions): RoutineTarget 
   if (t.kind === "folder") {
     if (Object.keys(t).some((k) => k !== "kind" && k !== "cwd")) bad("a folder target takes only cwd");
     const cwd = typeof t.cwd === "string" ? t.cwd.trim() : "";
-    if (!cwd || !o.isDir(cwd)) bad("target.cwd is not an existing folder");
-    return { kind: "folder", cwd };
+    if (cwd && !path.isAbsolute(cwd)) bad("target.cwd must be an absolute path");
+    const abs = cwd ? path.resolve(cwd) : "";
+    if (!abs || !o.isDir(abs)) bad("target.cwd is not an existing folder");
+    return { kind: "folder", cwd: abs };
   }
   return bad('target.kind must be "agent" or "folder"');
 }

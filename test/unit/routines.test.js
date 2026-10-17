@@ -10,7 +10,8 @@ const { AutomationSettings } = require("../../dist/automation/AutomationSettings
 const { validateRoutineInput } = require("../../dist/automation/Routine");
 const { PRESETS } = require("../../dist/automation/cron");
 
-const isDir = (p) => p === "/ok" || p === "/ok2";
+// paths reach isDir normalised (path.resolve), so on Windows "/ok" arrives as "C:\ok"
+const isDir = (p) => ["/ok", "/ok2"].includes(p.replace(/^[A-Za-z]:/, "").replace(/\\/g, "/"));
 const agentExists = (id) => id === "a1b2c3d4";
 // a zone that is never the machine's, so "changing" the timezone really changes it
 const OTHER_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone === "Asia/Tokyo" ? "Europe/Paris" : "Asia/Tokyo";
@@ -131,7 +132,15 @@ describe("validateRoutineInput", () => {
     assert.equal(status(() => check({ target: undefined })), 400);
     assert.equal(status(() => check({ target: "x" })), 400);
     const f = check({ target: { kind: "folder", cwd: "/ok" } });
-    assert.deepEqual(f.target, { kind: "folder", cwd: "/ok" });
+    assert.deepEqual(f.target, { kind: "folder", cwd: path.resolve("/ok") });
+  });
+  it("folder cwd must be absolute and is stored normalised", () => {
+    for (const cwd of ["ok", "./ok", "../ok", "sub/dir", "~/ok"]) {
+      assert.equal(status(() => check({ target: { kind: "folder", cwd } })), 400, cwd);
+    }
+    assert.match((() => { try { check({ target: { kind: "folder", cwd: "relative/dir" } }); } catch (e) { return e.message; } return ""; })(), /absolute/);
+    assert.equal(check({ target: { kind: "folder", cwd: "/ok/" } }).target.cwd, path.resolve("/ok"));
+    assert.equal(check({ target: { kind: "folder", cwd: "/ok/sub/.." } }).target.cwd, path.resolve("/ok"));
   });
   it("target kind agent forbids cwd and folder forbids agentId", () => {
     assert.equal(status(() => check({ target: { kind: "agent", agentId: "a1b2c3d4", cwd: "/ok" } })), 400);

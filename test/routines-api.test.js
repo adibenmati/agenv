@@ -153,6 +153,9 @@ describe("routines API", () => {
     const r = await post("/api/routines", routine({ target: { kind: "agent", agentId: "nope" } }));
     assert.equal(r.status, 400, JSON.stringify(r.body));
     assert.equal((await post("/api/routines", routine({ target: { kind: "folder", cwd: path.join(ctx.work, "missing") } }))).status, 400);
+    const rel = await post("/api/routines", routine({ target: { kind: "folder", cwd: "relative/dir" } }));
+    assert.equal(rel.status, 400);
+    assert.match(rel.body.error, /absolute/);
     for (const [fn, p, b] of [
       [put, "/api/routines/deadbeef", { name: "x" }],
       [del, "/api/routines/deadbeef"],

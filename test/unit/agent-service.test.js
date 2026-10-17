@@ -428,6 +428,13 @@ describe("AgentService.runInFolder", () => {
     await assert.rejects(r.svc.runInFolder(r.cwd, "  ", spec()), (e) => e instanceof HttpError && e.status === 400);
     assert.equal(calls(r.state).length, 0);
   });
+  it("a relative folder is a 400 (it would resolve against the server's working directory)", async () => {
+    const r = rig();
+    for (const rel of ["sub", ".", "./x", "../x"]) {
+      await assert.rejects(r.svc.runInFolder(rel, "hi", spec()), (e) => e instanceof HttpError && e.status === 400 && /absolute/.test(e.message), rel);
+    }
+    assert.equal(calls(r.state).length, 0);
+  });
   it("serialises runs of one folder (ordering from events.jsonl) and drains the chain", async () => {
     const r = rig("slow");
     await Promise.all([r.svc.runInFolder(r.cwd, "A", spec()), r.svc.runInFolder(path.join(r.cwd, "."), "B", spec())]);

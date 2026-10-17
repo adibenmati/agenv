@@ -197,6 +197,7 @@ export class AgentService {
   async runInFolder(cwd: string, prompt: string, spec: FolderRunSpec): Promise<RunResult> {
     if (typeof prompt !== "string" || !prompt.trim()) throw new HttpError(400, "prompt is required");
     if (typeof cwd !== "string" || !cwd) throw new HttpError(400, "cwd is required");
+    if (!path.isAbsolute(cwd)) throw new HttpError(400, "cwd must be an absolute path");
     const abs = path.resolve(cwd);
     if (!this.d.isDir(abs)) throw new HttpError(409, `the folder no longer exists: ${abs}`);
     const epoch = this.epoch;
