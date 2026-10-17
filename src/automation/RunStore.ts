@@ -1,0 +1,235 @@
+import * as crypto from "crypto";
+import * as fs from "fs";
+import * as path from "path";
+import { HttpError } from "../core/HttpError";
+import { isSafeId, safeId } from "../core/ids";
+import type { JsonStore } from "../core/JsonStore";
+
+export const RUN_TRIGGERS = ["schedule", "manual", "catch_up"] as const;
+export const RUN_STATUSES = ["queued", "running", "succeeded", "failed", "timed_out", "cancelled", "skipped", "coalesced"] as const;
+export type RunTrigger = (typeof RUN_TRIGGERS)[number];
+export type RunStatus = (typeof RUN_STATUSES)[number];
+
+export interface Run {
+  id: string;
+  routineId: string;
+  trigger: RunTrigger;
+  status: RunStatus;
+  reason: string;
+  queuedAt: number;
+  startedAt: number | null;
+  finishedAt: number | null;
+  durationMs: number;
+  costUsd: number;
+  numTurns: number;
+  conversationId: string;
+  exitCode: number | null;
+  error: string;
+  summary: string;
+}
+
+export const MAX_RUNS = 500;
+export const MAX_SUMMARY = 2000;
+export const MAX_REASON = 500;
+/** Hard ceiling for one log read, whatever the caller asks for. */
+export const MAX_LOG_READ = 1024 * 1024;
+const DEFAULT_LIMIT = 50;
+const MAX_ROUTINE_ID = 128;
+const INTERRUPTED = "interrupted by restart";
+
+const isNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+const isTime = (v: unknown): v is number | null => v === null || (isNum(v) && v >= 0);
+const isActive = (r: Run) => r.status === "queued" || r.status === "running";
+
+function oneOf<T extends string>(list: readonly T[], v: unknown, what: string): T {
+  if (typeof v !== "string" || !(list as readonly string[]).includes(v)) throw new HttpError(400, `invalid ${what}`);
+  return v as T;
+}
+
+function boundedText(v: unknown, max: number, what: string): string {
+  if (typeof v !== "string") throw new HttpError(400, `${what} must be a string`);
+  if (v.length > max) throw new HttpError(400, `${what} must be at most ${max} characters`);
+  return v;
+}
+
+/** Run history (~/.agenv-runs.enc, newest 500) plus the location and bounded reading of each run's log file. */
+export class RunStore {
+  private readonly store: JsonStore<Run[]>;
+  private readonly logDir: string;
+
+  constructor(o: { store: JsonStore<Run[]>; logDir: string }) {
+    this.store = o.store;
+    this.logDir = o.logDir;
+  }
+
+  private all(): Run[] {
+    const r = this.store.load();
+    return Array.isArray(r) ? r : [];
+  }
+
+  /** Statuses other than queued/running are final, so such a run is born finished (and never started). */
+  create(routineId: string, trigger: RunTrigger, status: RunStatus = "queued", reason = ""): Run {
+    if (typeof routineId !== "string" || !routineId || routineId.length > MAX_ROUTINE_ID) throw new HttpError(400, "invalid routineId");
+    oneOf(RUN_TRIGGERS, trigger, "trigger");
+    oneOf(RUN_STATUSES, status, "status");
+    boundedText(reason, MAX_REASON, "reason");
+    const runs = this.all();
+    const now = Date.now();
+    const run: Run = {
+      id: this.newId(runs), routineId, trigger, status, reason,
+      queuedAt: now, startedAt: null, finishedAt: status === "queued" || status === "running" ? null : now,
+      durationMs: 0, costUsd: 0, numTurns: 0, conversationId: "", exitCode: null, error: "", summary: "",
+    };
+    runs.push(run);
+    const pruned = runs.length > MAX_RUNS ? runs.splice(0, runs.length - MAX_RUNS) : [];
+    this.store.save(runs);
+    for (const p of pruned) this.deleteLog(p.id);
+    return run;
+  }
+
+  /**
+   * Patch of the outcome fields. `id`, `routineId`, `queuedAt`, `trigger` and unknown keys are ignored. The whole patch
+   * is validated before anything changes; `summary` is truncated to 2000 characters, `reason`/`error` over 500 are a 400.
+   */
+  update(id: string, patch: Partial<Omit<Run, "id" | "routineId" | "queuedAt" | "trigger">>): Run {
+    if (!patch || typeof patch !== "object" || Array.isArray(patch)) throw new HttpError(400, "patch must be an object");
+    const runs = this.all();
+    const cur = runs.find((r) => r.id === id);
+    if (!cur) throw new HttpError(404, "run not found");
+    const p = patch as Record<string, unknown>;
+    const next: Partial<Run> = {};
+    if (p.status !== undefined) next.status = oneOf(RUN_STATUSES, p.status, "status");
+    if (p.reason !== undefined) next.reason = boundedText(p.reason, MAX_REASON, "reason");
+    if (p.error !== undefined) next.error = boundedText(p.error, MAX_REASON, "error");
+    if (p.summary !== undefined) next.summary = boundedText(p.summary, Infinity, "summary").slice(0, MAX_SUMMARY);
+    for (const k of ["startedAt", "finishedAt"] as const) {
+      if (p[k] !== undefined) {
+        if (!isTime(p[k])) throw new HttpError(400, `${k} must be a non-negative number or null`);
+        next[k] = p[k] as number | null;
+      }
+    }
+    if (p.exitCode !== undefined) {
+      if (p.exitCode !== null && !(isNum(p.exitCode) && Number.isInteger(p.exitCode))) throw new HttpError(400, "exitCode must be an integer or null");
+      next.exitCode = p.exitCode as number | null;
+    }
+    for (const k of ["durationMs", "costUsd"] as const) {
+      if (p[k] !== undefined) {
+        if (!isNum(p[k]) || (p[k] as number) < 0) throw new HttpError(400, `${k} must be a non-negative number`);
+        next[k] = p[k] as number;
+      }
+    }
+    if (p.numTurns !== undefined) {
+      if (!isNum(p.numTurns) || !Number.isInteger(p.numTurns) || p.numTurns < 0) throw new HttpError(400, "numTurns must be a non-negative integer");
+      next.numTurns = p.numTurns;
+    }
+    if (p.conversationId !== undefined) {
+      if (p.conversationId !== "" && !isSafeId(p.conversationId)) throw new HttpError(400, "invalid conversationId");
+      next.conversationId = p.conversationId as string;
+    }
+    Object.assign(cur, next);
+    this.store.save(runs);
+    return cur;
+  }
+
+  get(id: string): Run | undefined { return this.all().find((r) => r.id === id); }
+
+  /** Newest first. `limit` defaults to 50 and is capped at 500 (anything not a positive number means the default). */
+  list(routineId?: string, limit?: number): Run[] {
+    const n = isNum(limit) && limit >= 1 ? Math.min(Math.floor(limit), MAX_RUNS) : DEFAULT_LIMIT;
+    const out: Run[] = [];
+    const runs = this.all();
+    for (let i = runs.length - 1; i >= 0 && out.length < n; i--) {
+      if (routineId === undefined || runs[i].routineId === routineId) out.push(runs[i]);
+    }
+    return out;
+  }
+
+  costSince(sinceMs: number): number {
+    let sum = 0;
+    for (const r of this.all()) if (r.startedAt !== null && r.startedAt >= sinceMs) sum += r.costUsd;
+    return sum;
+  }
+
+  /** Runs that actually started; skipped / coalesced firings never did. */
+  countSince(routineId: string, sinceMs: number): number {
+    return this.all().filter((r) => r.routineId === routineId && r.startedAt !== null && r.startedAt >= sinceMs).length;
+  }
+
+  /** Where the runner writes this run's log. Throws 400 for an id that is not a safe id. */
+  logPath(id: string): string {
+    return path.join(this.logDir, `${safeId(id, "invalid run id")}.log`);
+  }
+
+  /**
+   * The last `tailBytes` of the log (at most 1 MB), starting on a line boundary: a window that begins mid-line drops
+   * that partial line. "" when there is no log yet. Throws 400 for an unsafe id or a non-numeric size.
+   */
+  readLog(id: string, tailBytes: number): string {
+    const file = this.logPath(id);
+    if (!isNum(tailBytes)) throw new HttpError(400, "tail must be a number");
+    const want = Math.min(Math.floor(tailBytes), MAX_LOG_READ);
+    if (want <= 0) return "";
+    let fd: number;
+    try { fd = fs.openSync(file, "r"); } catch { return ""; }
+    try {
+      const size = fs.fstatSync(fd).size;
+      const start = Math.max(0, size - want);
+      const len = size - start;
+      if (len <= 0) return "";
+      // one extra leading byte tells whether the window already begins on a line boundary
+      const lead = start > 0 ? 1 : 0;
+      const buf = Buffer.alloc(len + lead);
+      const got = fs.readSync(fd, buf, 0, buf.length, start - lead);
+      let chunk = buf.subarray(0, got);
+      if (lead) {
+        if (chunk[0] !== 10) {
+          const nl = chunk.indexOf(10, 1);
+          chunk = nl < 0 ? chunk.subarray(chunk.length) : chunk.subarray(nl + 1);
+        } else {
+          chunk = chunk.subarray(1);
+        }
+      }
+      return chunk.toString("utf8");
+    } catch {
+      return "";
+    } finally {
+      try { fs.closeSync(fd); } catch {}
+    }
+  }
+
+  /** At startup: runs a dead server left queued/running can never finish. Returns how many were closed. */
+  markInterrupted(): number {
+    const runs = this.all();
+    const now = Date.now();
+    let n = 0;
+    for (const r of runs) {
+      if (!isActive(r)) continue;
+      r.status = "failed";
+      r.reason = INTERRUPTED;
+      r.error = INTERRUPTED;
+      r.finishedAt = now;
+      r.durationMs = r.startedAt !== null ? Math.max(0, now - r.startedAt) : 0;
+      n++;
+    }
+    if (n) this.store.save(runs);
+    return n;
+  }
+
+  /** The routine's queued/running run (a running one wins over a queued one). */
+  active(routineId: string): Run | undefined {
+    const mine = this.all().filter((r) => r.routineId === routineId && isActive(r));
+    return mine.find((r) => r.status === "running") ?? mine[0];
+  }
+
+  private deleteLog(id: string): void {
+    if (!isSafeId(id)) return;
+    try { fs.unlinkSync(path.join(this.logDir, `${id}.log`)); } catch {}
+  }
+
+  private newId(runs: Run[]): string {
+    for (;;) {
+      const id = crypto.randomBytes(6).toString("hex");
+      if (!runs.some((r) => r.id === id)) return id;
+    }
+  }
+}
