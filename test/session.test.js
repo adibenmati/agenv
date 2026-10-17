@@ -10,7 +10,7 @@ const crypto = require("crypto");
 
 const {
   startServer, stopProcess, makeTempHome,
-  get, post, del, waitFor, loadInternals, TOKEN,
+  get, post, del, waitFor, TOKEN,
 } = require("./helpers");
 
 // ---------------------------------------------------------------------------
@@ -82,11 +82,10 @@ function writeFirehose(home) {
 // Scrollback ring buffer
 // ---------------------------------------------------------------------------
 describe("Scrollback ring buffer", () => {
-  const rb = loadInternals(
-    "const MAX_SCROLLBACK",
-    "// PTY session management",
-    ["MAX_SCROLLBACK", "appendScrollback", "getScrollback"]
-  );
+  const { Scrollback, MAX_SCROLLBACK } = require("../dist/sessions/Scrollback");
+  // The tests below drive the ring through a throwaway object per scenario, as they always have.
+  const ring = (s) => s.sb || (s.sb = new Scrollback());
+  const rb = { MAX_SCROLLBACK, appendScrollback: (s, c) => ring(s).append(c), getScrollback: (s) => ring(s).read() };
 
   function fill(session, chunk, n) {
     for (let i = 0; i < n; i++) rb.appendScrollback(session, chunk);
