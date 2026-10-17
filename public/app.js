@@ -13,6 +13,7 @@ import * as mobile from "./modules/mobile.js";
 import * as sessionsPanel from "./modules/sessions.js";
 import * as claudeSearch from "./modules/claude-search.js";
 import { agentsPanel } from "./modules/agents.js";
+import { routinesPanel } from "./modules/routines.js";
 import * as claudeMd from "./modules/claudemd.js";
 import * as promptLib from "./modules/prompts.js";
 
@@ -428,18 +429,30 @@ function openAgentDialog(prefill) {
   agentsPanel.openCreateDialog(prefill);
 }
 
+/** Shows a server-created session as a tab: an already open tab for it is reused, never duplicated. */
+async function openSessionTab(session) {
+  showTerminals();
+  tabs.setSessionMeta(session.id, session);
+  const existing = tabs.findWorkspaceBySession(session.id);
+  if (existing) tabs.switchToWorkspace(existing);
+  else await tabs.createWorkspace(session.name || "Session " + session.id, session.id, session);
+  sessionsPanel.refresh();
+}
+
 agentsPanel.init({
   panel: $("agents-panel"),
   showContextMenu: ctxmenu.show,
   showToast(message, type) { notif.showToast(null, message, type); },
-  async onOpenSession(session) {
-    showTerminals();
-    tabs.setSessionMeta(session.id, session);
-    const existing = tabs.findWorkspaceBySession(session.id);
-    if (existing) tabs.switchToWorkspace(existing);
-    else await tabs.createWorkspace(session.name || "Session " + session.id, session.id, session);
-    sessionsPanel.refresh();
-  },
+  onOpenSession: openSessionTab,
+});
+
+// ---------------------------------------------------------------------------
+// Routines panel (scheduled runs of agents; the runs-updated broadcast refreshes it)
+// ---------------------------------------------------------------------------
+routinesPanel.init({
+  panel: $("routines-panel"),
+  showToast(message, type) { notif.showToast(null, message, type); },
+  onOpenSession: openSessionTab,
 });
 
 // ---------------------------------------------------------------------------
@@ -616,6 +629,7 @@ setCallbacks({
       statusBar.className = "disconnected";
     }
   },
+  onEvent(name) { routinesPanel.handleEvent(name); },
   onStatus(sessionId, status) {
     tabs.setSessionMeta(sessionId, { status });
     tabs.updateStatusIndicators();
@@ -765,6 +779,13 @@ function activatePanel(panelName) {
     agentsPanel.startPolling();
   } else {
     agentsPanel.stopPolling();
+  }
+  // Routines panel: load on show, poll while visible
+  if (panelId === "routines-panel" && sidebar.isVisible() && sidebar.getActivePanel() === "routines-panel") {
+    routinesPanel.refresh();
+    routinesPanel.startPolling();
+  } else {
+    routinesPanel.stopPolling();
   }
   // CLAUDE.md Manager: load on show
   if (panelId === "claudemd-panel" && sidebar.isVisible() && sidebar.getActivePanel() === "claudemd-panel") {

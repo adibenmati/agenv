@@ -4,7 +4,7 @@
 const path = require("path");
 const { spawnSync } = require("child_process");
 
-const flows = ["hibernate", "groups", "claude-link", "agents"];
+const flows = ["hibernate", "groups", "claude-link", "agents", "routines"];
 const extra = process.argv.slice(2);
 let failed = 0;
 for (const name of flows) {

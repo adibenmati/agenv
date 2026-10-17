@@ -45,7 +45,7 @@ if (mode === "hang") {
   setInterval(() => {}, 1000);
 } else if (mode === "slow") {
   out("SLOW-FIRST-LINE");
-  setTimeout(finishOk, 1500);
+  setTimeout(finishOk, Number(process.env.FAKE_CLAUDE_SLOW_MS) || 1500);
 } else {
   finishOk();
 }
