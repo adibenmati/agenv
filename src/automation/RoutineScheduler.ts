@@ -1,3 +1,4 @@
+import * as path from "path";
 import { HttpError } from "../core/HttpError";
 import type { AutomationGuards } from "./AutomationGuards";
 import { nextCronTime } from "./cron";
@@ -85,6 +86,11 @@ export function createRunQueue(o: RunQueueWiring): RunQueue {
 
   return new RunQueue({
     limit: o.limit,
+    keyOf: (run) => {
+      const t = o.routines.get(run.routineId)?.target;
+      if (!t) return null;
+      return t.kind === "agent" ? `agent:${t.agentId}` : `folder:${path.resolve(t.cwd)}`;   // same keys as AgentService's chains
+    },
     execute: async (run, register) => {
       const routine = o.routines.get(run.routineId);
       if (!routine) { settle(run, undefined, { status: "skipped", reason: "routine no longer exists" }); return; }

@@ -423,8 +423,11 @@ describe("runNow and guards", () => {
     assert.equal(r.queue.size(), 3);
     assert.equal(r.agents.calls.length, 2);
     r.agents.finish(0); r.agents.finish(1); await flush();
+    // X1 starts; X2 and X3 need the same agent, so they stay queued behind it (they no longer hold a slot) and are guarded when they dequeue
+    assert.equal(r.runs.list(x.id).filter((y) => y.status === "queued").length, 2);
+    r.agents.finish(2); await flush();
     const xr = r.runs.list(x.id);
-    assert.equal(xr.filter((y) => y.status === "running").length, 1, "exactly one X run started");
+    assert.equal(xr.filter((y) => y.status === "succeeded").length, 1, "exactly one X run started");
     assert.equal(xr.filter((y) => y.status === "skipped").length, 2);
     assert.ok(xr.filter((y) => y.status === "skipped").every((y) => /daily run limit reached \(1\)/.test(y.reason)));
     assert.equal(r.agents.calls.filter((c) => c.target === "ag1").length, 1, "exactly one spawn for X");
@@ -443,6 +446,66 @@ describe("runNow and guards", () => {
     assert.equal(ys.status, "skipped", "Y: 0.20 spent + X's reserved 2 >= 2.15");
     assert.match(ys.reason, /daily cost cap reached/);
     assert.equal(r.agents.calls.length, 3);
+  });
+});
+
+describe("head-of-line blocking: a busy agent must not hold a queue slot", () => {
+  const mk = (r, name, agentId, extra = {}) => r.service.createRoutine(baseInput({ name, target: { kind: "agent", agentId }, concurrency: "always_enqueue", ...extra }));
+
+  it("limit 2: two runs on agent A and one on agent B => B starts at once and A2 stays queued (not running) until A1 ends", async () => {
+    const r = rig({ limit: 2 });
+    const a1 = mk(r, "A1", "A"), a2 = mk(r, "A2", "A"), b = mk(r, "B", "B");
+    r.service.runNow(a1.id); r.service.runNow(a2.id); r.service.runNow(b.id);
+    await flush();
+    assert.deepEqual(r.agents.calls.map((c) => c.target), ["A", "B"], "B started although A2 is ahead of it");
+    assert.equal(r.runs.list(a2.id)[0].status, "queued");
+    assert.equal(r.runs.list(a2.id)[0].startedAt, null, "no claim before it can spawn");
+    assert.equal(r.runs.list(b.id)[0].status, "running");
+    assert.equal(r.queue.size(), 1);
+    r.agents.finish(0); await flush();
+    assert.deepEqual(r.agents.calls.map((c) => c.target), ["A", "B", "A"]);
+    assert.equal(r.runs.list(a2.id)[0].status, "running");
+    r.agents.finish(1); r.agents.finish(2); await flush();
+  });
+
+  it("pausing while A2 waits behind A1 => A2 is skipped 'automation paused' when it finally dequeues", async () => {
+    const r = rig({ limit: 2 });
+    const a1 = mk(r, "A1", "A"), a2 = mk(r, "A2", "A");
+    r.service.runNow(a1.id); r.service.runNow(a2.id);
+    await flush();
+    assert.equal(r.runs.list(a2.id)[0].status, "queued");
+    r.service.setSettings({ paused: true });
+    r.agents.finish(0); await flush();
+    const run = r.runs.list(a2.id)[0];
+    assert.equal(run.status, "skipped");
+    assert.equal(run.reason, "automation paused");
+    assert.equal(r.agents.calls.length, 1, "A2 never spawned");
+  });
+
+  it("a catch-up burst of 25 on one agent never blocks another agent's run", async () => {
+    const r = rig({ limit: 2 });
+    const hourly = mk(r, "Burst", "A", { catchUp: "enqueue_missed_with_cap", concurrency: "coalesce_if_active" });
+    const other = mk(r, "Other", "B");
+    r.clock.t = hourly.nextRunAt + 30 * HOUR + 5 * 60000;
+    r.scheduler.tick();
+    await flush();
+    assert.equal(r.agents.calls.length, 1, "only one of the burst runs at a time");
+    assert.ok(r.queue.size() >= 20);
+    r.service.runNow(other.id);
+    await flush();
+    assert.deepEqual(r.agents.calls.map((c) => c.target), ["A", "B"]);
+    assert.equal(r.runs.list(other.id)[0].status, "running");
+  });
+
+  it("folder targets are keyed by their resolved folder", async () => {
+    const r = rig({ limit: 2 });
+    const dir = path.resolve(r.dir);
+    const f = (name) => r.service.createRoutine(baseInput({ name, target: { kind: "folder", cwd: dir }, conversation: "fresh", concurrency: "always_enqueue" }));
+    const f1 = f("F1"), f2 = f("F2"), other = mk(r, "O", "B");
+    r.service.runNow(f1.id); r.service.runNow(f2.id); r.service.runNow(other.id);
+    await flush();
+    assert.deepEqual(r.agents.calls.map((c) => c.kind), ["folder", "agent"]);
+    assert.equal(r.runs.list(f2.id)[0].status, "queued");
   });
 });
 

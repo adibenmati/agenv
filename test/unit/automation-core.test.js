@@ -258,6 +258,30 @@ describe("RunQueue", () => {
   it("idle resolves immediately when empty", async () => {
     await new RunQueue({ limit: 2, execute: () => Promise.resolve() }).idle();
   });
+  it("keyOf: a queued run whose key is busy stays queued and later runs with other keys start in its place", async () => {
+    const started = [], jobs = new Map();
+    const queue = new RunQueue({
+      limit: 2, keyOf: (run) => run.key,
+      execute: (run) => new Promise((resolve) => { started.push(run.id); jobs.set(run.id, resolve); }),
+    });
+    for (const [id, key] of [["a1", "A"], ["a2", "A"], ["a3", "A"], ["b1", "B"], ["c1", "C"]]) queue.enqueue({ id, key });
+    assert.deepEqual(started, ["a1", "b1"]);
+    assert.equal(queue.size(), 3);
+    jobs.get("b1")(); await tick(); await tick();
+    assert.deepEqual(started, ["a1", "b1", "c1"], "c1 jumps the blocked a2/a3 (FIFO among startable runs)");
+    jobs.get("a1")(); await tick(); await tick();
+    assert.deepEqual(started, ["a1", "b1", "c1", "a2"]);
+    jobs.get("c1")(); jobs.get("a2")(); await tick(); await tick();
+    assert.deepEqual(started.slice(-1), ["a3"]);
+    jobs.get("a3")();
+    await queue.idle();
+  });
+  it("keyOf returning null (or throwing) never blocks", async () => {
+    const started = [];
+    const queue = new RunQueue({ limit: 3, keyOf: (run) => { if (run.id === "b") throw new Error("x"); return null; }, execute: (run) => { started.push(run.id); return new Promise(() => {}); } });
+    for (const id of ["a", "b", "c"]) queue.enqueue({ id });
+    assert.deepEqual(started, ["a", "b", "c"]);
+  });
 });
 
 describe("AgentRunExecutor with a fake agent service", () => {

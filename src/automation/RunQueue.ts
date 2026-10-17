@@ -8,11 +8,16 @@ export interface RunQueueOptions {
   execute: (run: Run, register: RegisterCancel) => Promise<void> | void;
   /** Called when `execute` throws or rejects; the slot is freed regardless. */
   onError?: (run: Run, err: unknown) => void;
+  /**
+   * The writer a run needs exclusively ("agent:<id>", "folder:<cwd>"), or null for none. A queued run whose key already has a
+   * started run stays queued, and later runs with other keys are started in its place, so a busy agent never holds a slot.
+   */
+  keyOf?: (run: Run) => string | null;
 }
 
-interface Active { run: Run; cancel: (() => void) | null; cancelRequested: boolean }
+interface Active { run: Run; key: string | null; cancel: (() => void) | null; cancelRequested: boolean }
 
-/** FIFO queue running at most `limit` jobs at once. Never throws from enqueue. */
+/** FIFO queue running at most `limit` jobs at once (FIFO among the runs that can start). Never throws from enqueue. */
 export class RunQueue {
   private readonly waiting: Run[] = [];
   private readonly active = new Map<string, Active>();
@@ -66,20 +71,38 @@ export class RunQueue {
     if (a.cancel) { try { a.cancel(); } catch {} }
   }
 
+  private keyFor(run: Run): string | null {
+    if (!this.o.keyOf) return null;
+    try { return this.o.keyOf(run); } catch { return null; }
+  }
+
+  private keyBusy(key: string): boolean {
+    for (const a of this.active.values()) if (a.key === key) return true;
+    return false;
+  }
+
   private pump(): void {
-    while (this.active.size < this.limit && this.waiting.length) {
-      const run = this.waiting.shift() as Run;
-      const a: Active = { run, cancel: null, cancelRequested: false };
-      this.active.set(run.id, a);
-      const register: RegisterCancel = (fn) => {
-        a.cancel = fn;
-        if (a.cancelRequested) { try { fn(); } catch {} }
-      };
-      let p: Promise<void>;
-      try { p = Promise.resolve(this.o.execute(run, register)); } catch (e) { p = Promise.reject(e); }
-      void p.then(() => undefined, (err) => { try { this.o.onError?.(run, err); } catch {} })
-        .then(() => { this.active.delete(run.id); this.pump(); this.settleIdle(); });
+    for (let i = 0; i < this.waiting.length && this.active.size < this.limit;) {
+      const run = this.waiting[i];
+      const key = this.keyFor(run);
+      if (key !== null && this.keyBusy(key)) { i++; continue; }   // its writer is busy: stays queued, the next run may go
+      this.waiting.splice(i, 1);
+      this.start(run, key);
+      i = 0;                                                       // starting may have changed which keys are busy
     }
+  }
+
+  private start(run: Run, key: string | null): void {
+    const a: Active = { run, key, cancel: null, cancelRequested: false };
+    this.active.set(run.id, a);
+    const register: RegisterCancel = (fn) => {
+      a.cancel = fn;
+      if (a.cancelRequested) { try { fn(); } catch {} }
+    };
+    let p: Promise<void>;
+    try { p = Promise.resolve(this.o.execute(run, register)); } catch (e) { p = Promise.reject(e); }
+    void p.then(() => undefined, (err) => { try { this.o.onError?.(run, err); } catch {} })
+      .then(() => { this.active.delete(run.id); this.pump(); this.settleIdle(); });
   }
 
   private settleIdle(): void {
