@@ -6,6 +6,10 @@ import { ClaudeRunner, RunResult, RunSpec } from "./ClaudeRunner";
 const CREATION_BUDGET_USD = 1;
 const CREATION_TIMEOUT_MS = 5 * 60 * 1000;
 const NAME_RE = /^[A-Za-z0-9_-]{1,48}$/;
+const DEVICE_RE = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
+
+// Creation runs must not touch the project. Note: "/compact" under plan mode is not yet verified against the real CLI (the opt-in real check in Task 7 will).
+const READ_ONLY = { mode: "plan" as const, allowedTools: [] as string[] };
 
 export const DISTILL_PROMPT = [
   "You are preparing a hand-over for a new assistant that has no access to this conversation.",
@@ -33,17 +37,23 @@ export class ConversationForker {
   async fork(o: ForkOptions): Promise<{ conversationId: string; costUsd: number }> {
     const first = await this.runChecked({
       cwd: o.cwd, prompt: o.adoptionPrompt, resume: o.sourceId, fork: true,
-      permission: { mode: "acceptEdits", allowedTools: [] },
+      permission: READ_ONLY,
       maxBudgetUsd: CREATION_BUDGET_USD, timeoutMs: CREATION_TIMEOUT_MS,
     });
     if (!first.conversationId || first.conversationId === o.sourceId) throw new HttpError(502, "claude did not start a new conversation");
     let costUsd = first.costUsd;
     if (o.compact) {
-      const second = await this.runChecked({
+      let second: RunResult;
+      try {
+        second = await this.runChecked({
         cwd: o.cwd, prompt: "/compact", resume: first.conversationId, fork: false,
-        permission: { mode: "acceptEdits", allowedTools: [] },
+        permission: READ_ONLY,
         maxBudgetUsd: CREATION_BUDGET_USD, timeoutMs: CREATION_TIMEOUT_MS,
-      });
+        });
+      } catch (e) {
+        if (e instanceof HttpError) (e as HttpError & { orphanConversationId?: string }).orphanConversationId = first.conversationId;
+        throw e;
+      }
       costUsd += second.costUsd;
     }
     return { conversationId: first.conversationId, costUsd };
@@ -51,6 +61,7 @@ export class ConversationForker {
 
   async distill(o: DistillOptions): Promise<{ artifactPath: string; costUsd: number }> {
     const target = resolveTarget(o.cwd, o.name, o.artifact);
+    assertInside(o.cwd, target);
     if (!o.overwrite) assertAbsent(target);
     const r = await this.runChecked({
       cwd: o.cwd, prompt: DISTILL_PROMPT, resume: o.sourceId, fork: true,
@@ -60,6 +71,7 @@ export class ConversationForker {
     const answer = r.text.trim();
     if (!answer) throw new HttpError(502, "claude returned an empty document");
     const body = o.artifact === "skill" ? skillFile(o.name, o.specialty, answer) : answer + "\n";
+    assertInside(o.cwd, target);
     writeNew(target, body, o.overwrite);
     return { artifactPath: target, costUsd: r.costUsd };
   }
@@ -75,6 +87,7 @@ function resolveTarget(cwd: string, name: string, artifact: "briefing" | "skill"
   if (typeof name !== "string" || !NAME_RE.test(name)) {
     throw new HttpError(400, "Name must be 1-48 characters: letters, digits, '-' or '_'");
   }
+  if (DEVICE_RE.test(name)) throw new HttpError(400, `"${name}" is a reserved device name on Windows`);
   const root = path.resolve(cwd);
   const target = artifact === "skill"
     ? path.resolve(root, ".claude", "skills", name, "SKILL.md")
@@ -82,6 +95,17 @@ function resolveTarget(cwd: string, name: string, artifact: "briefing" | "skill"
   const rel = path.relative(root, target);
   if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) throw new HttpError(400, "Name would write outside the folder");
   return target;
+}
+
+/** Real path of the deepest existing ancestor of the target must still be inside the real cwd (links and junctions included). */
+function assertInside(cwd: string, target: string): void {
+  let root: string, d = path.dirname(target);
+  try { root = fs.realpathSync(path.resolve(cwd)); } catch { throw new HttpError(400, "Folder does not exist"); }
+  while (!fs.existsSync(d) && path.dirname(d) !== d) d = path.dirname(d);
+  let real: string;
+  try { real = fs.realpathSync(d); } catch { throw new HttpError(400, "Cannot resolve the target folder"); }
+  const rel = path.relative(root, real);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) throw new HttpError(400, "Target resolves outside the folder");
 }
 
 function assertAbsent(file: string): void {
@@ -103,13 +127,26 @@ function writeNew(file: string, body: string, overwrite: boolean): void {
   const tmp = path.join(dir, `.${path.basename(file)}.${process.pid}.${Date.now()}.tmp`);
   try {
     fs.mkdirSync(dir, { recursive: true });
-    if (!overwrite) assertAbsent(file);
     fs.writeFileSync(tmp, body, { encoding: "utf8", flag: "wx" });
-    fs.renameSync(tmp, file);
+    if (overwrite) fs.renameSync(tmp, file);
+    else publishNew(tmp, file);
   } catch (e) {
     try { fs.rmSync(tmp, { force: true }); } catch {}
     for (const d of created) { try { fs.rmdirSync(d); } catch {} }
     if (e instanceof HttpError) throw e;
     throw new HttpError(500, `Could not write ${file}: ${(e as Error).message}`);
   }
+}
+
+/** Atomically publishes tmp as file only if file does not exist (hard link, then drop tmp). */
+function publishNew(tmp: string, file: string): void {
+  try {
+    fs.linkSync(tmp, file);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "EEXIST") throw new HttpError(409, `${file} already exists`);
+    assertAbsent(file);   // file system without hard links: best effort
+    fs.renameSync(tmp, file);
+    return;
+  }
+  fs.unlinkSync(tmp);
 }

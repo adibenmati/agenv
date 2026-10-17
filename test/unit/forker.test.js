@@ -132,3 +132,85 @@ describe("ConversationForker.distill", () => {
     assert.deepEqual(fs.readdirSync(cwd), []);
   });
 });
+
+describe("ConversationForker hardening", () => {
+  const spy = (mode, state) => {
+    const real = new ClaudeRunner({ bin: FAKE, env: { FAKE_CLAUDE_MODE: mode, FAKE_CLAUDE_STATE: state } });
+    const specs = [];
+    return { specs, f: new ConversationForker({ runner: { run: (spec, h) => { specs.push(spec); return real.run(spec, h); } } }) };
+  };
+  const mode = (c) => c.argv[c.argv.indexOf("--permission-mode") + 1];
+
+  it("fork and compact runs are read-only (plan mode, no allowed tools)", async () => {
+    const state = mkdir(), cwd = mkdir(); withSource(state);
+    await forker("ok", state).fork({ sourceId: "src-1", cwd, adoptionPrompt: "adopt", compact: true });
+    const c = calls(state); assert.equal(c.length, 2);
+    for (const x of c) { assert.equal(mode(x), "plan"); assert.ok(!x.argv.includes("--allowedTools")); }
+  });
+  it("the fork run carries a 5-minute timeout and the 1 USD budget", async () => {
+    const state = mkdir(); withSource(state);
+    const { specs, f } = spy("ok", state);
+    await f.fork({ sourceId: "src-1", cwd: mkdir(), adoptionPrompt: "a", compact: true });
+    assert.equal(specs.length, 2);
+    for (const s of specs) { assert.equal(s.timeoutMs, 300000); assert.equal(s.maxBudgetUsd, 1); }
+  });
+  it("rejects Windows reserved device names before any run, accepts names that merely contain them", async () => {
+    const state = mkdir(), cwd = mkdir(); withSource(state);
+    for (const name of ["CON", "nul", "com1", "Lpt9.md", "aux", "PRN", "COM9", "con.md"]) {
+      await rejects(forker("ok", state).distill({ ...dist({ name }), cwd }), 400);
+    }
+    assert.ok(!fs.existsSync(path.join(state, "calls.jsonl")));
+    for (const name of ["connector", "console", "com10", "lpt0", "auxiliary"]) {
+      await forker("ok", state).distill({ ...dist({ name }), cwd });
+      assert.ok(fs.existsSync(path.join(cwd, ".claude", "agenv-briefings", name + ".md")));
+    }
+  });
+  it("refuses a .claude link that leaves cwd, before any run", async (t) => {
+    const state = mkdir(), cwd = mkdir(), outside = mkdir(); withSource(state);
+    try { fs.symlinkSync(outside, path.join(cwd, ".claude"), "junction"); } catch (e) { return t.skip("cannot create a link here: " + e.code); }
+    for (const artifact of ["briefing", "skill"]) await rejects(forker("ok", state).distill({ ...dist(), cwd, artifact }), 400);
+    assert.deepEqual(fs.readdirSync(outside), []);
+    assert.ok(!fs.existsSync(path.join(state, "calls.jsonl")));
+  });
+  it("a link swapped in during the run is caught before writing", async (t) => {
+    const state = mkdir(), cwd = mkdir(), outside = mkdir(); withSource(state);
+    const real = new ClaudeRunner({ bin: FAKE, env: { FAKE_CLAUDE_MODE: "ok", FAKE_CLAUDE_STATE: state } });
+    let swapped = true;
+    const f = new ConversationForker({ runner: { run: (spec, h) => {
+      const handle = real.run(spec, h);
+      return { cancel: handle.cancel, done: handle.done.then((r) => {
+        try { fs.symlinkSync(outside, path.join(cwd, ".claude"), "junction"); } catch { swapped = false; }
+        return r;
+      }) };
+    } } });
+    const p = f.distill({ ...dist(), cwd });
+    await rejects(p, 400);
+    if (!swapped) return t.skip("cannot create a link here");
+    assert.deepEqual(fs.readdirSync(outside), []);
+  });
+  it("without overwrite, a file appearing during the run is not replaced (409)", async () => {
+    const state = mkdir(), cwd = mkdir(); withSource(state);
+    const file = path.join(cwd, ".claude", "agenv-briefings", "helper.md");
+    const real = new ClaudeRunner({ bin: FAKE, env: { FAKE_CLAUDE_MODE: "ok", FAKE_CLAUDE_STATE: state } });
+    const f = new ConversationForker({ runner: { run: (spec, h) => {
+      const handle = real.run(spec, h);
+      return { cancel: handle.cancel, done: handle.done.then((r) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, "MINE"); return r; }) };
+    } } });
+    await rejects(f.distill({ ...dist(), cwd }), 409);
+    assert.equal(fs.readFileSync(file, "utf8"), "MINE");
+    assert.deepEqual(fs.readdirSync(path.dirname(file)), ["helper.md"]);
+  });
+  it("a late failure (transcript written, then exit 1) rejects", async () => {
+    const state = mkdir(); withSource(state);
+    await assert.rejects(forker("fail-late", state).fork({ sourceId: "src-1", cwd: mkdir(), adoptionPrompt: "x", compact: false }), (e) => e instanceof HttpError && /died late/.test(e.message) && e.orphanConversationId === undefined);
+  });
+  it("compact failing after a successful fork rejects with orphanConversationId", async () => {
+    const state = mkdir(); withSource(state);
+    await assert.rejects(forker("fail-compact", state).fork({ sourceId: "src-1", cwd: mkdir(), adoptionPrompt: "x", compact: true }), (e) => {
+      assert.ok(e instanceof HttpError);
+      assert.match(e.orphanConversationId, /^[0-9a-f-]{36}$/);
+      assert.ok(fs.existsSync(path.join(state, "transcripts", e.orphanConversationId + ".jsonl")));
+      return true;
+    });
+  });
+});
