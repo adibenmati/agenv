@@ -102,6 +102,16 @@ A routine runs an agent on a schedule, unattended: "every weekday at 09:00, tria
 
 Things to know: runs use real tokens (the per-run budget and the daily caps bound the cost). An unattended agent in *Edit files* mode can modify files in its folder, which is the point of the feature. A run is skipped, never stacked, when its conversation is currently open in a terminal, because two processes must not write one conversation.
 
+### Messages between sessions
+Sessions can talk to each other by name, whatever CLI runs inside them (Claude, Codex, Gemini, Aider, ...). Every session's shell gets `AGENV_URL`, `AGENV_SESSION_ID` and a private `AGENV_SESSION_TOKEN`, so an agent can run:
+
+```
+agenv sessions                    # who else is open (id, name, tool, idle/busy)
+agenv send reviewer "please check the diff in src/api"
+```
+
+The text is typed into the target's terminal as if you had typed it, with a note of who sent it and how to answer (`agenv send <sender> "..."`), so the target replies the same way. If the target is busy printing, the message waits and goes in when it has been quiet for a moment (up to 5 minutes, then it fails). A closed session, or one with no agent CLI running (a plain shell would run the text as a command), is refused with a clear error. At most 30 messages per 10 minutes from one session to another (a loop breaker); the **Messages** panel (envelope button) shows the log and lets you message a session yourself. Session tokens only work on the messaging routes; messages are not stored on disk. Tell your agents about it in their `CLAUDE.md` / `AGENTS.md` / `GEMINI.md`, or just say "use `agenv send`".
+
 ### Desktop app
 When Electron is installed globally (`npm i -g electron`), `agenv` launches as a native desktop app with OS-level keyboard shortcuts and window management. The server runs internally on localhost — no exposed port.
 
@@ -197,6 +207,8 @@ agenv update
 | `agenv kill` | Force-kill running server |
 | `agenv set <key> <value>` | Set a config value |
 | `agenv get <key>` | Read a config value |
+| `agenv sessions` | Inside a session: list the sessions you can message |
+| `agenv send <name> <text...>` | Inside a session: message another session |
 | `agenv update` | Update to latest version |
 | `agenv help` | Show help |
 

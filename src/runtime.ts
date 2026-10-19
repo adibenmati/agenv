@@ -19,6 +19,7 @@ import { RoutineStore } from "./automation/RoutineStore";
 import { AgentRunExecutor } from "./automation/RunExecutor";
 import { RunStore } from "./automation/RunStore";
 import type { Run } from "./automation/RunStore";
+import { MessageService } from "./messaging/MessageService";
 import { ClaudeLinker } from "./claude/ClaudeLinker";
 import { ClaudeMdService } from "./claude/ClaudeMdService";
 import { claudePaths } from "./claude/paths";
@@ -52,6 +53,7 @@ import { OutputAnalyzer } from "./sessions/OutputAnalyzer";
 import type { SessionEvents } from "./sessions/events";
 import { GroupRegistry } from "./sessions/GroupRegistry";
 import type { PtyFactory } from "./sessions/pty";
+import type { Session } from "./sessions/Session";
 import { SessionManager } from "./sessions/SessionManager";
 import { WorkspaceLayout } from "./sessions/WorkspaceLayout";
 
@@ -112,10 +114,15 @@ export function buildRuntime(o: RuntimeOptions): Runtime {
   const bus = new TypedEmitter<SessionEvents>();
   const isRealDir = createRealDirChecker();
   const layout = new WorkspaceLayout(savedState && savedState.workspaceLayout);
-  const sessions = new SessionManager({
+  const sessions: SessionManager = new SessionManager({
     bus, ptyFactory: o.ptyFactory, shell: config.shell, maxSessions: config.maxSessions,
     defaultCols: process.stdout.columns || 120, defaultRows: process.stdout.rows || 30,
     scrollbackStore, archive, isRealDir,
+    sessionEnv: (s: Session): Record<string, string> => ({
+      AGENV_URL: `http://${config.host === "0.0.0.0" || config.host === "::" ? "127.0.0.1" : config.host}:${config.port}`,
+      AGENV_SESSION_ID: String(s.id),
+      AGENV_SESSION_TOKEN: messages.tokenFor(s.id),
+    }),
   });
   const stateStore = new StateStore(stateFile, () => ({
     sessions: sessions.all().map((s) => s.toPersisted()),
@@ -127,6 +134,7 @@ export function buildRuntime(o: RuntimeOptions): Runtime {
     defs: savedState && Array.isArray(savedState.sessionGroups) ? savedState.sessionGroups : [],
   });
   const analyzer = new OutputAnalyzer(bus, isRealDir);
+  const messages: MessageService = new MessageService({ bus, sessions, onChange: () => gateway.broadcastEvent("messages-updated") });
   const claudeRunner = new TrackedRunner(new ClaudeRunner());
   const agents = new AgentService({
     store: agentStore, runner: claudeRunner, forker: new ConversationForker({ runner: claudeRunner }), sessions, isDir: isRealDir, projectsDir: claude.projects,
@@ -172,7 +180,7 @@ export function buildRuntime(o: RuntimeOptions): Runtime {
   });
 
   const deps: AppDeps = {
-    config, auth, sessions, agents, automation, groups, layout, stateStore, history, archive, favorites, gateway, linker,
+    config, auth, sessions, agents, automation, messages, groups, layout, stateStore, history, archive, favorites, gateway, linker,
     usage: new UsageService(scanner),
     sessionIndex: new SessionIndex(scanner, { projects: claude.projects, indexFile: claude.indexFile }),
     claudeMd: new ClaudeMdService({ projects: claude.projects, scanner }),
@@ -198,6 +206,7 @@ export function buildRuntime(o: RuntimeOptions): Runtime {
       gateway.dispose();
       auth.dispose();
       analyzer.dispose();
+      messages.dispose();
       ngrok.dispose();
       pages.dispose();
       const serverClosed = !server.listening ? Promise.resolve() : new Promise<void>((resolve) => {

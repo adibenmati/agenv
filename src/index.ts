@@ -7,11 +7,19 @@ import * as path from "path";
 import { spawn as spawnPty } from "@lydell/node-pty";
 import { printBanner } from "./banner";
 import { PID_FILE, PKG_VERSION, runCommand } from "./cli/commands";
+import { runMessagingCommand } from "./cli/messaging";
 import { Config } from "./core/Config";
 import { buildRuntime } from "./runtime";
 import type { IPty, PtyFactory } from "./sessions/pty";
 
 function main(): void {
+  // sessions, send: talk to the running agenv from inside one of its sessions; no server of our own
+  const cmd = process.argv[2];
+  if (cmd === "sessions" || cmd === "send") {
+    void runMessagingCommand(cmd, process.argv.slice(2)).then((code) => process.exit(code ?? 0));
+    return;
+  }
+
   const homedir = os.homedir();
   const config = Config.fromArgv(process.argv.slice(2), process.env, homedir);
 

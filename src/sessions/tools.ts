@@ -1,6 +1,9 @@
 // Tool detection — identify what's running in a session from the command that started it.
 const TOOL_PATTERNS: Array<{ re: RegExp; tool: string }> = [
   { re: /^claude\b/i, tool: "claude" },
+  { re: /^codex\b/i, tool: "codex" },
+  { re: /^gemini\b/i, tool: "gemini" },
+  { re: /^(aider|opencode|qwen|amp|cursor-agent)\b/i, tool: "agent-cli" },
   { re: /^vertex\b/i, tool: "vertex" },
   { re: /^gcloud\s+ai\b/i, tool: "vertex" },
   { re: /^gcloud\b/i, tool: "gcloud" },

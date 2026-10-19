@@ -858,6 +858,24 @@ body{display:flex;flex-direction:column}
 .ag-check{display:flex;align-items:flex-start;gap:6px;font-size:10px;color:var(--text2);margin:4px 0}
 .ag-err{font-size:10px;color:var(--red);margin-top:6px;word-break:break-word}
 .ag-create:disabled,.ag-save:disabled{opacity:.5;cursor:not-allowed}
+#messages-panel{overflow:auto;display:none;flex-direction:column;padding:0 0 8px}
+#messages-panel.active{display:flex}
+.ms-header{padding:8px 10px 4px;flex-shrink:0}
+.ms-title{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--text3)}
+.ms-hint{font-size:10px;color:var(--text3);padding:0 10px 6px}
+.ms-hint code{color:var(--text2)}
+.ms-form{display:flex;flex-direction:column;gap:4px;padding:0 10px 8px}
+.ms-form select,.ms-form textarea{font-family:var(--font);font-size:11px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px;resize:vertical}
+.ms-send{align-self:flex-end;padding:3px 12px;font-size:10px;font-weight:600;font-family:var(--font);background:var(--bg3);color:var(--text2);border:1px solid var(--border);border-radius:4px;cursor:pointer}
+.ms-row{padding:5px 10px;border-top:1px solid var(--border)}
+.ms-meta{font-size:10px;color:var(--text2)}
+.ms-when,.ms-status{color:var(--text3);margin-left:4px}
+.ms-failed .ms-status{color:var(--red)}
+.ms-queued .ms-status{color:var(--orange)}
+.ms-body{font-size:11px;color:var(--text);word-break:break-word;margin-top:2px}
+.ms-empty{font-size:11px;color:var(--text3);padding:8px 10px}
+.ms-err{font-size:10px;color:var(--red);padding:0 10px 6px}
+#ab-messages{font-size:14px}
 #routines-panel{overflow:hidden;display:none;flex-direction:column}
 #routines-panel.active{display:flex}
 .rt-header{display:flex;align-items:center;justify-content:space-between;padding:8px 10px 6px;flex-shrink:0}
@@ -1114,6 +1132,7 @@ body{display:flex;flex-direction:column}
       <button class="ab-btn" id="ab-claude" data-panel="claude-search-panel" title="Claude Sessions">C</button>
       <button class="ab-btn" id="ab-agents" data-panel="agents-panel" title="Agents">A</button>
       <button class="ab-btn" id="ab-routines" data-panel="routines-panel" title="Routines (scheduled runs)">R</button>
+      <button class="ab-btn" id="ab-messages" data-panel="messages-panel" title="Messages between sessions">&#9993;</button>
       <button class="ab-btn" id="ab-claudemd" data-panel="claudemd-panel" title="CLAUDE.md Manager">&#128220;</button>
       <button class="ab-btn" id="ab-prompts" data-panel="prompts-panel" title="Prompt Library">&#128221;</button>
       <button class="ab-btn" id="ab-cost" data-panel="cost-panel" title="AI Cost Monitor">&#128176;</button>
@@ -1139,6 +1158,7 @@ body{display:flex;flex-direction:column}
       <div class="sb-panel" id="claude-search-panel"></div>
       <div class="sb-panel" id="agents-panel"></div>
       <div class="sb-panel" id="routines-panel"></div>
+      <div class="sb-panel" id="messages-panel"></div>
       <div class="sb-panel" id="claudemd-panel"></div>
       <div class="sb-panel" id="prompts-panel"></div>
       <div class="sb-panel" id="git-panel"></div>

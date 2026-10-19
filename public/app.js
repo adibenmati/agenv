@@ -14,6 +14,7 @@ import * as sessionsPanel from "./modules/sessions.js";
 import * as claudeSearch from "./modules/claude-search.js";
 import { agentsPanel } from "./modules/agents.js";
 import { routinesPanel } from "./modules/routines.js";
+import { messagesPanel } from "./modules/messages.js";
 import * as claudeMd from "./modules/claudemd.js";
 import * as promptLib from "./modules/prompts.js";
 
@@ -455,6 +456,11 @@ routinesPanel.init({
   onOpenSession: openSessionTab,
 });
 
+messagesPanel.init({
+  panel: $("messages-panel"),
+  showToast(message, type) { notif.showToast(null, message, type); },
+});
+
 // ---------------------------------------------------------------------------
 // Initialize CLAUDE.md Manager (cross-project CLAUDE.md editor)
 // ---------------------------------------------------------------------------
@@ -629,7 +635,7 @@ setCallbacks({
       statusBar.className = "disconnected";
     }
   },
-  onEvent(name) { routinesPanel.handleEvent(name); },
+  onEvent(name) { routinesPanel.handleEvent(name); messagesPanel.handleEvent(name); },
   onStatus(sessionId, status) {
     tabs.setSessionMeta(sessionId, { status });
     tabs.updateStatusIndicators();
@@ -786,6 +792,13 @@ function activatePanel(panelName) {
     routinesPanel.startPolling();
   } else {
     routinesPanel.stopPolling();
+  }
+  // Messages panel: load on show, refresh on the messages-updated broadcast while visible
+  if (panelId === "messages-panel" && sidebar.isVisible() && sidebar.getActivePanel() === "messages-panel") {
+    messagesPanel.refresh();
+    messagesPanel.startPolling();
+  } else {
+    messagesPanel.stopPolling();
   }
   // CLAUDE.md Manager: load on show
   if (panelId === "claudemd-panel" && sidebar.isVisible() && sidebar.getActivePanel() === "claudemd-panel") {

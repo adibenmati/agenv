@@ -24,6 +24,8 @@ export interface SessionManagerOptions {
   archive: ArchiveStore;
   isRealDir: (p: string) => boolean;
   env?: NodeJS.ProcessEnv;
+  /** Extra environment for one session's shell (how a session finds the agenv API to message its peers). */
+  sessionEnv?: (s: Session) => Record<string, string>;
 }
 
 export interface CreateOptions {
@@ -121,7 +123,7 @@ export class SessionManager {
     const cwd = s.cwd && isRealDir(s.cwd) ? s.cwd : process.cwd();
     const pty = ptyFactory({
       file: this.shell.file, args: this.shell.args, cols: s.cols, rows: s.rows, cwd,
-      env: Object.assign({}, this.o.env || process.env, { TERM: "xterm-256color" }),
+      env: Object.assign({}, this.o.env || process.env, { TERM: "xterm-256color" }, this.o.sessionEnv ? this.o.sessionEnv(s) : {}),
     });
     s.pty = pty;
     s.live = true;

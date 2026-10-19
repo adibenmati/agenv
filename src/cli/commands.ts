@@ -15,6 +15,8 @@ const HELP = `
     agenv                        Launch desktop app (default)
     agenv --web                  Start web server mode
     agenv run <command...>       Start & auto-run a command
+    agenv sessions               (inside a session) List sessions you can message
+    agenv send <name> <text...>  (inside a session) Message another session
     agenv stop                   Stop running server
     agenv kill                   Force-kill running server
     agenv set <key> <value>      Set a config value
