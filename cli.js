@@ -8,7 +8,7 @@ const args = process.argv.slice(2);
 const command = args[0];
 
 // Subcommands that always go through server.js
-const subcommands = new Set(["help", "--help", "-h", "version", "--version", "-v", "set", "get", "update", "stop", "kill", "run"]);
+const subcommands = new Set(["help", "--help", "-h", "version", "--version", "-v", "set", "get", "update", "stop", "kill", "run", "sessions", "send"]);
 
 // --web flag means web server mode
 const isWeb = args.includes("--web");

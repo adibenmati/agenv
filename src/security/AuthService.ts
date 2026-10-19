@@ -25,7 +25,7 @@ const WRITE_PATHS = ["/api/sessions", "/api/git/stage", "/api/git/commit", "/api
   "/api/git/checkout", "/api/git/unstage", "/api/git/discard", "/api/git/stash",
   "/api/git/stash-pop", "/api/git/worktree-add", "/api/session-groups",
   "/api/file", "/api/upload", "/api/clip", "/api/shutdown", "/api/quick-launch",
-  "/api/agents", "/api/claude/conversations", "/api/routines", "/api/runs", "/api/automation"];
+  "/api/agents", "/api/claude/conversations", "/api/routines", "/api/runs", "/api/automation", "/api/messages"];
 
 const RATE_LIMIT_PER_MINUTE = 600;
 
