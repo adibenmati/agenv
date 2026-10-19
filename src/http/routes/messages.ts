@@ -34,5 +34,15 @@ export function messagesRouter(d: AppDeps): Router {
     res.json(d.messages.send(who.get(req) ?? null, b.to, b.text));
   }));
 
+  // Run a command in many sessions. Only the logged-in UI may do this, never a session's own token.
+  r.post("/api/messages/broadcast", auth, wrap((req, res) => {
+    if (who.has(req)) throw new HttpError(403, "A session cannot run commands in other sessions");
+    const b = req.body || {};
+    if (typeof b.command !== "string") throw new HttpError(400, "Body needs \"command\"");
+    res.json(d.messages.broadcast(b.command, {
+      group: typeof b.group === "string" ? b.group : undefined, agentsOnly: b.agentsOnly === true,
+    }));
+  }));
+
   return r;
 }

@@ -13,7 +13,7 @@ function rig(over = {}) {
   const changes = [];
   const add = (id, name, tool = "claude", live = true) => {
     const written = [];
-    const s = { id, name, detectedTool: tool, claudeRunning: false, live, pty: live ? { write: (x) => written.push(x) } : null };
+    const s = { id, name, group: "", detectedTool: tool, claudeRunning: false, live, pty: live ? { write: (x) => written.push(x) } : null };
     sessions.set(id, s);
     return { s, written };
   };
@@ -128,5 +128,33 @@ describe("tool detection for agent CLIs", () => {
     assert.equal(detectTool("gemini"), "gemini");
     assert.equal(detectTool("aider --model x"), "agent-cli");
     assert.equal(detectTool("claude"), "claude");
+  });
+});
+
+describe("MessageService.broadcast", () => {
+  it("types the command and Enter into every open session, skipping closed ones and (when asked) plain shells", () => {
+    const r = rig();
+    const a = r.add(1, "a"); const b = r.add(2, "b", "codex"); const shell = r.add(3, "shell", "terminal"); r.add(4, "gone", "claude", false);
+    const all = r.svc.broadcast("/remote-control", { agentsOnly: true });
+    assert.deepEqual(all.map((x) => [x.id, x.status, x.reason]), [[1, "sent", undefined], [2, "sent", undefined], [3, "skipped", "no agent CLI running"], [4, "skipped", "closed"]]);
+    assert.deepEqual(a.written, ["/remote-control", "\r"]);
+    assert.deepEqual(b.written, ["/remote-control", "\r"]);
+    assert.deepEqual(shell.written, []);
+    const plain = r.svc.broadcast("echo hi", {});
+    assert.equal(plain.find((x) => x.id === 3).status, "sent");
+    assert.deepEqual(shell.written, ["echo hi", "\r"]);
+  });
+
+  it("a group limits it to that group and its subgroups, and an empty or multi-line command is flattened or refused", () => {
+    const r = rig();
+    const a = r.add(1, "a"); a.s.group = "mkt";
+    const b = r.add(2, "b"); b.s.group = "mkt/seo";
+    const c = r.add(3, "c"); c.s.group = "marketing";
+    const d = r.add(4, "d"); d.s.group = "";
+    const res = r.svc.broadcast("go\nnow", { group: "mkt" });
+    assert.deepEqual(res.map((x) => x.id), [1, 2]);
+    assert.deepEqual(a.written, ["go now", "\r"]);
+    assert.deepEqual(c.written.concat(d.written), []);
+    reject(() => r.svc.broadcast("  "), 400, /empty/);
   });
 });

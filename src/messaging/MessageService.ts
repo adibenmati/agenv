@@ -28,6 +28,13 @@ export interface Peer {
   live: boolean;
 }
 
+export interface BroadcastResult {
+  id: number;
+  name: string;
+  status: "sent" | "skipped";
+  reason?: string;
+}
+
 export interface MessageServiceOptions {
   bus: TypedEmitter<SessionEvents>;
   sessions: { get(id: number): Session | undefined; all(): Session[] };
@@ -135,6 +142,33 @@ export class MessageService {
     this.pump();
     this.o.onChange?.();
     return m;
+  }
+
+  /**
+   * Type `command` and Enter into many sessions at once — what you would do by hand in each tab, e.g. a slash command
+   * such as /remote-control. `group` limits it to a session group (and its subgroups); `agentsOnly` skips plain shells,
+   * where the text would run as a shell command.
+   */
+  broadcast(command: string, opts: { group?: string; agentsOnly?: boolean } = {}): BroadcastResult[] {
+    const text = String(command == null ? "" : command).replace(/\s+/g, " ").trim();
+    if (!text) throw new HttpError(400, "Command is empty");
+    if (text.length > MAX_TEXT) throw new HttpError(400, "Command is too long (max " + MAX_TEXT + " characters)");
+    const group = typeof opts.group === "string" ? opts.group : undefined;
+    const results: BroadcastResult[] = [];
+    for (const s of this.o.sessions.all()) {
+      if (group !== undefined && !(s.group === group || s.group.startsWith(group + "/"))) continue;
+      const name = displayName(s);
+      const skip = (reason: string): void => { results.push({ id: s.id, name, status: "skipped", reason }); };
+      if (!s.live || !s.pty) { skip("closed"); continue; }
+      if (opts.agentsOnly && !AGENT_TOOLS.has(s.detectedTool) && !s.claudeRunning) { skip("no agent CLI running"); continue; }
+      s.pty.write(text);
+      this.lastOutput.set(s.id, this.now());
+      const pty = s.pty;
+      const press = (): void => { try { pty.write("\r"); } catch {} };
+      if (this.submitDelayMs > 0) setTimeout(press, this.submitDelayMs).unref(); else press();
+      results.push({ id: s.id, name, status: "sent" });
+    }
+    return results;
   }
 
   /** Deliver what is deliverable (one message per target per call) and fail what waited too long. */
