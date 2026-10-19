@@ -72,3 +72,21 @@ describe("messages API", () => {
     assert.equal(anon, 401);
   }, { timeout: 30000 });
 });
+
+describe("broadcast API", () => {
+  let server, home;
+  before(async () => { home = makeTempHome(); server = await startServer({ home }); }, { timeout: 30000 });
+  after(async () => { await stopProcess(server.proc); try { fs.rmSync(home, { recursive: true, force: true }); } catch {} });
+
+  it("runs a command in a session group's open terminals, honours agentsOnly and refuses an empty command", async () => {
+    await post("/api/sessions", { name: "shell-a", group: "ops" });
+    await post("/api/sessions", { name: "shell-b" });
+    const res = await post("/api/messages/broadcast", { command: "echo hi", group: "ops" });
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body.map((r) => [r.name, r.status]), [["shell-a", "sent"]]);
+    const agentsOnly = await post("/api/messages/broadcast", { command: "/remote-control", agentsOnly: true });
+    assert.ok(agentsOnly.body.every((r) => r.status === "skipped"));
+    assert.equal((await post("/api/messages/broadcast", { command: "" })).status, 400);
+    assert.equal((await post("/api/messages/broadcast", {})).status, 400);
+  }, { timeout: 30000 });
+});
