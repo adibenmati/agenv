@@ -1,3 +1,4 @@
+import { detectToolFromOutput } from "./tools";
 import * as path from "path";
 import type { SessionStatus } from "../core/types";
 import type { Session } from "./Session";
@@ -120,7 +121,7 @@ export function parseTokenInfo(text: string): TokenInfo | null {
 // ---------------------------------------------------------------------------
 const DETECT_INTERVAL_MS = 250;
 const DETECT_TAIL_BYTES = 8192;
-const STRIP_ANSI = /\x1b\[[0-9;?]*[a-zA-Z~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][0-9A-Z]/g;
+export const STRIP_ANSI = /\x1b\[[0-9;?]*[a-zA-Z~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][0-9A-Z]/g;
 const OSC7_CWD = /\x1b\]7;file:\/\/[^/]*([^\x07\x1b]*?)(?:\x07|\x1b\\)/;
 const CMD_PROMPT = /([a-zA-Z]:\\[^>\r\n]*?)>\s*$/m;
 const PS_PROMPT = /PS\s+([a-zA-Z]:\\[^\r\n>]*?)>\s*$/m;
@@ -195,6 +196,11 @@ export class OutputAnalyzer {
           if (this.isRealDir(resolved)) this.setCwd(s, resolved);
         } catch {}
       }
+    }
+
+    if (s.detectedTool === "terminal") {
+      const found = detectToolFromOutput(plain);
+      if (found) { s.detectedTool = found; this.bus.emit("changed", s); }
     }
 
     const newStatus = detectSessionStatus(plain);

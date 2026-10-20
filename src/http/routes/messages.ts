@@ -30,8 +30,11 @@ export function messagesRouter(d: AppDeps): Router {
 
   r.post("/api/messages", auth, wrap((req, res) => {
     const b = req.body || {};
-    if (typeof b.to !== "string" || typeof b.text !== "string") throw new HttpError(400, "Body needs \"to\" and \"text\"");
-    res.json(d.messages.send(who.get(req) ?? null, b.to, b.text));
+    const many = Array.isArray(b.to) && b.to.every((x: unknown) => typeof x === "string") && b.to.length > 0;
+    if ((typeof b.to !== "string" && !many) || typeof b.text !== "string") throw new HttpError(400, "Body needs \"to\" (a name or a list of names) and \"text\"");
+    const force = b.force === true && !who.has(req);        // only the logged-in UI may override the agent check
+    if (many) { res.json(d.messages.sendTo(who.get(req) ?? null, b.to, b.text, { force })); return; }
+    res.json(d.messages.send(who.get(req) ?? null, b.to, b.text, { force }));
   }));
 
   // One message to every agent session, or to one group of them.

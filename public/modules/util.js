@@ -80,3 +80,49 @@ export function askText(title, value = "", opts = {}) {
     input.select();
   });
 }
+
+/**
+ * A dialog to pick several of the current sessions (checkboxes) and write a message to them.
+ * `items` is [{ id, label, hint }]; resolves to { ids, text } or null when cancelled.
+ */
+export function askSessionsMessage(title, items, opts = {}) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "ask-overlay";
+    const rows = items.map((it) => `<label class="ask-pick"><input type="checkbox" value="${esc(String(it.id))}"${it.checked ? " checked" : ""} /> <span>${esc(it.label)}</span>${it.hint ? ` <em>${esc(it.hint)}</em>` : ""}</label>`).join("");
+    overlay.innerHTML = `<div class="ask-box" role="dialog" aria-modal="true">
+      <div class="ask-title">${esc(title)}</div>
+      ${opts.hint ? `<div class="ask-hint">${esc(opts.hint)}</div>` : ""}
+      <label class="ask-pick ask-pick-all"><input type="checkbox" class="ask-all" /> <span>Select all</span></label>
+      <div class="ask-picks">${rows || '<div class="ask-hint">No other open sessions.</div>'}</div>
+      <textarea class="ask-input ask-msg" rows="3" spellcheck="false" placeholder="${esc(opts.placeholder || "Message")}"></textarea>
+      <div class="ask-actions">
+        <button class="ask-btn" data-r="cancel">Cancel</button>
+        <button class="ask-btn primary" data-r="ok">${esc(opts.okLabel || "Send")}</button>
+      </div>
+    </div>`;
+    const boxes = () => [...overlay.querySelectorAll(".ask-picks input[type=checkbox]")];
+    const msg = overlay.querySelector(".ask-msg");
+    const done = (v) => { overlay.remove(); resolve(v); };
+    const submit = () => {
+      const ids = boxes().filter((b) => b.checked).map((b) => b.value);
+      if (ids.length === 0 || !msg.value.trim()) return;
+      done({ ids, text: msg.value });
+    };
+    overlay.addEventListener("mousedown", (e) => { if (e.target === overlay) done(null); });
+    overlay.addEventListener("click", (e) => {
+      const r = e.target.closest("[data-r]");
+      if (r) { if (r.dataset.r === "ok") submit(); else done(null); }
+    });
+    overlay.addEventListener("change", (e) => {
+      if (e.target.classList.contains("ask-all")) for (const b of boxes()) b.checked = e.target.checked;
+    });
+    overlay.addEventListener("keydown", (e) => {
+      e.stopPropagation();
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); submit(); }
+      else if (e.key === "Escape") { e.preventDefault(); done(null); }
+    });
+    document.body.appendChild(overlay);
+    msg.focus();
+  });
+}

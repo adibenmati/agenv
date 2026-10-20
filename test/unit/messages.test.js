@@ -13,7 +13,7 @@ function rig(over = {}) {
   const changes = [];
   const add = (id, name, tool = "claude", live = true) => {
     const written = [];
-    const s = { id, name, group: "", detectedTool: tool, claudeRunning: false, live, pty: live ? { write: (x) => written.push(x) } : null };
+    const s = { id, name, group: "", scrollback: { read: () => Buffer.alloc(0) }, detectedTool: tool, claudeRunning: false, live, pty: live ? { write: (x) => written.push(x) } : null };
     sessions.set(id, s);
     return { s, written };
   };
@@ -156,5 +156,38 @@ describe("MessageService.broadcast", () => {
     assert.deepEqual(a.written, ["go now", "\r"]);
     assert.deepEqual(c.written.concat(d.written), []);
     reject(() => r.svc.broadcast("  "), 400, /empty/);
+  });
+});
+
+describe("recognising an agent CLI that was not typed as a plain command", () => {
+  const { detectToolFromOutput } = require("../../dist/sessions/tools");
+  it("finds codex and friends behind paths, extensions, runners and command chains", () => {
+    for (const [cmd, tool] of [
+      ["npx @openai/codex", "codex"], ["codex.cmd --yolo", "codex"], ["C:/Users/me/AppData/Roaming/npm/codex.ps1", "codex"],
+      ["cd ../app && codex", "codex"], ["FOO=1 gemini -m x", "gemini"], ["pnpm dlx @google/gemini-cli", "gemini"],
+      ["npx -y @anthropic-ai/claude-code", "claude"], ["\"C:/Program Files/nodejs/claude.exe\" --resume x", "claude"],
+    ]) assert.equal(detectTool(cmd), tool, cmd);
+  });
+  it("reads the start-up banners, Claude before Gemini (both print 'Tips for getting started')", () => {
+    assert.equal(detectToolFromOutput(">_ OpenAI Codex (v0.50.0)"), "codex");
+    assert.equal(detectToolFromOutput("Claude Code v2.1.301\nTips for getting started:"), "claude");
+    assert.equal(detectToolFromOutput("Tips for getting started:\n1. Ask questions"), "gemini");
+    assert.equal(detectToolFromOutput("just some Gemini and Codex words"), null);
+  });
+  it("a send to a session whose tool is unknown looks at its output; --force overrides; several recipients at once", () => {
+    const r = rig(); r.add(1, "a");
+    const hidden = r.add(2, "intelis-commercial-codex", "terminal");
+    hidden.s.scrollback = { read: () => Buffer.from("\x1b[1m>_ OpenAI Codex (v0.50.0)\x1b[0m\nready") };
+    const plain = r.add(3, "plain", "terminal");
+    plain.s.scrollback = { read: () => Buffer.from("C:\work>") };
+    const third = r.add(4, "gem", "gemini");
+    assert.equal(r.svc.send(1, "intelis-commercial-codex", "hi").status, "delivered");
+    assert.equal(hidden.s.detectedTool, "codex");
+    assert.throws(() => r.svc.send(1, "plain", "hi"), (e) => e.status === 409 && e.body && e.body.code === "no-agent-cli");
+    assert.equal(r.svc.send(null, "plain", "hi", { force: true }).status, "delivered");
+    const res = r.svc.sendTo(1, ["gem", "ghost", "plain", "#4"], "all of you");
+    assert.deepEqual(res.map((x) => [x.name, x.status]), [["gem", "sent"], ["ghost", "skipped"], ["plain", "skipped"]]);
+    assert.equal(res[2].code, "no-agent-cli");
+    assert.match(third.written[0], /all of you/);
   });
 });

@@ -29,6 +29,8 @@ function init(o) {
   _toast = o.showToast;
   panelEl.addEventListener("click", (e) => {
     if (e.target.closest(".ms-send")) send();
+    const all = e.target.closest(".ms-pick-all");
+    if (all) for (const b of panelEl.querySelectorAll(".ms-pick")) b.checked = all.checked;
     if (e.target.closest(".ms-run")) runInMany();
   });
   panelEl.addEventListener("keydown", (e) => {
@@ -54,16 +56,24 @@ async function refresh() {
 
 async function send() {
   if (busy) return;
-  const to = panelEl.querySelector(".ms-to");
   const text = panelEl.querySelector(".ms-text");
-  if (!to || !text || !to.value || !text.value.trim()) return;
+  const ids = [...panelEl.querySelectorAll(".ms-pick:checked")].map((b) => b.value);
+  if (!text || ids.length === 0 || !text.value.trim()) { if (ids.length === 0) toast("Tick the sessions to message", "error"); return; }
   busy = true;
   try {
-    const m = await request("/api/messages", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ to: to.value, text: text.value }),
-    });
-    text.value = "";
-    if (m.status === "queued") toast(m.to + " is busy; the message goes in as soon as it is idle", "info");
+    const body = { to: ids, text: text.value };
+    let res = await request("/api/messages", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const unsure = res.filter((r) => r.status === "skipped" && r.code === "no-agent-cli");
+    if (unsure.length && confirm("No agent CLI was detected in " + unsure.map((r) => r.name).join(", ") + ", so the message might run as a shell command. Send it there anyway?")) {
+      const again = await request("/api/messages", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ to: unsure.map((r) => r.name), text: text.value, force: true }) });
+      res = res.filter((r) => !unsure.includes(r)).concat(again);
+    }
+    const sent = res.filter((r) => r.status === "sent");
+    const skipped = res.filter((r) => r.status === "skipped");
+    if (sent.length) text.value = "";
+    if (skipped.length) toast("Not sent to " + skipped.map((r) => r.name + " (" + r.reason + ")").join("; "), "error");
+    else if (sent.some((r) => r.reason)) toast("Some sessions are busy; the message goes in as soon as they are idle", "info");
   } catch (e) {
     toast(e.message, "error");
   } finally {
@@ -96,8 +106,7 @@ async function runInMany() {
 
 function render(error) {
   if (!panelEl) return;
-  const sel = panelEl.querySelector(".ms-to");
-  const chosen = sel ? sel.value : "";
+  const ticked = new Set([...panelEl.querySelectorAll(".ms-pick:checked")].map((b) => b.value));
   const draft = panelEl.querySelector(".ms-text");
   const draftText = draft ? draft.value : "";
   const cmdEl = panelEl.querySelector(".ms-cmd");
@@ -107,7 +116,7 @@ function render(error) {
   const agOnlyEl = panelEl.querySelector(".ms-agents-only");
   const agOnly = agOnlyEl ? agOnlyEl.checked : true;
   const options = peers.filter((p) => p.live).map((p) =>
-    `<option value="${esc(p.name || String(p.id))}"${(p.name || String(p.id)) === chosen ? " selected" : ""}>${esc(p.name || "session " + p.id)} (${esc(p.tool)}, ${esc(p.state)})</option>`).join("");
+    `<label class="ms-peer"><input type="checkbox" class="ms-pick" value="${esc(String(p.id))}"${ticked.has(String(p.id)) ? " checked" : ""} /> <span>${esc(p.name || "session " + p.id)}</span> <em>${esc(p.tool)}, ${esc(p.state)}</em></label>`).join("");
   const groupOptions = ["<option value=\"__all__all\">All sessions</option>"].concat(groups.map((g) =>
     `<option value="${esc(g)}"${g === tgtVal ? " selected" : ""}>Group: ${esc(g)}</option>`)).join("");
   const rows = log.slice().reverse().slice(0, 100).map((m) => `
@@ -121,7 +130,10 @@ function render(error) {
     <div class="ms-hint">Sessions message each other with <code>agenv send &lt;name&gt; &lt;text&gt;</code> (Claude, Codex, Gemini, anything that runs commands).</div>
     ${error ? `<div class="ms-err">${esc(error)}</div>` : ""}
     <div class="ms-form">
-      <select class="ms-to">${options || '<option value="">no agent sessions open</option>'}</select>
+      <div class="ms-peers">
+        <label class="ms-peer ms-peer-all"><input type="checkbox" class="ms-pick-all" /> <span>All sessions</span></label>
+        ${options || '<div class="ms-empty">No open sessions.</div>'}
+      </div>
       <textarea class="ms-text" rows="2" placeholder="Message to the selected session (Enter to send)"></textarea>
       <button class="ms-send">Send</button>
     </div>

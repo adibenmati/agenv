@@ -60,7 +60,8 @@ describe("messages API", () => {
 
     const toPlain = await post("/api/messages", { to: "plain", text: "hi" });
     assert.equal(toPlain.status, 409);
-    assert.match(toPlain.body.error, /No agent CLI is running/);
+    assert.match(toPlain.body.error, /No agent CLI was detected/);
+    assert.equal(toPlain.body.code, "no-agent-cli");
     assert.equal((await post("/api/messages", { to: "ghost", text: "hi" })).status, 404);
     assert.equal((await post("/api/messages", { to: "reviewer" })).status, 400);
 
