@@ -111,7 +111,7 @@ body{display:flex;flex-direction:column}
 .sb-ses-btn:hover{color:var(--accent);background:rgba(88,166,255,.1)}
 
 /* Sidebar content panels */
-.sb-panel{flex:1;overflow:hidden;display:none;flex-direction:column}
+.sb-panel{flex:1;overflow:hidden;display:none;flex-direction:column;zoom:var(--ui-zoom,1)}
 .sb-panel.active{display:flex;overflow-y:auto}
 
 /* File tree */
@@ -364,7 +364,7 @@ body{display:flex;flex-direction:column}
 .sp-group-body{padding:0}
 
 /* Session cards */
-.sp-session{display:flex;align-items:center;gap:6px;padding:5px 10px;cursor:pointer;transition:background .1s;border-left:2px solid transparent}
+.sp-session{display:flex;align-items:center;gap:6px;padding:5px 10px;cursor:pointer;transition:background .1s;border-left:2px solid var(--gc,transparent)}
 .sp-session:hover{background:var(--bg3)}
 .sp-session.open{border-left-color:var(--accent);background:rgba(88,166,255,.04)}
 .sp-session.dragging{opacity:.4}
@@ -1285,6 +1285,23 @@ body{display:flex;flex-direction:column}
           <option value="13">13px</option>
           <option value="14" selected>14px</option>
           <option value="16">16px</option>
+          <option value="18">18px</option>
+          <option value="20">20px</option>
+          <option value="22">22px</option>
+          <option value="24">24px</option>
+          <option value="28">28px</option>
+          <option value="32">32px</option>
+        </select>
+      </div>
+      <div class="setting-row">
+        <span class="setting-label">Left pane size</span>
+        <select class="setting-select" id="uiscale-select">
+          <option value="100" selected>100%</option>
+          <option value="115">115%</option>
+          <option value="130">130%</option>
+          <option value="150">150%</option>
+          <option value="175">175%</option>
+          <option value="200">200%</option>
         </select>
       </div>
     </div>

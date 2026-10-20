@@ -1,7 +1,7 @@
 // app.js — main application orchestrator
 import { $, setToken, api, esc, short, tIcon, ago, fname, askText } from "./modules/util.js";
 import { allLeaves } from "./modules/layout.js";
-import { setCallbacks, getTerminal, sendInput, pasteText, smartPaste, createTerminal as createTerm, fitAllTerminals, destroyTerminal, getCommandHistory } from "./modules/terminal.js";
+import { setCallbacks, getTerminal, sendInput, pasteText, smartPaste, createTerminal as createTerm, setFontSize as setTermFontSize, fitAllTerminals, destroyTerminal, getCommandHistory } from "./modules/terminal.js";
 import * as tabs from "./modules/tabs.js";
 import * as sidebar from "./modules/sidebar.js";
 import * as notif from "./modules/notifications.js";
@@ -30,6 +30,7 @@ setToken(RT.token || "");
 const settings = {
   theme: localStorage.getItem("tl-theme") || "dark",
   fontSize: parseInt(localStorage.getItem("tl-fontSize") || "14", 10),
+  uiScale: parseInt(localStorage.getItem("tl-uiScale") || "100", 10),
   browserNotifs: localStorage.getItem("tl-browserNotifs") !== "false",
   cmdNotifs: localStorage.getItem("tl-cmdNotifs") !== "false",
   showSysStats: localStorage.getItem("tl-sysStats") !== "false",
@@ -288,6 +289,14 @@ extensions.initNgrokPanel();
 sessionsPanel.init({
   panel: $("sessions-panel"),
   showContextMenu: ctxmenu.show,
+  showToast(message, type) { notif.showToast(null, message, type); },
+  getResumeArgs() {
+    const a = [];
+    if (settings.defaultModel) a.push("--model", settings.defaultModel);
+    if (settings.agentSkipPerms) a.push("--dangerously-skip-permissions");
+    return a;
+  },
+  onColorsChanged() { tabs.refreshTabColors(); },
   onMakeAgentFromSession(sid, cwd) { openAgentDialog({ sessionId: sid, cwd }); },
   onForkConversation(id, cwd) { agentsPanel.forkConversation(id, cwd); },
   onMakeAgentFromConversation(id, cwd) { openAgentDialog({ sourceConversationId: id, cwd }); },
@@ -1138,8 +1147,21 @@ settingsOverlay.addEventListener("click", (e) => { if (e.target === settingsOver
 // Settings wiring
 $("theme-select").value = settings.theme;
 $("theme-select").addEventListener("change", (e) => applyTheme(e.target.value));
+setTermFontSize(settings.fontSize);
 $("fontsize-select").value = String(settings.fontSize);
-$("fontsize-select").addEventListener("change", (e) => saveSetting("fontSize", parseInt(e.target.value, 10)));
+$("fontsize-select").addEventListener("change", (e) => {
+  saveSetting("fontSize", parseInt(e.target.value, 10));
+  setTermFontSize(settings.fontSize);
+});
+
+// Left pane (sessions, agents, files, ...) text size: a zoom on the sidebar panels
+const applyUiScale = () => document.documentElement.style.setProperty("--ui-zoom", String((settings.uiScale || 100) / 100));
+applyUiScale();
+$("uiscale-select").value = String(settings.uiScale || 100);
+$("uiscale-select").addEventListener("change", (e) => {
+  saveSetting("uiScale", parseInt(e.target.value, 10));
+  applyUiScale();
+});
 $("browser-notif-toggle").checked = settings.browserNotifs;
 $("browser-notif-toggle").addEventListener("change", (e) => saveSetting("browserNotifs", e.target.checked));
 $("cmd-notif-toggle").checked = settings.cmdNotifs;

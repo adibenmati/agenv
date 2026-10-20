@@ -84,6 +84,13 @@ export function sessionsRouter(d: AppDeps): Router {
     res.json({ ok: true });
   }));
 
+  r.post("/api/sessions/resume-all", auth, wrap((req, res) => {
+    const b = req.body || {};
+    const results = d.batch.resumeAll({ group: typeof b.group === "string" ? b.group : undefined, extraArgs: b.extraArgs });
+    d.stateStore.save();
+    res.json(results);
+  }));
+
   r.post("/api/sessions/:id/restart", auth, wrap((req, res) => {
     const id = parseInt(req.params.id, 10);
     if (!d.sessions.get(id)) throw new HttpError(404, "Session not found");

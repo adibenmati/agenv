@@ -68,6 +68,18 @@ export function setCallbacks(cbs) {
   _onCommand = cbs.onCommand || null;
 }
 
+let termFontSize = 14;
+
+/** Set the font size of every open terminal and of the ones created later. */
+export function setFontSize(px) {
+  termFontSize = Math.max(8, Math.min(40, Math.round(px) || 14));
+  for (const entry of paneTerminals.values()) {
+    if (!entry.term) continue;
+    entry.term.options.fontSize = termFontSize;
+    try { entry.fitAddon.fit(); } catch {}
+  }
+}
+
 const TERM_OPTIONS = {
   cursorBlink: true,
   fontSize: 14,
@@ -282,7 +294,7 @@ export function createTerminal(paneId, sessionId, mountEl) {
 /** Build the xterm instance for an entry — on creation, and again when a hibernated pane wakes. */
 function openTerm(entry, mountEl) {
   const paneId = entry.paneId;
-  const term = new Terminal(TERM_OPTIONS);
+  const term = new Terminal({ ...TERM_OPTIONS, fontSize: termFontSize });
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
   term.loadAddon(new WebLinksAddon.WebLinksAddon());

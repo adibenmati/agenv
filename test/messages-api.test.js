@@ -90,3 +90,23 @@ describe("broadcast API", () => {
     assert.equal((await post("/api/messages/broadcast", {})).status, 400);
   }, { timeout: 30000 });
 });
+
+describe("batch session APIs", () => {
+  let server, home;
+  before(async () => { home = makeTempHome(); server = await startServer({ home }); }, { timeout: 30000 });
+  after(async () => { await stopProcess(server.proc); try { fs.rmSync(home, { recursive: true, force: true }); } catch {} });
+
+  it("resume-all reports what it did per session and many sends to agent sessions only", async () => {
+    await post("/api/sessions", { name: "one", group: "g" });
+    const res = await post("/api/sessions/resume-all", { group: "g", extraArgs: ["--model", "opus", "x; y"] });
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body.map((r) => [r.name, r.action]), [["one", "skipped"]]);
+    assert.equal(res.body[0].reason, "no conversation to resume");
+
+    const many = await post("/api/messages/many", { text: "hello all", group: "g" });
+    assert.equal(many.status, 200);
+    assert.equal(many.body[0].status, "skipped");
+    assert.match(many.body[0].reason, /No agent CLI/);
+    assert.equal((await post("/api/messages/many", {})).status, 400);
+  }, { timeout: 30000 });
+});
