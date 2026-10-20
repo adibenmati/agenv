@@ -34,6 +34,13 @@ export function messagesRouter(d: AppDeps): Router {
     res.json(d.messages.send(who.get(req) ?? null, b.to, b.text));
   }));
 
+  // One message to every agent session, or to one group of them.
+  r.post("/api/messages/many", auth, wrap((req, res) => {
+    const b = req.body || {};
+    if (typeof b.text !== "string") throw new HttpError(400, "Body needs \"text\"");
+    res.json(d.messages.sendMany(who.get(req) ?? null, b.text, { group: typeof b.group === "string" ? b.group : undefined }));
+  }));
+
   // Run a command in many sessions. Only the logged-in UI may do this, never a session's own token.
   r.post("/api/messages/broadcast", auth, wrap((req, res) => {
     if (who.has(req)) throw new HttpError(403, "A session cannot run commands in other sessions");

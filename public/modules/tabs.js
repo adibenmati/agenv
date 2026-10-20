@@ -3,6 +3,7 @@
 // Each tab is a Workspace with its own split-pane tree.
 
 import { uid, tIcon, fname, esc, api } from "./util.js";
+import { groupColorOfSession } from "./sessions.js";
 import { makeLeaf, allLeaves, firstLeaf, leafCount, renderTree, splitNode, closeNode, initDividerResize, findNeighborPane, findLeafByPane } from "./layout.js";
 import { createTerminal, destroyTerminal, focusTerminal, fitTerminal, fitAllTerminals, detachTerminal, reattachTerminal, getTerminal } from "./terminal.js";
 
@@ -540,7 +541,8 @@ function renderTabBar() {
       // Terminal tab: colored number badge + name
       const firstSessionId = firstLeaf(ws.rootNode)?.sessionId;
       const meta = firstSessionId != null ? getSessionMeta(firstSessionId) : {};
-      const color = firstSessionId != null ? getSessionColor(firstSessionId) : "hsl(0,0%,50%)";
+      const folderColor = firstSessionId != null ? groupColorOfSession(firstSessionId) : "";
+      const color = folderColor || (firstSessionId != null ? getSessionColor(firstSessionId) : "hsl(0,0%,50%)");
 
       const numBadge = document.createElement("span");
       numBadge.className = "tab-num";
@@ -639,8 +641,8 @@ function updatePaneHeader(paneId, headerEl, sessionId) {
   const status = meta.status || "idle";
   const a = meta.analytics || {};
 
-  // Colored left border from session color
-  const color = getSessionColor(sessionId);
+  // Colored left border: the folder colour when the session has one, else its own
+  const color = groupColorOfSession(sessionId) || getSessionColor(sessionId);
   headerEl.style.borderLeft = `2px solid ${color}`;
 
   let html = `<span class="ph-icon">${esc(tIcon(meta.tool || "terminal"))}</span><span class="ph-name">${esc(name)}</span>`;
@@ -692,6 +694,8 @@ export function updateStatusIndicators() {
 // ---------------------------------------------------------------------------
 // Font size updates
 // ---------------------------------------------------------------------------
+
+export function refreshTabColors() { renderTabBar(); }
 
 export function updateFontSize(size) {
   // This would need to update all terminal instances

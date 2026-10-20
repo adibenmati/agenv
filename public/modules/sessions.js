@@ -11,6 +11,10 @@ let _onLaunchAgent = null;    // (agent?) => {}
 let _onDeleteSession = null;  // (sessionId) => {}
 let _onRestartSession = null; // (sessionId) => {}
 let _getAgentCommand = null;  // () => string
+let _getResumeArgs = null;    // () => string[]  extra flags for `claude --resume` (model, permissions)
+let _onToast = null;          // (message, type) => {}
+let _onColorsChanged = null;  // () => {}  a session's inherited folder colour changed
+let lastColorSig = "";
 let _isSessionOpen = null;    // (sessionId) => boolean
 let _showContextMenu = null;  // (x, y, items) => {}
 let _onResumeClosed = null;   // (archiveEntry, { agent }) => {}
@@ -94,6 +98,9 @@ export function init(opts) {
   _onDeleteSession = opts.onDeleteSession || null;
   _onRestartSession = opts.onRestartSession || null;
   _getAgentCommand = opts.getAgentCommand || (() => "claude");
+  _getResumeArgs = opts.getResumeArgs || (() => []);
+  _onToast = opts.showToast || null;
+  _onColorsChanged = opts.onColorsChanged || null;
   _isSessionOpen = opts.isSessionOpen || (() => false);
   _showContextMenu = opts.showContextMenu || null;
   _onResumeClosed = opts.onResumeClosed || null;
@@ -144,6 +151,13 @@ export function updateSession(id, meta) {
 
 export function getSessions() { return sessions; }
 
+/** The colour a session inherits from its folder (its own, or the nearest coloured parent); "" when none. */
+export function groupColorOfSession(id) {
+  const s = sessions.find((x) => x.id === id);
+  const n = s && groups.find((g) => g.path === (s.group || ""));
+  return (n && n.eff) || "";
+}
+
 // ---------------------------------------------------------------------------
 // Group logic — builds the folder tree from server folders + session paths
 // ---------------------------------------------------------------------------
@@ -166,6 +180,10 @@ function buildGroups() {
   const root = node("");
   for (const g of groupDefs) node(g.path).color = g.color || "";
   for (const s of sessions) node(s.group || "").sessions.push(s);
+
+  // A folder without its own colour takes its parent's, so a colour set on a folder reaches everything inside it.
+  const paint = (n, inherited) => { n.eff = n.color || inherited; for (const c of n.children) paint(c, n.eff); };
+  paint(root, "");
 
   const sortTree = (n) => {
     n.children.sort((a, b) => a.name.localeCompare(b.name));
@@ -247,6 +265,8 @@ function renderShell() {
       <div class="sp-actions">
         <button class="sp-btn" data-act="new-session" title="New Terminal">+</button>
         <button class="sp-btn sp-agent-btn" data-act="new-agent" title="Launch Agent">C</button>
+        <button class="sp-btn" data-act="resume-all" title="Resume all: wake every sleeping tab and resume its Claude conversation">&#9654;&#9654;</button>
+        <button class="sp-btn" data-act="message-all" title="Send a message to all agent sessions">&#9993;</button>
         <button class="sp-btn" data-act="refresh" title="Refresh">&#8635;</button>
       </div>
     </div>
@@ -285,6 +305,10 @@ function renderSessions() {
   h += `<div class="sp-new-group" data-act="new-group">+ New Group</div>`;
   body.innerHTML = h;
 
+  // Tabs take the colour of their folder: tell the tab bar when any of them changed
+  const sig = sessions.map((x) => x.id + ":" + groupColorOfSession(x.id)).join("|");
+  if (sig !== lastColorSig) { lastColorSig = sig; if (_onColorsChanged) _onColorsChanged(); }
+
   // Footer
   const total = sessions.length;
   const running = sessions.filter(s => s.status === "running" || s.status === "waiting").length;
@@ -307,7 +331,7 @@ function renderGroupNode(n) {
   const isCollapsed = !filterQuery && collapsedGroups.has(n.path);
   const runningCount = all.filter(s => s.status === "running" || s.status === "waiting").length;
   const groupCost = all.reduce((sum, s) => sum + (s.analytics?.estimatedCost || 0), 0);
-  const colorStyle = n.color ? ` style="border-left:2px solid ${esc(n.color)}"` : "";
+  const colorStyle = n.eff ? ` style="border-left:2px solid ${esc(n.eff)};--gc:${esc(n.eff)}"` : "";
 
   let h = `<div class="sp-group" data-group="${key}">`;
   h += `<div class="sp-group-header${isCollapsed ? " collapsed" : ""}" data-group-toggle="${key}"${colorStyle} title="${esc(displayPath(n.path))}">`;
@@ -327,7 +351,7 @@ function renderGroupNode(n) {
     h += `<div class="sp-group-body">`;
     for (const c of n.children) h += renderGroupNode(c);
     for (const s of own) {
-      h += renderSessionCard(s);
+      h += renderSessionCard(s, n.eff);
       if (expandedSessions.has(s.id)) h += renderSessionDetail(s);
     }
     if (all.length === 0 && n.children.length === 0 && n.path) {
@@ -406,7 +430,7 @@ const continueTitle = (s) => s.claudeSessionId
   ? "Resume Claude conversation " + s.claudeSessionId.slice(0, 8)
   : "Continue the latest agent conversation in this folder";
 
-function renderSessionCard(s) {
+function renderSessionCard(s, groupColor) {
   const isOpen = _isSessionOpen ? _isSessionOpen(s.id) : false;
   const isExpanded = expandedSessions.has(s.id);
   const toolClass = s.tool && s.tool !== "terminal" ? s.tool : "";
@@ -416,7 +440,8 @@ function renderSessionCard(s) {
   // A restored tab whose shell has not been started yet.
   const state = s.live === false ? "asleep" : (s.status || "idle");
 
-  let h = `<div class="sp-session${isOpen ? " open" : ""}${isExpanded ? " expanded" : ""}" data-sid="${s.id}" draggable="true">`;
+  const gcStyle = groupColor ? ` style="--gc:${esc(groupColor)}"` : "";
+  let h = `<div class="sp-session${isOpen ? " open" : ""}${isExpanded ? " expanded" : ""}" data-sid="${s.id}" draggable="true"${gcStyle}>`;
   h += `<div class="sp-status ${state}"></div>`;
   h += `<div class="sp-info">`;
   h += `<div class="sp-name-row">`;
@@ -587,6 +612,8 @@ function handleClick(e) {
     if (act === "new-session") { if (_onCreateSession) _onCreateSession(); }
     else if (act === "new-agent") { if (_onLaunchAgent) _onLaunchAgent(); }
     else if (act === "refresh") { refresh(); }
+    else if (act === "resume-all") { resumeAll(""); }
+    else if (act === "message-all") { messageAll(""); }
     else if (act === "new-group") { askNewGroup(""); }
   }
 }
@@ -675,6 +702,7 @@ function handleContextMenu(e) {
     items.push({ label: s.claudeSessionId ? "Resume Claude Conversation" : "Continue Agent", action: "continue", handler() { if (_onOpenSession) _onOpenSession(sid, s, { continueAgent: true }); } });
     if (s.claudeSessionId) items.push({ label: "Copy Claude Session ID", action: "copy-claude", handler() { navigator.clipboard.writeText(s.claudeSessionId).catch(() => {}); } });
     items.push({ label: "Make agent from this session\u2026", action: "make-agent", disabled: !s.claudeSessionId, handler() { if (_onMakeAgentFromSession) _onMakeAgentFromSession(sid, s.cwd); } });
+    items.push({ label: "Ask this agent to message another session\u2026", action: "ask-relay", disabled: s.live === false, handler() { askAgentToMessage(sid); } });
     items.push({ separator: true });
     items.push({ label: "Rename", action: "rename", handler() { askRenameSession(sid); } });
     items.push(moveToGroupItem([sid]));
@@ -711,6 +739,8 @@ function handleContextMenu(e) {
       })) });
       items.push({ separator: true });
       if (all.length > 0) {
+        items.push({ label: "Resume All (" + all.length + ")", action: "resume-all", handler() { resumeAll(g.path); } });
+        items.push({ label: "Message All (" + all.length + ")\u2026", action: "message-all", handler() { messageAll(g.path); } });
         items.push({ label: "Restart All (" + all.length + ")", action: "restart-all", handler() { batchRestart(g.path); } });
         items.push({ label: "Delete All Sessions (" + all.length + ")", action: "delete-all", handler() { batchDelete(g.path); } });
         items.push({ separator: true });
@@ -859,6 +889,64 @@ function setGroupColor(path, color) {
   if (def) def.color = color;
   else groupDefs = groupDefs.concat({ path, color });
   saveGroupDefs().then(() => { buildGroups(); renderSessions(); });
+}
+
+const toast = (msg, type) => { if (_onToast) _onToast(msg, type || "info"); };
+
+async function postJson(path, body) {
+  const resp = await fetch(api(path), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  let data = null;
+  try { data = await resp.json(); } catch {}
+  if (!resp.ok) throw new Error((data && data.error) || "Request failed (" + resp.status + ")");
+  return data;
+}
+
+/** Wake every sleeping tab (of a group, or all) and resume the Claude conversation each one had. */
+async function resumeAll(path) {
+  const scope = path ? 'in "' + displayPath(path) + '"' : "in all sessions";
+  try {
+    const res = await postJson("/api/sessions/resume-all", { group: path || undefined, extraArgs: _getResumeArgs ? _getResumeArgs() : [] });
+    const resumed = res.filter((r) => r.action === "resumed").length;
+    const woke = res.filter((r) => r.action === "woke").length;
+    toast(res.length === 0 ? "No sessions " + scope
+      : "Resumed " + resumed + " conversation" + (resumed === 1 ? "" : "s") + (woke ? ", woke " + woke + " terminal" + (woke === 1 ? "" : "s") : "") + ", skipped " + (res.length - resumed - woke) + " (" + scope + ")", resumed || woke ? "info" : "error");
+  } catch (e) { toast(e.message, "error"); }
+  refresh();
+}
+
+/** One message to every agent session (of a group, or all), typed in as from "you". */
+async function messageAll(path) {
+  const title = path ? 'Message every agent session in "' + displayPath(path) + '"' : "Message every agent session";
+  const text = await askText(title, "");
+  if (!text || !text.trim()) return;
+  try {
+    const res = await postJson("/api/messages/many", { text, group: path || undefined });
+    const sent = res.filter((r) => r.status === "sent").length;
+    toast("Sent to " + sent + " session" + (sent === 1 ? "" : "s") + (res.length > sent ? ", skipped " + (res.length - sent) : ""), sent ? "info" : "error");
+  } catch (e) { toast(e.message, "error"); }
+}
+
+/**
+ * Tell one agent to message another session through agenv (`agenv send`), not through its own messaging.
+ * The instruction is typed into that agent's terminal like any message.
+ */
+async function askAgentToMessage(sid) {
+  const from = sessions.find((s) => s.id === sid);
+  if (!from) return;
+  const fromName = from.name || "session " + from.id;
+  const others = sessions.filter((s) => s.id !== sid && s.live !== false);
+  if (others.length === 0) { toast("No other open session to message", "error"); return; }
+  const list = others.map((s) => s.name || "session " + s.id).join(", ");
+  const to = await askText("Which session should " + fromName + " message? (" + list + ")", others[0].name || String(others[0].id));
+  if (!to || !to.trim()) return;
+  const text = await askText("What should " + fromName + " tell " + to.trim() + "?", "");
+  if (!text || !text.trim()) return;
+  const target = to.trim().replace(/"/g, "'");
+  const instruction = 'Please send this message to the session named "' + target + '" using agenv, not your own messaging: run agenv send "' + target + '" "' + text.trim().replace(/"/g, "'") + '"';
+  try {
+    const m = await postJson("/api/messages", { to: String(sid), text: instruction });
+    toast(m.status === "queued" ? fromName + " is busy; the request goes in when it is idle" : "Asked " + fromName + " to send it", "info");
+  } catch (e) { toast(e.message, "error"); }
 }
 
 async function batchRestart(path) {

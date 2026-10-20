@@ -144,6 +144,23 @@ export class MessageService {
     return m;
   }
 
+  /** Send one message to every agent session (optionally just a group), skipping the ones that cannot take it. */
+  sendMany(fromId: number | null, text: string, opts: { group?: string } = {}): BroadcastResult[] {
+    const group = typeof opts.group === "string" ? opts.group : undefined;
+    const results: BroadcastResult[] = [];
+    for (const s of this.o.sessions.all()) {
+      if (s.id === fromId) continue;
+      if (group !== undefined && !(s.group === group || s.group.startsWith(group + "/"))) continue;
+      try {
+        const m = this.send(fromId, String(s.id), text);
+        results.push({ id: s.id, name: m.to, status: "sent", reason: m.status === "queued" ? "waiting for it to be idle" : undefined });
+      } catch (e) {
+        results.push({ id: s.id, name: s.name || "session " + s.id, status: "skipped", reason: (e as Error).message });
+      }
+    }
+    return results;
+  }
+
   /**
    * Type `command` and Enter into many sessions at once — what you would do by hand in each tab, e.g. a slash command
    * such as /remote-control. `group` limits it to a session group (and its subgroups); `agentsOnly` skips plain shells,
