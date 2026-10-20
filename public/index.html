@@ -865,6 +865,10 @@ body{display:flex;flex-direction:column}
 .ms-hint{font-size:10px;color:var(--text3);padding:0 10px 6px}
 .ms-hint code{color:var(--text2)}
 .ms-form{display:flex;flex-direction:column;gap:4px;padding:0 10px 8px}
+.ms-peers{max-height:150px;overflow:auto;border:1px solid var(--border);border-radius:4px;background:var(--bg3)}
+.ms-peer{display:flex;align-items:center;gap:6px;padding:3px 8px;font-size:11px;color:var(--text);cursor:pointer}
+.ms-peer em{color:var(--text3);font-style:normal;font-size:10px}
+.ms-peer-all{color:var(--text2);border-bottom:1px solid var(--border)}
 .ms-form select,.ms-form textarea{font-family:var(--font);font-size:11px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px;resize:vertical}
 .ms-form input.ms-cmd{font-family:var(--font);font-size:11px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px}
 .ms-check{font-size:10px;color:var(--text2);display:flex;gap:6px;align-items:center}
@@ -953,6 +957,12 @@ body{display:flex;flex-direction:column}
 .ask-hint{font-size:10px;color:var(--text3);margin-bottom:8px}
 .ask-input{width:100%;box-sizing:border-box;padding:7px 9px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);font-family:var(--font);font-size:12px;outline:none}
 .ask-input:focus{border-color:var(--accent)}
+.ask-picks{max-height:220px;overflow:auto;margin:4px 0 8px;border:1px solid var(--border);border-radius:4px;padding:2px 0}
+.ask-pick{display:flex;align-items:center;gap:6px;padding:3px 8px;font-size:12px;color:var(--text);cursor:pointer}
+.ask-pick:hover{background:var(--bg3)}
+.ask-pick em{color:var(--text3);font-style:normal;font-size:10px}
+.ask-pick-all{color:var(--text2);font-size:11px;padding-left:8px}
+textarea.ask-msg{resize:vertical;font-family:var(--font)}
 .ask-actions{display:flex;justify-content:flex-end;gap:6px;margin-top:12px}
 .ask-btn{padding:5px 12px;font-size:11px;font-family:var(--font);background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:4px;cursor:pointer}
 .ask-btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}

@@ -3,6 +3,8 @@ import { HttpError } from "../core/HttpError";
 import type { TypedEmitter } from "../core/TypedEmitter";
 import type { Session } from "../sessions/Session";
 import type { SessionEvents } from "../sessions/events";
+import { STRIP_ANSI } from "../sessions/OutputAnalyzer";
+import { detectToolFromOutput } from "../sessions/tools";
 
 export type MessageStatus = "queued" | "delivered" | "failed";
 
@@ -33,6 +35,8 @@ export interface BroadcastResult {
   name: string;
   status: "sent" | "skipped";
   reason?: string;
+  /** Set to "no-agent-cli" when the only problem is that no agent CLI was recognised (the caller may force it). */
+  code?: string;
 }
 
 export interface MessageServiceOptions {
@@ -118,7 +122,7 @@ export class MessageService {
 
   // ---- sending ----
 
-  send(fromId: number | null, ref: string, text: string): Message {
+  send(fromId: number | null, ref: string, text: string, opts: { force?: boolean } = {}): Message {
     const body = String(text == null ? "" : text).replace(/\s+/g, " ").trim();
     if (!body) throw new HttpError(400, "Message is empty");
     if (body.length > MAX_TEXT) throw new HttpError(400, "Message is too long (max " + MAX_TEXT + " characters)");
@@ -128,8 +132,10 @@ export class MessageService {
     if (fromId !== null && !sender) throw new HttpError(404, "Sending session not found");
     const label = displayName(target);
     if (!target.live || !target.pty) throw new HttpError(409, `"${label}" is closed (it has no running terminal)`);
-    if (!AGENT_TOOLS.has(target.detectedTool) && !target.claudeRunning) {
-      throw new HttpError(409, `No agent CLI is running in "${label}" (it shows ${target.detectedTool || "a plain terminal"}), so the message would run as a shell command`);
+    if (!opts.force && !this.isAgent(target)) {
+      throw new HttpError(409, `No agent CLI is running in "${label}" (it shows ${target.detectedTool || "a plain terminal"}), so the message would run as a shell command`, {
+        error: `No agent CLI was detected in "${label}" (it shows ${target.detectedTool || "a plain terminal"}), so the message might run as a shell command`, code: "no-agent-cli",
+      });
     }
     this.checkPairLimit(fromId, target.id);
 
@@ -142,6 +148,24 @@ export class MessageService {
     this.pump();
     this.o.onChange?.();
     return m;
+  }
+
+  /** The same message to several sessions (names or ids); one result per recipient, a refusal only skips that one. */
+  sendTo(fromId: number | null, refs: string[], text: string, opts: { force?: boolean } = {}): BroadcastResult[] {
+    const seen = new Set<number>();
+    const results: BroadcastResult[] = [];
+    for (const ref of refs) {
+      try {
+        const m = this.send(fromId, ref, text, opts);
+        if (seen.has(m.toId)) continue;
+        seen.add(m.toId);
+        results.push({ id: m.toId, name: m.to, status: "sent", reason: m.status === "queued" ? "waiting for it to be idle" : undefined });
+      } catch (e) {
+        const err = e as HttpError & { body?: { code?: string } };
+        results.push({ id: -1, name: String(ref), status: "skipped", reason: err.message, code: err.body && err.body.code } as BroadcastResult);
+      }
+    }
+    return results;
   }
 
   /** Send one message to every agent session (optionally just a group), skipping the ones that cannot take it. */
@@ -207,6 +231,17 @@ export class MessageService {
   }
 
   // ---- internals ----
+
+  /** An agent CLI runs here: known from its command, from Claude's own link, or from the banner it printed. */
+  private isAgent(s: Session): boolean {
+    if (AGENT_TOOLS.has(s.detectedTool) || s.claudeRunning) return true;
+    try {
+      const tail = s.scrollback.read().subarray(-32768).toString("utf8").replace(STRIP_ANSI, "");
+      const found = detectToolFromOutput(tail);
+      if (found) { s.detectedTool = found; return true; }
+    } catch {}
+    return false;
+  }
 
   private isQuiet(id: number): boolean {
     const last = this.lastOutput.get(id);

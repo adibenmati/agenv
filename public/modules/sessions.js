@@ -2,7 +2,7 @@
 // Shows all sessions grouped by user-defined groups, with live status,
 // agent badges, costs, durations, expandable details, and context menus.
 
-import { api, esc, ago, short, fname, askText } from "./util.js";
+import { api, esc, ago, short, fname, askText, askSessionsMessage } from "./util.js";
 
 let panelEl = null;
 let _onOpenSession = null;    // (sessionId, meta, opts?) => {}
@@ -936,16 +936,24 @@ async function askAgentToMessage(sid) {
   const fromName = from.name || "session " + from.id;
   const others = sessions.filter((s) => s.id !== sid && s.live !== false);
   if (others.length === 0) { toast("No other open session to message", "error"); return; }
-  const list = others.map((s) => s.name || "session " + s.id).join(", ");
-  const to = await askText("Which session should " + fromName + " message? (" + list + ")", others[0].name || String(others[0].id));
-  if (!to || !to.trim()) return;
-  const text = await askText("What should " + fromName + " tell " + to.trim() + "?", "");
-  if (!text || !text.trim()) return;
-  const target = to.trim().replace(/"/g, "'");
-  const instruction = 'Please send this message to the session named "' + target + '" using agenv, not your own messaging: run agenv send "' + target + '" "' + text.trim().replace(/"/g, "'") + '"';
+  const pick = await askSessionsMessage("Which sessions should " + fromName + " message?",
+    others.map((s) => ({ id: s.id, label: s.name || "session " + s.id, hint: s.tool && s.tool !== "terminal" ? s.tool : "" })),
+    { hint: fromName + " will be told to send it through agenv (agenv send), not its own messaging.", placeholder: "What should " + fromName + " tell them?", okLabel: "Ask " + fromName });
+  if (!pick) return;
+  const names = pick.ids.map((id) => {
+    const t = sessions.find((s) => String(s.id) === id);
+    return (t && t.name ? t.name : "session " + id).replace(/"/g, "'");
+  });
+  const text = pick.text.trim().replace(/"/g, "'");
+  const sends = names.map((n) => 'agenv send "' + n + '" "' + text + '"').join(" ; ");
+  const instruction = "Please send this message using agenv, not your own messaging. Run" + (names.length > 1 ? " each of these" : "") + ": " + sends;
   try {
-    const m = await postJson("/api/messages", { to: String(sid), text: instruction });
-    toast(m.status === "queued" ? fromName + " is busy; the request goes in when it is idle" : "Asked " + fromName + " to send it", "info");
+    let res = await postJson("/api/messages", { to: [String(sid)], text: instruction });
+    if (res[0] && res[0].code === "no-agent-cli" && confirm(fromName + " does not look like it is running an agent CLI, so the instruction could run as a shell command. Send it anyway?")) {
+      res = await postJson("/api/messages", { to: [String(sid)], text: instruction, force: true });
+    }
+    if (res[0] && res[0].status === "sent") toast(res[0].reason ? fromName + " is busy; the request goes in when it is idle" : "Asked " + fromName + " to message " + names.join(", "), "info");
+    else toast((res[0] && res[0].reason) || "Not sent", "error");
   } catch (e) { toast(e.message, "error"); }
 }
 
