@@ -98,6 +98,31 @@ export class SessionManager {
     return toRestore.length;
   }
 
+  /**
+   * Add sessions from a file as sleeping records with fresh ids. A record whose key (see `keyOf`) matches a session
+   * that is already here, or an earlier record of the same file, is skipped. Returns how many were added.
+   */
+  importRecords(records: Array<Omit<PersistedSession, "id">>, keyOf: (r: Omit<PersistedSession, "id">) => string): number {
+    const have = new Set(this.all().map((x) => { const { id: _id, ...rest } = x.toPersisted(); return keyOf(rest); }));
+    let added = 0;
+    for (const r of records) {
+      const key = keyOf(r);
+      if (have.has(key)) continue;
+      have.add(key);
+      const id = this.nextId++;
+      const s = this.makeSession(id, {
+        cwd: r.cwd && this.o.isRealDir(r.cwd) ? r.cwd : process.cwd(),
+        name: r.name, tool: r.tool || "terminal", lastCommand: r.lastCommand, launchCommand: r.launchCommand,
+        userNamed: r.userNamed, group: r.group, note: r.note, claudeSessionId: r.claudeSessionId,
+        created: r.created, lastActivity: r.lastActivity, loadScrollback: false,
+      });
+      this.sessions.set(id, s);
+      this.o.bus.emit("changed", s);
+      added++;
+    }
+    return added;
+  }
+
   private makeSession(id: number, o: {
     cwd?: string; name?: string; group?: string; note?: string; claudeSessionId?: string | null; tool?: string;
     lastCommand?: string; launchCommand?: string; userNamed?: boolean; created?: number; lastActivity?: number;

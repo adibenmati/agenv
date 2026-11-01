@@ -20,6 +20,7 @@ import type { StateStore } from "../persistence/StateStore";
 import type { AuthService } from "../security/AuthService";
 import type { GroupRegistry } from "../sessions/GroupRegistry";
 import type { SessionBatch } from "../sessions/SessionBatch";
+import type { SessionTransfer } from "../sessions/SessionTransfer";
 import type { SessionManager } from "../sessions/SessionManager";
 import type { WorkspaceLayout } from "../sessions/WorkspaceLayout";
 import type { PageBuilder } from "./page";
@@ -31,6 +32,7 @@ export interface AppDeps {
   auth: AuthService;
   sessions: SessionManager;
   batch: SessionBatch;
+  transfer: SessionTransfer;
   agents: AgentService;
   automation: AutomationService;
   messages: MessageService;

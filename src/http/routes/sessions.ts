@@ -84,6 +84,16 @@ export function sessionsRouter(d: AppDeps): Router {
     res.json({ ok: true });
   }));
 
+  // ---- Backup: the whole Sessions tree as a file, and adding one back ----
+  r.get("/api/sessions/export", auth, (_req, res) => res.json(d.transfer.export()));
+
+  r.post("/api/sessions/import", auth, wrap((req, res) => {
+    const result = d.transfer.import(req.body);
+    d.stateStore.saveNow();
+    console.log(`[agenv] Imported ${result.sessions} sessions (${result.skipped} already there), ${result.groups} folders`);
+    res.json(result);
+  }));
+
   r.post("/api/sessions/resume-all", auth, wrap((req, res) => {
     const b = req.body || {};
     const results = d.batch.resumeAll({ group: typeof b.group === "string" ? b.group : undefined, extraArgs: b.extraArgs });
