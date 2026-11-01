@@ -58,8 +58,8 @@ function main(): void {
   } else if (saved && saved.sessions && saved.sessions.length > 0) {
     // Restore every tab the workspace layout referenced, but as a record only — no shell is spawned until the tab is
     // actually attached to. Startup stays instant and a restored window costs no processes until it's used.
-    const restored = sessions.restore(saved.sessions, runtime.layout.sessionIds());
-    console.log(`[agenv] Restoring ${restored} of ${saved.sessions.length} saved tabs (shells start on open)`);
+    const restored = sessions.restore(saved.sessions);
+    console.log(`[agenv] Restoring ${restored} of ${saved.sessions.length} saved sessions (shells start on open)`);
   } else {
     for (let i = 0; i < config.initialSessions; i++) sessions.create({ restoreScrollback: false }, { enforceLimit: false });
   }
