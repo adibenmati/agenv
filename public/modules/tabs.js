@@ -481,6 +481,12 @@ export function setActivePane(paneId) {
   updateStatus();
 }
 
+/** Put the keyboard back in the active pane's terminal. */
+export function focusActivePane() {
+  const id = getActivePaneId();
+  if (id) focusTerminal(id);
+}
+
 export function getActivePaneId() {
   return activePaneId;
 }

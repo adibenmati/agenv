@@ -1,7 +1,7 @@
 // app.js — main application orchestrator
 import { $, setToken, api, esc, short, tIcon, ago, fname, askText } from "./modules/util.js";
 import { allLeaves } from "./modules/layout.js";
-import { setCallbacks, getTerminal, sendInput, pasteText, smartPaste, createTerminal as createTerm, setFontSize as setTermFontSize, fitAllTerminals, destroyTerminal, getCommandHistory } from "./modules/terminal.js";
+import { refreshAllTerminals, setCallbacks, getTerminal, sendInput, pasteText, smartPaste, createTerminal as createTerm, setFontSize as setTermFontSize, fitAllTerminals, destroyTerminal, getCommandHistory } from "./modules/terminal.js";
 import * as tabs from "./modules/tabs.js";
 import * as sidebar from "./modules/sidebar.js";
 import * as notif from "./modules/notifications.js";
@@ -1483,6 +1483,24 @@ function isSTTListening() { return sttListening; }
 // Window resize + visual viewport (mobile virtual keyboard)
 // ---------------------------------------------------------------------------
 window.addEventListener("resize", () => tabs.handleResize());
+
+// Coming back from minimised / hidden / asleep: redraw at the right size and give the keyboard back to the terminal
+// (a stale layout, a half-drawn screen or keys that go nowhere were all cured by minimising and restoring).
+let wakeTimer = null;
+function recoverAfterWake() {
+  clearTimeout(wakeTimer);
+  wakeTimer = setTimeout(() => {
+    if (document.hidden) return;
+    refreshAllTerminals();
+    tabs.handleResize();
+    const a = document.activeElement;
+    const typing = a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA" || a.isContentEditable) && !a.classList.contains("xterm-helper-textarea");
+    if (!typing && !document.querySelector(".ask-overlay")) tabs.focusActivePane();
+  }, 80);
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden) recoverAfterWake(); });
+window.addEventListener("focus", recoverAfterWake);
+window.addEventListener("pageshow", recoverAfterWake);
 window.addEventListener("orientationchange", () => setTimeout(() => tabs.handleResize(), 200));
 
 // When the virtual keyboard opens/closes on mobile, the visual viewport shrinks

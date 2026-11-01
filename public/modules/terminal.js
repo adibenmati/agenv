@@ -302,6 +302,7 @@ function openTerm(entry, mountEl) {
   entry.term = term;
   entry.fitAddon = fit;
   entry.mountEl = mountEl;
+  watchSize(entry, mountEl);
 
   // Clipboard keyboard shortcuts
   term.attachCustomKeyEventHandler((e) => {
@@ -607,6 +608,7 @@ export function destroyTerminal(paneId) {
   if (!entry) return;
   entry.dead = true;
   clearTimeout(entry.hibernateTimer);
+  if (entry.sizeObserver) { entry.sizeObserver.disconnect(); entry.sizeObserver = null; }
   if (entry.ws) { try { entry.ws.close(); } catch {} }
   try { if (entry.term) entry.term.dispose(); } catch {}
   paneTerminals.delete(paneId);
@@ -622,6 +624,40 @@ export function focusTerminal(paneId) {
   // Restore scroll position after focus
   if (scrollTop != null && viewport) {
     requestAnimationFrame(() => { viewport.scrollTop = scrollTop; });
+  }
+}
+
+/**
+ * Keep the terminal fitted to its container. Panels opening, the side bar resizing or the window changing monitor
+ * resize the container without always firing a window resize, which left the shell with the old size (a popup in a
+ * TUI taller than the screen, the last lines hidden). The container is observed instead.
+ */
+function watchSize(entry, mountEl) {
+  if (typeof ResizeObserver === "undefined") return;
+  if (entry.sizeObserver) entry.sizeObserver.disconnect();
+  let raf = 0;
+  entry.sizeObserver = new ResizeObserver(() => {
+    cancelAnimationFrame(raf);
+    raf = requestAnimationFrame(() => {
+      if (entry.detached || entry.dead || !entry.fitAddon || mountEl.clientWidth < 20 || mountEl.clientHeight < 20) return;
+      try { entry.fitAddon.fit(); } catch {}
+    });
+  });
+  entry.sizeObserver.observe(mountEl);
+}
+
+/**
+ * After the window was minimised, hidden or put to sleep the page can come back with a stale size, a blank or
+ * half-drawn screen and no keyboard focus. Fit every terminal, redraw it and rebuild its glyph cache.
+ */
+export function refreshAllTerminals() {
+  for (const entry of paneTerminals.values()) {
+    if (entry.detached || !entry.term || !entry.fitAddon) continue;
+    try {
+      entry.fitAddon.fit();
+      entry.term.refresh(0, entry.term.rows - 1);
+      if (typeof entry.term.clearTextureAtlas === "function") entry.term.clearTextureAtlas();
+    } catch {}
   }
 }
 
@@ -699,6 +735,7 @@ export function reattachTerminal(paneId, mountEl) {
   entry.hibernateTimer = null;
   if (!entry.term) { wakeTerminal(entry, mountEl); return; }
   entry.mountEl = mountEl;
+  watchSize(entry, mountEl);
   entry.detached = false;
   if (entry.detachedEl) {
     mountEl.appendChild(entry.detachedEl);
@@ -752,6 +789,7 @@ function hibernateTerminal(entry) {
   if (entry.ghostEl) { entry.ghostEl.remove(); entry.ghostEl = null; }
   entry.term = null;
   entry.fitAddon = null;
+  if (entry.sizeObserver) { entry.sizeObserver.disconnect(); entry.sizeObserver = null; }
   entry.savedScrollTop = null;
 }
 
