@@ -33,6 +33,15 @@ describe("SessionBatch.resumeAll", () => {
     assert.deepEqual([running.written, busy.written, noConv.written], [[], [], []]);
   });
 
+  it("a session's own model and effort go on its resume command and replace the general model", () => {
+    const own = mk(1, { claudeSessionId: "own-1", model: "sonnet", effort: "high" });
+    const plain = mk(2, { claudeSessionId: "plain-2" });
+    const batch = new SessionBatch({ sessions: { all: () => [own.s, plain.s], wake() {} } });
+    batch.resumeAll({ extraArgs: ["--model", "opus", "--dangerously-skip-permissions"] });
+    assert.deepEqual(own.written, ["claude --resume own-1 --model sonnet --effort high --dangerously-skip-permissions\r"]);
+    assert.deepEqual(plain.written, ["claude --resume plain-2 --model opus --dangerously-skip-permissions\r"], "without its own setting the general one stays");
+  });
+
   it("a group limits it to that group and its subgroups", () => {
     const a = mk(1, { group: "ops", claudeSessionId: "a1" }), b = mk(2, { group: "ops/db", claudeSessionId: "b1" }), c = mk(3, { group: "opsx", claudeSessionId: "c1" });
     const batch = new SessionBatch({ sessions: { all: () => [a.s, b.s, c.s], wake() {} } });

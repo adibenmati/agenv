@@ -1,3 +1,4 @@
+import { claudeFlags } from "./modelEffort";
 import type { Session } from "./Session";
 
 export interface ResumeResult {
@@ -31,7 +32,10 @@ export class SessionBatch {
       if (group !== undefined && !(s.group === group || s.group.startsWith(group + "/"))) continue;
       const name = s.name || "session " + s.id;
       const done = (action: ResumeResult["action"], reason?: string): void => { results.push({ id: s.id, name, action, reason }); };
-      const command = s.claudeSessionId ? ["claude", "--resume", s.claudeSessionId, ...extra].join(" ") : "";
+      // a session's own model / effort replace the general ones
+      const own = claudeFlags(s);
+      const general = extra.filter((a, i) => !(s.model && (a === "--model" || extra[i - 1] === "--model")) && !(s.effort && (a === "--effort" || extra[i - 1] === "--effort")));
+      const command = s.claudeSessionId ? ["claude", "--resume", s.claudeSessionId, ...own, ...general].join(" ") : "";
       if (!s.live || !s.pty) {
         this.o.sessions.wake(s);
         if (command) { this.type(s, command, this.o.wakeDelayMs ?? 1200); done("resumed"); } else done("woke", "no conversation to resume");

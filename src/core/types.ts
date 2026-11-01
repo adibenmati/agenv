@@ -31,6 +31,9 @@ export interface PersistedSession {
   claudeSessionId: string | null;
   created: number;
   lastActivity: number;
+  /** Model alias / effort level this session's Claude runs with; absent or "" = Claude's default. */
+  model?: string;
+  effort?: string;
 }
 
 export interface PersistedState {
@@ -51,6 +54,8 @@ export interface ArchiveEntry {
   created: number;
   lastActivity: number;
   closed: number;
+  model?: string;
+  effort?: string;
 }
 
 export interface Favorite {

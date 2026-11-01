@@ -78,10 +78,16 @@ function normalize(v, ctx, key) {
   return v;
 }
 
+// Fields added after the TypeScript migration: the old server cannot have them, so their presence is not a difference.
+const ADDED_SINCE = new Set(["model", "effort"]);
+
 function diff(a, b, at, out) {
   if (JSON.stringify(a) === JSON.stringify(b)) return;
   if (a && b && typeof a === "object" && typeof b === "object") {
-    for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) diff(a[k], b[k], at + "." + k, out);
+    for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) {
+      if (ADDED_SINCE.has(k) && a[k] === undefined) continue;
+      diff(a[k], b[k], at + "." + k, out);
+    }
   } else out.push(`${at}\n    A: ${JSON.stringify(a)}\n    B: ${JSON.stringify(b)}`);
 }
 

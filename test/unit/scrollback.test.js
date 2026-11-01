@@ -50,12 +50,12 @@ describe("Session", () => {
   });
   it("toPersisted has exactly the saved fields", () => {
     const s = mk({ name: "n", group: "a/b", note: "hi", claudeSessionId: "cid", tool: "claude", lastCommand: "ls", userNamed: true, created: 5, lastActivity: 6 });
-    assert.deepEqual(s.toPersisted(), { id: 4, name: "n", cwd: "/work", tool: "claude", lastCommand: "ls", launchCommand: "", userNamed: true, group: "a/b", note: "hi", claudeSessionId: "cid", created: 5, lastActivity: 6 });
+    assert.deepEqual(s.toPersisted(), { id: 4, name: "n", cwd: "/work", tool: "claude", lastCommand: "ls", launchCommand: "", userNamed: true, model: "", effort: "", group: "a/b", note: "hi", claudeSessionId: "cid", created: 5, lastActivity: 6 });
   });
   it("toListItem has the GET /api/sessions shape", () => {
     const s = mk({ name: "n", group: "g" }); s.claudeRunning = true;
     const item = s.toListItem(2);
-    assert.deepEqual(Object.keys(item).sort(), ["analytics", "claudeRunning", "claudeSessionId", "clients", "created", "cwd", "group", "id", "lastActivity", "lastCommand", "launchCommand", "live", "name", "note", "status", "tool"]);
+    assert.deepEqual(Object.keys(item).sort(), ["analytics", "claudeRunning", "claudeSessionId", "clients", "created", "cwd", "effort", "group", "id", "lastActivity", "lastCommand", "launchCommand", "live", "model", "name", "note", "status", "tool"]);
     assert.equal(item.clients, 2); assert.equal(item.claudeRunning, true); assert.equal(item.live, false); assert.equal(item.tool, "terminal");
   });
 });

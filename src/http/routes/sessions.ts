@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { HttpError } from "../../core/HttpError";
 import { GroupRegistry } from "../../sessions/GroupRegistry";
+import { parseEffort, parseModel } from "../../sessions/modelEffort";
 import { legacyGroups, readLiveCwd, recentFolders, sessionAnalytics } from "../../sessions/queries";
 import type { AppDeps } from "../AppDeps";
 import { wrap } from "../errors";
@@ -45,6 +46,8 @@ export function sessionsRouter(d: AppDeps): Router {
     if (b.tool) { s.detectedTool = String(b.tool); s.lastCommand = b.lastCommand || s.lastCommand; }
     if (b.note != null) s.note = String(b.note).slice(0, 2000);
     if (b.group != null) s.group = GroupRegistry.normalize(b.group);
+    if (b.model !== undefined) s.model = parseModel(b.model);
+    if (b.effort !== undefined) s.effort = parseEffort(b.effort);
     d.stateStore.save();
 
     // Carry a rename over to the Claude conversation running in this session, so /resume and "Continue Agent"
@@ -92,6 +95,29 @@ export function sessionsRouter(d: AppDeps): Router {
     d.stateStore.saveNow();
     console.log(`[agenv] Imported ${result.sessions} sessions (${result.skipped} already there), ${result.groups} folders`);
     res.json(result);
+  }));
+
+  // Model and effort for many sessions at once: every one in a folder (and its subfolders), or a list of ids.
+  // A field that is left out stays as it is; "" puts it back to Claude's default. Takes effect the next time agenv
+  // starts or resumes that session's Claude.
+  r.post("/api/sessions/model-effort", auth, wrap((req, res) => {
+    const b = req.body || {};
+    const model = b.model === undefined ? undefined : parseModel(b.model);
+    const effort = b.effort === undefined ? undefined : parseEffort(b.effort);
+    if (model === undefined && effort === undefined) throw new HttpError(400, "Give a model and/or an effort");
+    const ids = Array.isArray(b.ids) ? new Set(b.ids.map((x: unknown) => Number(x))) : null;
+    const group = typeof b.group === "string" ? GroupRegistry.normalize(b.group) : null;
+    if (!ids && group === null) throw new HttpError(400, "Give a group or a list of ids");
+    const changed: Array<{ id: number; name: string }> = [];
+    for (const s of d.sessions.all()) {
+      const inGroup = group !== null && (group === "" || s.group === group || s.group.startsWith(group + "/"));
+      if (!(inGroup || (ids && ids.has(s.id)))) continue;
+      if (model !== undefined) s.model = model;
+      if (effort !== undefined) s.effort = effort;
+      changed.push({ id: s.id, name: s.name || "session " + s.id });
+    }
+    d.stateStore.saveNow();
+    res.json(changed);
   }));
 
   r.post("/api/sessions/resume-all", auth, wrap((req, res) => {

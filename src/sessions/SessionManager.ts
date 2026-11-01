@@ -89,7 +89,7 @@ export class SessionManager {
       const s = this.makeSession(id, {
         cwd: r.cwd && this.o.isRealDir(r.cwd) ? r.cwd : process.cwd(),
         name: r.name || "", tool: r.tool || "terminal", lastCommand: r.lastCommand || "",
-        launchCommand: r.launchCommand || "", userNamed: r.userNamed || false,
+        launchCommand: r.launchCommand || "", userNamed: r.userNamed || false, model: r.model, effort: r.effort,
         group: r.group || "", note: r.note || "", claudeSessionId: r.claudeSessionId || null,
         created: r.created, lastActivity: r.lastActivity, loadScrollback: true,
       });
@@ -113,7 +113,7 @@ export class SessionManager {
       const s = this.makeSession(id, {
         cwd: r.cwd && this.o.isRealDir(r.cwd) ? r.cwd : process.cwd(),
         name: r.name, tool: r.tool || "terminal", lastCommand: r.lastCommand, launchCommand: r.launchCommand,
-        userNamed: r.userNamed, group: r.group, note: r.note, claudeSessionId: r.claudeSessionId,
+        userNamed: r.userNamed, model: r.model, effort: r.effort, group: r.group, note: r.note, claudeSessionId: r.claudeSessionId,
         created: r.created, lastActivity: r.lastActivity, loadScrollback: false,
       });
       this.sessions.set(id, s);
@@ -125,14 +125,14 @@ export class SessionManager {
 
   private makeSession(id: number, o: {
     cwd?: string; name?: string; group?: string; note?: string; claudeSessionId?: string | null; tool?: string;
-    lastCommand?: string; launchCommand?: string; userNamed?: boolean; created?: number; lastActivity?: number;
+    lastCommand?: string; launchCommand?: string; userNamed?: boolean; model?: string; effort?: string; created?: number; lastActivity?: number;
     runCommand?: string | null; loadScrollback: boolean;
   }): Session {
     const saved = o.loadScrollback ? this.o.scrollbackStore.load(id) : null;
     return new Session({
       id, name: o.name, cwd: o.cwd || process.cwd(), group: o.group, note: o.note,
       claudeSessionId: o.claudeSessionId, tool: o.tool, lastCommand: o.lastCommand, launchCommand: o.launchCommand,
-      userNamed: o.userNamed, created: o.created, lastActivity: o.lastActivity, runCommand: o.runCommand,
+      userNamed: o.userNamed, model: o.model, effort: o.effort, created: o.created, lastActivity: o.lastActivity, runCommand: o.runCommand,
       cols: this.o.defaultCols, rows: this.o.defaultRows,
       scrollback: saved ? new Scrollback(saved) : undefined,
     });
@@ -225,7 +225,7 @@ export class SessionManager {
       this.o.archive.add({
         name: s.name || "", cwd: s.cwd, tool: s.detectedTool || "terminal",
         lastCommand: s.lastCommand || "", launchCommand: s.launchCommand || "",
-        group: s.group || "", claudeSessionId: s.claudeSessionId || null,
+        group: s.group || "", claudeSessionId: s.claudeSessionId || null, model: s.model || "", effort: s.effort || "",
         created: s.created, lastActivity: s.lastActivity, closed: Date.now(),
       });
     } catch (e: any) {

@@ -2,6 +2,7 @@ import { HttpError } from "../core/HttpError";
 import type { ArchiveEntry, GroupDef, PersistedSession } from "../core/types";
 import type { ArchiveStore } from "../persistence/ArchiveStore";
 import { GroupRegistry } from "./GroupRegistry";
+import { lenientEffort, lenientModel } from "./modelEffort";
 import type { SessionManager } from "./SessionManager";
 
 const FORMAT = "agenv-sessions";
@@ -51,6 +52,7 @@ export class SessionTransfer {
         lastCommand: s(raw.lastCommand, 1024), launchCommand: s(raw.launchCommand, 1024),
         userNamed: raw.userNamed === true, group: GroupRegistry.normalize(raw.group), note: s(raw.note, 2000),
         claudeSessionId: s(raw.claudeSessionId, 64) || null, created: n(raw.created, now), lastActivity: n(raw.lastActivity, now),
+        model: lenientModel(raw.model), effort: lenientEffort(raw.effort),
       });
     }
     const added = this.o.sessions.importRecords(records, sessionKey);
@@ -74,6 +76,7 @@ export class SessionTransfer {
         name: s(a.name, 64), cwd: s(a.cwd, 1024), tool: s(a.tool, 32) || "terminal", lastCommand: s(a.lastCommand, 1024),
         launchCommand: s(a.launchCommand, 1024), group: GroupRegistry.normalize(a.group), claudeSessionId: s(a.claudeSessionId, 64) || null,
         created: n(a.created, 0), lastActivity: n(a.lastActivity, 0), closed: n(a.closed, Date.now()),
+        model: lenientModel(a.model), effort: lenientEffort(a.effort),
       };
       const key = entry.closed + ":" + entry.claudeSessionId;
       if (seen.has(key)) continue;
