@@ -36,7 +36,7 @@ const HELP = `
     --shell <shell>     Shell command (default: cmd.exe / bash)
     --token <tok>       Custom auth token
     --sessions <n>      Initial sessions (default: 1)
-    --max-sessions <n>  Max sessions (default: 10)
+    --max-sessions <n>  Max sessions (default: 100)
     --open              Open browser on startup
     --qr                Show QR code (default: on)
     --no-qr             Hide QR code

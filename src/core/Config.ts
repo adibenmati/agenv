@@ -45,7 +45,7 @@ export class Config {
     this.shell = flag("--shell", platform === "win32" ? "cmd.exe" : env.SHELL || "bash");
     this.token = flag("--token", (this.read().token as string | undefined) || crypto.randomBytes(16).toString("hex"));
     this.initialSessions = Math.max(1, parseInt(flag("--sessions", "1"), 10));
-    this.maxSessions = Math.max(1, parseInt(flag("--max-sessions", "20"), 10));
+    this.maxSessions = Math.max(1, parseInt(flag("--max-sessions", "100"), 10));
     this.autoOpen = hasFlag("--open");
     this.showQr = !hasFlag("--no-qr");
     this.mirror = hasFlag("--mirror");
