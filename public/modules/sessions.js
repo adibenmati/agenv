@@ -267,6 +267,8 @@ function renderShell() {
         <button class="sp-btn sp-agent-btn" data-act="new-agent" title="Launch Agent">C</button>
         <button class="sp-btn" data-act="resume-all" title="Resume all: wake every sleeping tab and resume its Claude conversation">&#9654;&#9654;</button>
         <button class="sp-btn" data-act="message-all" title="Send a message to all agent sessions">&#9993;</button>
+        <button class="sp-btn" data-act="export-sessions" title="Backup: save all sessions and folders to a JSON file">&#8681;</button>
+        <button class="sp-btn" data-act="import-sessions" title="Restore: add the sessions and folders from a backup file (nothing is replaced)">&#8679;</button>
         <button class="sp-btn" data-act="refresh" title="Refresh">&#8635;</button>
       </div>
     </div>
@@ -614,6 +616,8 @@ function handleClick(e) {
     else if (act === "refresh") { refresh(); }
     else if (act === "resume-all") { resumeAll(""); }
     else if (act === "message-all") { messageAll(""); }
+    else if (act === "export-sessions") { exportSessions(); }
+    else if (act === "import-sessions") { importSessions(); }
     else if (act === "new-group") { askNewGroup(""); }
   }
 }
@@ -899,6 +903,39 @@ async function postJson(path, body) {
   try { data = await resp.json(); } catch {}
   if (!resp.ok) throw new Error((data && data.error) || "Request failed (" + resp.status + ")");
   return data;
+}
+
+/** Download the whole tree (sessions, folders, closed list) as a JSON file. */
+async function exportSessions() {
+  try {
+    const resp = await fetch(api("/api/sessions/export"));
+    if (!resp.ok) throw new Error("Export failed (" + resp.status + ")");
+    const data = await resp.json();
+    const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }));
+    const a = document.createElement("a");
+    a.href = url; a.download = "agenv-sessions-" + new Date().toISOString().slice(0, 10) + ".json";
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast("Saved " + data.sessions.length + " sessions and " + data.groups.length + " folders", "info");
+  } catch (e) { toast(e.message, "error"); }
+}
+
+/** Pick a backup file and add what it holds. Sessions already here (same conversation, or same name and folder) are skipped. */
+function importSessions() {
+  const input = document.createElement("input");
+  input.type = "file"; input.accept = ".json,application/json";
+  input.addEventListener("change", async () => {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    try {
+      let data;
+      try { data = JSON.parse(await file.text()); } catch { throw new Error("That file is not valid JSON"); }
+      const res = await postJson("/api/sessions/import", data);
+      toast("Added " + res.sessions + " session" + (res.sessions === 1 ? "" : "s") + (res.skipped ? ", " + res.skipped + " already there" : "") + (res.groups ? ", " + res.groups + " folder" + (res.groups === 1 ? "" : "s") : ""), res.sessions || res.groups || res.archive ? "info" : "error");
+    } catch (e) { toast(e.message, "error"); }
+    refresh();
+  });
+  input.click();
 }
 
 /** Wake every sleeping tab (of a group, or all) and resume the Claude conversation each one had. */

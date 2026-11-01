@@ -55,6 +55,7 @@ import { GroupRegistry } from "./sessions/GroupRegistry";
 import type { PtyFactory } from "./sessions/pty";
 import type { Session } from "./sessions/Session";
 import { SessionBatch } from "./sessions/SessionBatch";
+import { SessionTransfer } from "./sessions/SessionTransfer";
 import { SessionManager } from "./sessions/SessionManager";
 import { WorkspaceLayout } from "./sessions/WorkspaceLayout";
 
@@ -181,7 +182,7 @@ export function buildRuntime(o: RuntimeOptions): Runtime {
   });
 
   const deps: AppDeps = {
-    config, auth, sessions, batch: new SessionBatch({ sessions }), agents, automation, messages, groups, layout, stateStore, history, archive, favorites, gateway, linker,
+    config, auth, sessions, batch: new SessionBatch({ sessions }), transfer: new SessionTransfer({ sessions, groups, archive }), agents, automation, messages, groups, layout, stateStore, history, archive, favorites, gateway, linker,
     usage: new UsageService(scanner),
     sessionIndex: new SessionIndex(scanner, { projects: claude.projects, indexFile: claude.indexFile }),
     claudeMd: new ClaudeMdService({ projects: claude.projects, scanner }),
