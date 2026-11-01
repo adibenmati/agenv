@@ -77,14 +77,12 @@ export class SessionManager {
   }
 
   /**
-   * Bring saved tabs back as sleeping records (no shell until first attached). `neededIds` are the tabs the saved
-   * layout still shows; without them the most recently used tabs are kept, up to the session limit.
-   * Returns how many tabs were restored.
+   * Bring every saved session back as a sleeping record (no shell until first attached). All of them: a session
+   * missing from the layout or beyond the session limit is still in the Sessions tree, and the next save would erase
+   * it for good. Returns how many were restored.
    */
-  restore(records: PersistedSession[], neededIds?: Set<number>): number {
-    const toRestore = neededIds && neededIds.size > 0
-      ? records.filter((r) => neededIds.has(r.id))
-      : [...records].sort((a, b) => (b.lastActivity || 0) - (a.lastActivity || 0)).slice(0, this.o.maxSessions);
+  restore(records: PersistedSession[]): number {
+    const toRestore = records;
     for (const r of toRestore) {
       const id = r.id != null ? r.id : this.nextId;
       if (id >= this.nextId) this.nextId = id + 1;

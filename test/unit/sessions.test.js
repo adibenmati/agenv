@@ -65,11 +65,10 @@ describe("SessionManager", () => {
     const s = m.get(4); assert.equal(s.group, "a/b"); assert.equal(s.note, "n"); assert.equal(s.claudeSessionId, "cid");
     assert.equal(s.scrollback.read().toString(), "old output");
   });
-  it("restore: layout ids win; without them the most recent tabs up to the limit are kept", () => {
+  it("restore keeps every saved session, even more than the session limit (an update must not erase the tree)", () => {
     const a = rig({ max: 2 }); a.m.restore([rec(1, { lastActivity: 10 }), rec(2, { lastActivity: 30 }), rec(3, { lastActivity: 20 })]);
-    assert.deepEqual(a.m.all().map((s) => s.id).sort(), [2, 3]);
-    const b = rig({ max: 2 }); b.m.restore([rec(1), rec(2), rec(3)], new Set([1]));
-    assert.deepEqual(b.m.all().map((s) => s.id), [1]);
+    assert.deepEqual(a.m.all().map((s) => s.id).sort(), [1, 2, 3]);
+    assert.equal(a.m.isFull, true, "the limit only stops new sessions");
   });
   it("restore falls back to the process folder when the saved one is gone", () => {
     const { m } = rig({ isRealDir: () => false }); m.restore([rec(1, { cwd: "/gone" })]);

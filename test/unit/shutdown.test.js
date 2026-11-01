@@ -65,15 +65,15 @@ describe("dist/index.js lifecycle", () => {
     assert.match(s.output(), /SIGTERM — saving state/);
   });
 
-  it("keeps the new session id sequence and restores layout-listed tabs without spawning shells", async () => {
+  it("keeps the new session id sequence and restores every saved session, tab or not, without spawning shells", async () => {
     const home = mkHome(); const s = await start(home);
     const a = (await request(s.port, "POST", "/api/sessions", { name: "one" })).body.id, b = (await request(s.port, "POST", "/api/sessions", { name: "two" })).body.id;
     await request(s.port, "POST", "/api/workspace-layout", { layout: [{ id: "w", rootNode: { type: "leaf", sessionId: b } }] });
     await request(s.port, "POST", "/api/shutdown"); await withTimeout(s.exited, 8000, "exit");
     const again = await start(home);
     const list = (await request(again.port, "GET", "/api/sessions")).body;
-    assert.deepEqual(list.map((x) => x.id), [b], "only the tab the layout still shows comes back");
-    assert.equal(list[0].live, false);
+    assert.ok(list.some((x) => x.id === a) && list.some((x) => x.id === b), "the session the layout no longer shows is still in the tree");
+    assert.ok(list.every((x) => x.live === false), "all of them come back asleep");
     const created = (await request(again.port, "POST", "/api/sessions", { name: "new" })).body.id; assert.ok(created > b, `ids are never reused (${created} > ${b})`);
     await request(again.port, "POST", "/api/shutdown"); await withTimeout(again.exited, 8000, "exit 2");
   });
