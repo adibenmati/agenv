@@ -1,7 +1,7 @@
 // electron.js — Agenv desktop app
 "use strict";
 
-const { app, BrowserWindow, shell, Menu, dialog } = require("electron");
+const { app, BrowserWindow, shell, Menu, dialog, Tray, nativeImage } = require("electron");
 const { spawn } = require("child_process");
 const path = require("path");
 const net = require("net");
@@ -223,12 +223,42 @@ app.whenReady().then(async () => {
   createWindow();
 
   app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    if (BrowserWindow.getAllWindows().length === 0) { stopBackground(); createWindow(); }
   });
 });
 
-app.on("window-all-closed", () => {
-  app.quit();
+// Closing the last window normally quits agenv. While the ngrok tunnel is up the server stays alive in the tray, so the
+// sessions can still be reached from the web; it quits when you choose Quit, or by itself once the tunnel is stopped.
+let tray = null;
+let backgroundWatch = null;
+
+function stopBackground() {
+  if (backgroundWatch) { clearInterval(backgroundWatch); backgroundWatch = null; }
+  if (tray) { tray.destroy(); tray = null; }
+}
+
+function stayInBackground() {
+  if (tray) return;
+  const { solidPng } = require("./dist/desktop/background");
+  tray = new Tray(nativeImage.createFromBuffer(solidPng(32, 88, 166, 255)));
+  tray.setToolTip("Agenv — running in the background (ngrok tunnel active)");
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: "Open Agenv", click: () => { stopBackground(); createWindow(); } },
+    { type: "separator" },
+    { label: "Quit Agenv (stops the tunnel)", click: () => { stopBackground(); app.quit(); } },
+  ]));
+  tray.on("click", () => { stopBackground(); createWindow(); });
+  const { tunnelActive } = require("./dist/desktop/background");
+  backgroundWatch = setInterval(async () => {
+    if (!(await tunnelActive(PORT, TOKEN))) { stopBackground(); app.quit(); }
+  }, 30000);
+}
+
+app.on("window-all-closed", async () => {
+  let keep = false;
+  try { keep = !!serverProcess && await require("./dist/desktop/background").tunnelActive(PORT, TOKEN); } catch {}
+  if (keep) { log("[electron] Window closed, ngrok tunnel is active: staying in the tray"); stayInBackground(); }
+  else app.quit();
 });
 
 app.on("before-quit", () => {
