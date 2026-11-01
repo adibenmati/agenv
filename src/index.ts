@@ -20,7 +20,7 @@ function main(): void {
     return;
   }
 
-  const homedir = os.homedir();
+  const homedir = process.env.AGENV_HOME || os.homedir();   // AGENV_HOME: tests keep the desktop app away from the real state
   const config = Config.fromArgv(process.argv.slice(2), process.env, homedir);
 
   // help, version, set, get, update, stop, kill — handled without starting a server
