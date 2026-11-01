@@ -478,7 +478,7 @@ function renderNgrokPanel() {
 
     html += '<div class="ngrok-field">';
     html += '<label>Port</label>';
-    html += '<input type="number" class="ngrok-input" id="ngrok-port" value="7685" min="1" max="65535">';
+    html += '<input type="number" class="ngrok-input" id="ngrok-port" value="' + esc(thisServerPort()) + '" min="1" max="65535">';
     html += '</div>';
 
     html += '<button class="ngrok-btn ngrok-start" id="ngrok-start-btn">Start HTTP Tunnel</button>';
@@ -559,6 +559,11 @@ function addIpRow(container, value) {
   container.appendChild(row);
 }
 
+/** The port this very page was served from: the tunnel must expose the server the user is looking at (agenv picks another port when its usual one is busy), never a fixed number that may be someone else's app. */
+function thisServerPort() {
+  return location.port || (location.protocol === "https:" ? "443" : "80");
+}
+
 function wireNgrokEvents(panel) {
   const startBtn = document.getElementById("ngrok-start-btn");
   const stopBtn = document.getElementById("ngrok-stop-btn");
@@ -570,7 +575,7 @@ function wireNgrokEvents(panel) {
 
   if (startBtn) {
     startBtn.addEventListener("click", async () => {
-      const port = document.getElementById("ngrok-port")?.value || "7685";
+      const port = document.getElementById("ngrok-port")?.value || thisServerPort();
       startBtn.disabled = true;
       startBtn.textContent = "Starting...";
       saveNgrokSettings();
