@@ -13,6 +13,8 @@ export interface SessionInit {
   lastCommand?: string;
   launchCommand?: string;
   userNamed?: boolean;
+  model?: string;
+  effort?: string;
   created?: number;
   lastActivity?: number;
   /** Command typed into the shell shortly after it starts; also remembered as the launch command. */
@@ -40,6 +42,9 @@ export class Session {
   lastCommand: string;
   launchCommand: string;
   userNamed: boolean;
+  /** Model alias and effort level for this session's Claude ("" = default); used when agenv resumes it. */
+  model: string;
+  effort: string;
   status: SessionStatus = "idle";
   created: number;
   lastActivity: number;
@@ -64,6 +69,8 @@ export class Session {
     this.lastCommand = o.lastCommand || "";
     this.launchCommand = o.runCommand || o.launchCommand || "";
     this.userNamed = !!o.userNamed;
+    this.model = o.model || "";
+    this.effort = o.effort || "";
     this.created = o.created || now;
     this.lastActivity = o.lastActivity || now;
     this.analytics = { inputTokens: 0, outputTokens: 0, estimatedCost: 0, commandCount: 0, turnCount: 0, startTime: now };
@@ -81,6 +88,7 @@ export class Session {
       lastCommand: this.lastCommand || "",
       launchCommand: this.launchCommand || "",
       userNamed: this.userNamed || false,
+      model: this.model || "", effort: this.effort || "",
       group: this.group || "", note: this.note || "",
       claudeSessionId: this.claudeSessionId || null,
       created: this.created || Date.now(),
@@ -97,6 +105,7 @@ export class Session {
       status: this.status || "idle", group: this.group || "",
       note: this.note || "", analytics: this.analytics || {},
       claudeSessionId: this.claudeSessionId || null, claudeRunning: !!this.claudeRunning,
+      model: this.model || "", effort: this.effort || "",
       // false = restored tab whose shell hasn't been started yet
       live: !!this.live,
     };

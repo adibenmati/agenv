@@ -2,7 +2,7 @@
 // Shows all sessions grouped by user-defined groups, with live status,
 // agent badges, costs, durations, expandable details, and context menus.
 
-import { api, esc, ago, short, fname, askText, askSessionsMessage } from "./util.js";
+import { api, esc, ago, short, fname, askText, askSessionsMessage, askModelEffort } from "./util.js";
 
 let panelEl = null;
 let _onOpenSession = null;    // (sessionId, meta, opts?) => {}
@@ -266,6 +266,7 @@ function renderShell() {
         <button class="sp-btn" data-act="new-session" title="New Terminal">+</button>
         <button class="sp-btn sp-agent-btn" data-act="new-agent" title="Launch Agent">C</button>
         <button class="sp-btn" data-act="resume-all" title="Resume all: wake every sleeping tab and resume its Claude conversation">&#9654;&#9654;</button>
+        <button class="sp-btn" data-act="model-effort-all" title="Model and effort for all sessions">&#9881;</button>
         <button class="sp-btn" data-act="message-all" title="Send a message to all agent sessions">&#9993;</button>
         <button class="sp-btn" data-act="export-sessions" title="Backup: save all sessions and folders to a JSON file">&#8681;</button>
         <button class="sp-btn" data-act="import-sessions" title="Restore: add the sessions and folders from a backup file (nothing is replaced)">&#8679;</button>
@@ -453,6 +454,7 @@ function renderSessionCard(s, groupColor) {
   h += `<div class="sp-path">${esc(short(s.cwd))}</div>`;
   h += `<div class="sp-meta">`;
   if (toolClass) h += `<span class="sp-badge ${esc(toolClass)}">${esc(s.tool)}</span>`;
+  if (s.model || s.effort) h += `<span class="sp-badge sp-model" title="Model and effort used when agenv starts this session's Claude">${esc([s.model, s.effort].filter(Boolean).join(" \u00b7 "))}</span>`;
   h += `<span class="sp-status-label ${state}" title="${state === "asleep" ? "Shell starts when you open this tab" : ""}">${esc(state)}</span>`;
   if (a.estimatedCost > 0) h += `<span class="sp-cost">${fmtCost(a.estimatedCost)}</span>`;
   if (a.turnCount > 0) h += `<span class="sp-turns" title="AI turns">${a.turnCount}T</span>`;
@@ -616,6 +618,7 @@ function handleClick(e) {
     else if (act === "refresh") { refresh(); }
     else if (act === "resume-all") { resumeAll(""); }
     else if (act === "message-all") { messageAll(""); }
+    else if (act === "model-effort-all") { setModelEffort({ group: "" }, null, sessions.length, ""); }
     else if (act === "export-sessions") { exportSessions(); }
     else if (act === "import-sessions") { importSessions(); }
     else if (act === "new-group") { askNewGroup(""); }
@@ -706,6 +709,7 @@ function handleContextMenu(e) {
     items.push({ label: s.claudeSessionId ? "Resume Claude Conversation" : "Continue Agent", action: "continue", handler() { if (_onOpenSession) _onOpenSession(sid, s, { continueAgent: true }); } });
     if (s.claudeSessionId) items.push({ label: "Copy Claude Session ID", action: "copy-claude", handler() { navigator.clipboard.writeText(s.claudeSessionId).catch(() => {}); } });
     items.push({ label: "Make agent from this session\u2026", action: "make-agent", disabled: !s.claudeSessionId, handler() { if (_onMakeAgentFromSession) _onMakeAgentFromSession(sid, s.cwd); } });
+    items.push({ label: "Model & effort\u2026", action: "model-effort", handler() { setModelEffort({ ids: [sid] }, s); } });
     items.push({ label: "Ask this agent to message another session\u2026", action: "ask-relay", disabled: s.live === false, handler() { askAgentToMessage(sid); } });
     items.push({ separator: true });
     items.push({ label: "Rename", action: "rename", handler() { askRenameSession(sid); } });
@@ -743,6 +747,7 @@ function handleContextMenu(e) {
       })) });
       items.push({ separator: true });
       if (all.length > 0) {
+        items.push({ label: "Model & effort for All (" + all.length + ")\u2026", action: "model-effort-all", handler() { setModelEffort({ group: g.path }, null, all.length, g.path); } });
         items.push({ label: "Resume All (" + all.length + ")", action: "resume-all", handler() { resumeAll(g.path); } });
         items.push({ label: "Message All (" + all.length + ")\u2026", action: "message-all", handler() { messageAll(g.path); } });
         items.push({ label: "Restart All (" + all.length + ")", action: "restart-all", handler() { batchRestart(g.path); } });
@@ -903,6 +908,24 @@ async function postJson(path, body) {
   try { data = await resp.json(); } catch {}
   if (!resp.ok) throw new Error((data && data.error) || "Request failed (" + resp.status + ")");
   return data;
+}
+
+/** Ask for a model and effort and set them on one session (`target.ids`) or on every session of a folder (`target.group`, "" = all). */
+async function setModelEffort(target, one, count, groupPath) {
+  const batch = !one;
+  const title = one ? "Model & effort for " + (one.name || "session " + one.id)
+    : "Model & effort for " + (groupPath ? 'every session in "' + displayPath(groupPath) + '"' : "all " + count + " sessions");
+  const v = await askModelEffort(title, one || {}, { batch });
+  if (!v) return;
+  const body = { ...target };
+  if (v.model !== undefined) body.model = v.model;
+  if (v.effort !== undefined) body.effort = v.effort;
+  if (body.model === undefined && body.effort === undefined) return;
+  try {
+    const res = await postJson("/api/sessions/model-effort", body);
+    toast("Set on " + res.length + " session" + (res.length === 1 ? "" : "s") + ". It applies the next time agenv starts or resumes their Claude.", "info");
+  } catch (e) { toast(e.message, "error"); }
+  refresh();
 }
 
 /** Download the whole tree (sessions, folders, closed list) as a JSON file. */

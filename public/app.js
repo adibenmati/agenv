@@ -50,7 +50,9 @@ function buildAgentCommand(opts) {
     // would pick whichever ran last in this folder.
     if (opts && opts.resumeId) parts.push("--resume", opts.resumeId);
     else if ((opts && opts.continue) || settings.agentContinue) parts.push("--continue");
-    if (settings.defaultModel) parts.push("--model", settings.defaultModel);
+    const model = (opts && opts.model) || settings.defaultModel;
+    if (model) parts.push("--model", model);
+    if (opts && opts.effort) parts.push("--effort", opts.effort);
     if (settings.agentSkipPerms) parts.push("--dangerously-skip-permissions");
   }
   return parts.join(" ");
@@ -68,7 +70,7 @@ async function continueAgentCommand(sessionId) {
     s = list.find((x) => x.id === sessionId) || {};
   } catch {}
   if (s.claudeRunning) return null;
-  return buildAgentCommand({ continue: true, resumeId: s.claudeSessionId || null });
+  return buildAgentCommand({ continue: true, resumeId: s.claudeSessionId || null, model: s.model, effort: s.effort });
 }
 
 function saveSetting(key, val) {
@@ -373,7 +375,7 @@ sessionsPanel.init({
           if (r.ok) cwd = (await r.json()).cwd || cwd;
         } catch {}
       }
-      command = buildAgentCommand({ continue: true, resumeId: entry.claudeSessionId || null });
+      command = buildAgentCommand({ continue: true, resumeId: entry.claudeSessionId || null, model: entry.model, effort: entry.effort });
     }
     try {
       const resp = await fetch(api("/api/sessions"), {
@@ -383,6 +385,9 @@ sessionsPanel.init({
       });
       if (!resp.ok) { notif.showToast(null, "Could not reopen session", "error"); return; }
       const data = await resp.json();
+      if (entry.model || entry.effort) {
+        await fetch(api("/api/sessions/" + data.id), { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: entry.model || "", effort: entry.effort || "" }) }).catch(() => {});
+      }
       await fetch(api("/api/archive/remove"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
