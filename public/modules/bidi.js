@@ -21,11 +21,14 @@ function strongType(unit) {
 
 /**
  * Visual order of a row's cells. `units` is one string per cell (a character with its combining marks); the result
- * lists the indices of `units` from left to right on screen.
+ * lists the indices of `units` from left to right on screen. `opts.cursor` is the index of the cursor's cell: when it
+ * sits right after right-to-left text (you are typing Hebrew), it is drawn at that text's left edge, where the next
+ * letter will appear, instead of on the far side of the word.
  */
-export function visualOrder(units) {
+export function visualOrder(units, opts = {}) {
   const n = units.length;
   const t = units.map(strongType);
+  const blankCursor = Number.isInteger(opts.cursor) && opts.cursor > 0 && opts.cursor < n && t[opts.cursor] === "N";
   // Digits after right-to-left text are an Arabic-style number (they stay with that text), otherwise left-to-right.
   let prevStrong = "L";
   for (let i = 0; i < n; i++) {
@@ -49,6 +52,7 @@ export function visualOrder(units) {
     i = j;
   }
   const levels = t.map((x) => (x === "AN" ? 2 : x === "R" ? 1 : 0));
+  if (blankCursor && levels[opts.cursor - 1] >= 1) levels[opts.cursor] = 1;
   const order = units.map((_, i) => i);
   for (let level = 2; level >= 1; level--) {
     for (let i = 0; i < n; ) {
@@ -84,7 +88,8 @@ export function fixRow(row) {
       cells.push({ el: s, text: p });
     }
   }
-  const order = visualOrder(cells.map((c) => c.text));
+  const cursor = cells.findIndex((c) => c.el.classList && c.el.classList.contains("xterm-cursor"));
+  const order = visualOrder(cells.map((c) => c.text), { cursor: cursor >= 0 ? cursor : undefined });
   row.replaceChildren(...order.map((i) => cells[i].el));
 }
 

@@ -37,6 +37,19 @@ describe("terminal bidi: right-to-left text in visual order", () => {
     assert.equal(shown("שָלוֹם"), "םוֹלשָ");
   });
 
+  it("draws the cursor at the left edge of Hebrew being typed, where the next letter goes", () => {
+    const u = cells("echo שלום  ");
+    const v = visualOrder(u, { cursor: 9 }).map((i) => (i === 9 ? "|" : u[i])).join("");
+    assert.equal(v, "echo |םולש ");
+  });
+
+  it("leaves the cursor alone after English, or when it sits on a letter", () => {
+    const a = cells("echo hello  ");
+    assert.deepEqual(visualOrder(a, { cursor: 10 }), a.map((_, i) => i));
+    const b = cells("שלום");
+    assert.deepEqual(visualOrder(b, { cursor: 2 }), [3, 2, 1, 0]);
+  });
+
   it("returns every cell exactly once", () => {
     const u = cells("a שלום 12 b עולם, c");
     assert.deepEqual([...visualOrder(u)].sort((a, b) => a - b), u.map((_, i) => i));
