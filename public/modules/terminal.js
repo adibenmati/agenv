@@ -56,6 +56,7 @@ let _onPaneOutput = null;     // (paneId, data) => {}
 let _onEvent = null;          // (eventName) => {}
 let _onStatus = null;         // (sessionId, status) => {}
 let _onCommand = null;        // (paneId, command) => {}
+let _toolOf = null;           // (sessionId) => detected tool, e.g. "claude"
 
 export function setCallbacks(cbs) {
   _onPaneData = cbs.onData || null;
@@ -67,7 +68,12 @@ export function setCallbacks(cbs) {
   _onEvent = cbs.onEvent || null;
   _onStatus = cbs.onStatus || null;
   _onCommand = cbs.onCommand || null;
+  _toolOf = cbs.toolOf || null;
 }
+
+// Programs that already put right-to-left text in visual order themselves. Claude Code writes Hebrew reversed for
+// terminals without bidi support, so reordering its rows again would mirror them back.
+const SELF_BIDI_TOOLS = new Set(["claude"]);
 
 let termFontSize = 14;
 
@@ -300,7 +306,7 @@ function openTerm(entry, mountEl) {
   term.loadAddon(fit);
   term.loadAddon(new WebLinksAddon.WebLinksAddon());
   term.open(mountEl);
-  attachBidi(term);
+  attachBidi(term, () => !SELF_BIDI_TOOLS.has(entry.tool || (_toolOf && _toolOf(entry.sessionId))));
   entry.term = term;
   entry.fitAddon = fit;
   entry.mountEl = mountEl;
@@ -571,9 +577,15 @@ function connectWs(entry) {
         if (entry.term) entry.term.write("\r\n[exited " + m.code + "]\r\n");
         entry.dead = true;
         if (_onPaneExit) _onPaneExit(paneId, m.code);
+      } else if (m.type === "tool" && m.tool) {
+        const was = entry.tool;
+        entry.tool = m.tool;
+        // Redraw so rows drawn under the old rule (reordered or not) follow the new one.
+        if (was && was !== m.tool && entry.term) { try { entry.term.refresh(0, entry.term.rows - 1); } catch {} }
       } else if (m.type === "cwd" && m.cwd) {
         if (_onPaneCwd) _onPaneCwd(paneId, m.cwd);
       } else if (m.type === "status" && m.status) {
+        if (m.tool) entry.tool = m.tool;
         if (_onStatus) _onStatus(m.sessionId, m.status);
       } else if (m.type === "event" && m.event) {
         if (_onEvent) _onEvent(m.event);

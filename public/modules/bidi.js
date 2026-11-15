@@ -93,9 +93,13 @@ export function fixRow(row) {
   row.replaceChildren(...order.map((i) => cells[i].el));
 }
 
-/** Keep a terminal's rows in visual order after every render. Returns the disposable. */
-export function attachBidi(term) {
+/**
+ * Keep a terminal's rows in visual order after every render. `enabled()` is asked on each render: it is false while
+ * the session runs a program that orders right-to-left text itself. Returns the disposable.
+ */
+export function attachBidi(term, enabled = () => true) {
   return term.onRender(({ start, end }) => {
+    if (!enabled()) return;
     const rows = term.element && term.element.querySelector(".xterm-rows");
     if (!rows) return;
     for (let i = start; i <= end; i++) {

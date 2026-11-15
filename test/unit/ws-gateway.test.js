@@ -104,6 +104,17 @@ describe("WsGateway protocol (real sockets)", () => {
     assert.deepEqual(c.msgs.at(-1), { type: "exit", code: -1 });
   });
 
+  it("tells the page which program the session runs, on connect and when it changes", async () => {
+    const s = r.sessions.create({}); const c = client(port, `session=${s.id}&token=T`); await c.openP;
+    await until(() => c.msgs.some((m) => m.type === "tool"));
+    assert.deepEqual(c.msgs.find((m) => m.type === "tool"), { type: "tool", tool: "terminal" });
+    s.detectedTool = "claude"; r.bus.emit("changed", s); r.bus.emit("changed", s);
+    await until(() => c.msgs.filter((m) => m.type === "tool").length >= 2);
+    await new Promise((res) => setTimeout(res, 100));
+    assert.deepEqual(c.msgs.filter((m) => m.type === "tool"), [{ type: "tool", tool: "terminal" }, { type: "tool", tool: "claude" }], "sent once per change");
+    c.ws.close();
+  });
+
   it("forwards status and cwd changes, and app events", async () => {
     const s = r.sessions.create({}); const c = client(port, `session=${s.id}&token=T`); await c.openP; await until(() => c.msgs.length >= 1);
     r.bus.emit("status", s, "running"); r.bus.emit("cwd", s, "/new");
