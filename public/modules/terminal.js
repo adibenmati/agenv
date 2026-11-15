@@ -56,6 +56,7 @@ let _onPaneOutput = null;     // (paneId, data) => {}
 let _onEvent = null;          // (eventName) => {}
 let _onStatus = null;         // (sessionId, status) => {}
 let _onCommand = null;        // (paneId, command) => {}
+let _onCompose = null;        // (paneId) => {}  open/close the writing box
 let _toolOf = null;           // (sessionId) => detected tool, e.g. "claude"
 
 export function setCallbacks(cbs) {
@@ -69,6 +70,7 @@ export function setCallbacks(cbs) {
   _onStatus = cbs.onStatus || null;
   _onCommand = cbs.onCommand || null;
   _toolOf = cbs.toolOf || null;
+  _onCompose = cbs.onCompose || null;
 }
 
 // Programs that already put right-to-left text in visual order themselves. Claude Code writes Hebrew reversed for
@@ -327,6 +329,14 @@ function openTerm(entry, mountEl) {
         return false;
       }
       return true;
+    }
+
+    // Ctrl+Shift+K — the writing box (Hebrew and mixed text with the browser's own right-to-left support)
+    if (ctrl && e.shiftKey && (e.key === "K" || e.key === "k")) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (_onCompose) _onCompose(paneId);
+      return false;
     }
 
     // Ctrl+Shift+C — copy if selection, else let propagate (app.js handles Claude)

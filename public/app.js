@@ -3,6 +3,7 @@ import { $, setToken, api, esc, short, tIcon, ago, fname, askText } from "./modu
 import { allLeaves } from "./modules/layout.js";
 import { refreshAllTerminals, setCallbacks, getTerminal, sendInput, pasteText, smartPaste, createTerminal as createTerm, setFontSize as setTermFontSize, fitAllTerminals, destroyTerminal, getCommandHistory } from "./modules/terminal.js";
 import * as tabs from "./modules/tabs.js";
+import * as compose from "./modules/compose.js";
 import * as sidebar from "./modules/sidebar.js";
 import * as notif from "./modules/notifications.js";
 import * as ctxmenu from "./modules/contextmenu.js";
@@ -618,6 +619,7 @@ registerCommand(/^\s*(pushd|popd)(\s|$)/i, (paneId, _cmd) => {
 setCallbacks({
   onCommand: onCommandIntercepted,
   toolOf: (sid) => tabs.getSessionMeta(sid).tool,
+  onCompose: (paneId) => compose.toggleCompose(paneId),
   onCwd(paneId, cwd) {
     const sid = getTerminal(paneId)?.sessionId;
     if (sid != null) {
@@ -1352,6 +1354,13 @@ document.addEventListener("keydown", (e) => {
   }
   // Ctrl+, — settings
   if ((e.ctrlKey || e.metaKey) && e.key === ",") { e.preventDefault(); toggleSettings(); return; }
+  // Ctrl+Shift+K — writing box on the active pane (when the terminal itself does not have the keyboard)
+  if (e.ctrlKey && e.shiftKey && (e.key === "K" || e.key === "k")) {
+    e.preventDefault();
+    const pid = tabs.getActivePaneId();
+    if (pid) compose.toggleCompose(pid);
+    return;
+  }
   // Ctrl+Shift+D — split horizontal
   if (e.ctrlKey && e.shiftKey && (e.key === "D" || e.key === "d")) { e.preventDefault(); tabs.splitActivePane("h"); return; }
   // Ctrl+Shift+E — split vertical
@@ -1606,6 +1615,7 @@ workspaceArea.addEventListener("contextmenu", (e) => {
         term.clearSelection();
       }
     }},
+    { label: "Write a message (Hebrew / English)…", action: "compose", shortcut: "Ctrl+Shift+K", handler() { compose.openCompose(paneId); }},
     { label: "Paste", action: "paste", shortcut: "Ctrl+Shift+V", handler() {
       navigator.clipboard.readText().then((text) => {
         if (text) pasteText(paneId, text);
@@ -2083,3 +2093,12 @@ function collectNodeSessionIds(node) {
   if (node.type === "leaf") return [node.sessionId];
   return (node.children || []).flatMap(c => collectNodeSessionIds(c));
 }
+
+// The ✎ button on a pane header opens that pane's writing box.
+document.addEventListener("click", (e) => {
+  const b = e.target.closest && e.target.closest(".ph-compose");
+  if (!b) return;
+  e.preventDefault();
+  e.stopPropagation();
+  compose.toggleCompose(b.dataset.paneId);
+});
