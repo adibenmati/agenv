@@ -1,5 +1,6 @@
 // terminal.js — xterm.js instance management per pane
 
+import { attachBidi } from "./bidi.js";
 import { api, getToken } from "./util.js";
 import { showToast, showProgressToast } from "./notifications.js";
 
@@ -299,6 +300,7 @@ function openTerm(entry, mountEl) {
   term.loadAddon(fit);
   term.loadAddon(new WebLinksAddon.WebLinksAddon());
   term.open(mountEl);
+  attachBidi(term);
   entry.term = term;
   entry.fitAddon = fit;
   entry.mountEl = mountEl;
