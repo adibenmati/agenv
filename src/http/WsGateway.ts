@@ -14,7 +14,7 @@ const MAX_INPUT_CHARS = 262144;
 const MAX_MESSAGES_PER_SECOND = 200;
 
 interface Client extends WebSocket { isAlive?: boolean }
-interface Room { clients: Set<Client>; queue: string[]; bytes: number; timer: NodeJS.Timeout | null }
+interface Room { clients: Set<Client>; queue: string[]; bytes: number; timer: NodeJS.Timeout | null; tool?: string }
 
 export interface WsGatewayOptions {
   server: http.Server;
@@ -54,6 +54,14 @@ export class WsGateway {
   private readonly onStatus = (s: Session, status: string): void => this.broadcast(s.id, { type: "status", status, sessionId: s.id });
   private readonly onCwd = (s: Session, cwd: string): void => this.broadcast(s.id, { type: "cwd", cwd });
   private readonly onDeleted = (s: Session, code: number): void => this.closeRoom(s, code);
+  /** The program the session runs ("claude", "codex", "terminal"...): the page needs it, e.g. Claude Code orders Hebrew itself. */
+  private readonly onChanged = (s: Session): void => {
+    const room = this.rooms.get(s.id);
+    const tool = s.detectedTool || "terminal";
+    if (!room || room.tool === tool) return;
+    room.tool = tool;
+    this.broadcast(s.id, { type: "tool", tool });
+  };
 
   constructor(private readonly o: WsGatewayOptions) {
     const pingMs = Math.max(1000, o.pingMs ?? parseInt(process.env.AGENV_WS_PING_MS || "20000", 10));
@@ -69,6 +77,7 @@ export class WsGateway {
     o.bus.on("status", this.onStatus);
     o.bus.on("cwd", this.onCwd);
     o.bus.on("deleted", this.onDeleted);
+    o.bus.on("changed", this.onChanged);
 
     // Drop clients that have stopped answering. Without this a half-open socket (laptop lid closed, network
     // switched, renderer killed) stays in the client set forever and keeps its buffer alive with it.
@@ -106,6 +115,7 @@ export class WsGateway {
     this.o.bus.off("status", this.onStatus);
     this.o.bus.off("cwd", this.onCwd);
     this.o.bus.off("deleted", this.onDeleted);
+    this.o.bus.off("changed", this.onChanged);
     for (const room of this.rooms.values()) {
       if (room.timer) clearTimeout(room.timer);
       for (const ws of room.clients) { try { ws.terminate(); } catch {} }
@@ -167,6 +177,8 @@ export class WsGateway {
     const backlog = session.scrollback.read();
     // `replay` lets a reconnecting client clear its screen first instead of appending the whole backlog on top of what it shows.
     if (backlog.length > 0) this.sendTo(sessionId, room, client, JSON.stringify({ type: "output", data: backlog.toString("utf8"), replay: true }));
+    room.tool = session.detectedTool || "terminal";
+    this.sendTo(sessionId, room, client, JSON.stringify({ type: "tool", tool: room.tool }));
 
     client.on("message", (raw) => {
       if (!allowed()) { client.close(4429, "Too Many Requests"); return; }

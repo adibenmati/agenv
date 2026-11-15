@@ -617,6 +617,7 @@ registerCommand(/^\s*(pushd|popd)(\s|$)/i, (paneId, _cmd) => {
 // ---------------------------------------------------------------------------
 setCallbacks({
   onCommand: onCommandIntercepted,
+  toolOf: (sid) => tabs.getSessionMeta(sid).tool,
   onCwd(paneId, cwd) {
     const sid = getTerminal(paneId)?.sessionId;
     if (sid != null) {

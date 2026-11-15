@@ -43,6 +43,15 @@ const freePort = () => new Promise((res) => { const s = net.createServer().liste
     ok(around && around.before.endsWith("echo ") && around.after.startsWith("םולש"), "while typing Hebrew the cursor sits at its left edge, where the next letter goes" + (around ? " (" + JSON.stringify(around.before.slice(-8)) + " | " + JSON.stringify(around.after.slice(0, 6)) + ")" : ""));
     const cursorRows = await page.evaluate(() => document.querySelectorAll("#workspace-area .xterm-rows .xterm-cursor").length);
     ok(cursorRows === 1, "the cursor is still drawn");
+    // Claude Code writes Hebrew already reversed for terminals without bidi; once the session runs it, rows are left as they are.
+    await page.keyboard.press("Control+c");
+    await page.keyboard.type("echo Welcome to Claude Code");
+    await page.keyboard.press("Enter");
+    await sleep(2500);
+    await page.keyboard.type("echo ידבע");
+    await page.keyboard.press("Enter");
+    await sleep(1200);
+    ok((await rows()).some((r) => r.startsWith("ידבע")), "in a Claude Code session the text is shown as Claude wrote it");
     const dir = await page.evaluate(() => { const t = document.createElement("textarea"); document.body.appendChild(t); const v = getComputedStyle(t).unicodeBidi; t.remove(); return v; });
     ok(dir === "plaintext", "text boxes take their direction from what is typed");
   } catch (e) { console.log("FAIL " + e.message); process.exitCode = 1; }
