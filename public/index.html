@@ -298,6 +298,15 @@ input:not([type=checkbox]):not([type=radio]):not([type=range]),textarea,[content
 .terminal-mount{flex:1;overflow:hidden}
 
 /* Pane header */
+.compose-box{position:absolute;left:8px;right:8px;bottom:8px;z-index:20;display:flex;gap:6px;align-items:flex-end;background:var(--bg2);border:1px solid var(--accent);border-radius:8px;padding:6px;box-shadow:0 6px 24px rgba(0,0,0,.45)}
+.compose-input{flex:1;resize:none;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 8px;font:14px/1.45 system-ui,-apple-system,"Segoe UI",Arial,sans-serif;min-height:22px;max-height:220px;outline:none}
+.compose-input:focus{border-color:var(--accent)}
+.compose-actions{display:flex;gap:4px}
+.compose-btn{background:var(--bg4);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 10px;cursor:pointer;font-size:12px}
+.compose-send{background:var(--accent);color:#fff;border-color:transparent}
+.ph-compose{margin-left:auto;background:none;border:none;color:var(--text3);cursor:pointer;font-size:12px;padding:0 4px;line-height:1}
+.ph-compose:hover{color:var(--text)}
+.ph-compose+.ph-status{margin-left:4px}
 .pane-header{display:flex;align-items:center;gap:6px;padding:2px 8px;background:var(--bg2);border-bottom:1px solid var(--border);font-size:10px;color:var(--text3);flex-shrink:0;min-height:22px;user-select:none;cursor:default}
 .ph-icon{font-size:10px;font-weight:700;opacity:.6}
 .ph-name{font-weight:600;color:var(--text2)}

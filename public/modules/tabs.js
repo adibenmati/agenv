@@ -662,6 +662,7 @@ function updatePaneHeader(paneId, headerEl, sessionId) {
     html += `<span class="ph-analytics">$${a.estimatedCost.toFixed(3)}</span>`;
   }
 
+  html += `<button class="ph-compose" data-pane-id="${esc(paneId)}" title="Write a message: Hebrew and English with real right-to-left (Ctrl+Shift+K)">&#9998;</button>`;
   html += `<span class="ph-status ${status}"></span>`;
   headerEl.innerHTML = html;
 }
