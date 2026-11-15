@@ -31,6 +31,16 @@ const freePort = () => new Promise((res) => { const s = net.createServer().liste
     await page.keyboard.press("Enter");
     await sleep(1200);
     ok((await rows()).some((r) => r.startsWith("םלוע םולש hello 123")), "and so does Hebrew the terminal prints");
+    await page.keyboard.type("echo שלום");
+    await sleep(600);
+    const around = await page.evaluate(() => {
+      const c = document.querySelector("#workspace-area .xterm-rows .xterm-cursor");
+      if (!c) return null;
+      const cells = [...c.parentElement.children];
+      const i = cells.indexOf(c);
+      return { before: cells.slice(0, i).map((e) => e.textContent).join("").replace(/ /g, " "), after: cells.slice(i + 1).map((e) => e.textContent).join("") };
+    });
+    ok(around && around.before.endsWith("echo ") && around.after.startsWith("םולש"), "while typing Hebrew the cursor sits at its left edge, where the next letter goes" + (around ? " (" + JSON.stringify(around.before.slice(-8)) + " | " + JSON.stringify(around.after.slice(0, 6)) + ")" : ""));
     const cursorRows = await page.evaluate(() => document.querySelectorAll("#workspace-area .xterm-rows .xterm-cursor").length);
     ok(cursorRows === 1, "the cursor is still drawn");
     const dir = await page.evaluate(() => { const t = document.createElement("textarea"); document.body.appendChild(t); const v = getComputedStyle(t).unicodeBidi; t.remove(); return v; });
