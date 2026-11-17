@@ -2,6 +2,7 @@ import { Router } from "express";
 import { HttpError } from "../../core/HttpError";
 import { GroupRegistry } from "../../sessions/GroupRegistry";
 import { parseEffort, parseModel } from "../../sessions/modelEffort";
+import { tailLines } from "../../sessions/activity";
 import { legacyGroups, readLiveCwd, recentFolders, sessionAnalytics } from "../../sessions/queries";
 import type { AppDeps } from "../AppDeps";
 import { wrap } from "../errors";
@@ -135,6 +136,15 @@ export function sessionsRouter(d: AppDeps): Router {
     res.json({ ok: true, id });
   }));
 
+  // What a session is working on, the last few things it worked on, and the end of its output (for the info panel).
+  r.get("/api/sessions/:id/activity", auth, wrap((req, res) => {
+    const s = sessionOr404(String(req.params.id));
+    res.json({
+      id: s.id, activity: s.activity, history: s.activityLog.slice().reverse(), title: s.title,
+      tail: tailLines(s.scrollback.read().toString("utf8").slice(-16384), 30),
+    });
+  }));
+
   r.get("/api/sessions/:id/cwd", auth, wrap(async (req, res) => {
     const s = sessionOr404(req.params.id);
     // Try to get the real CWD from the shell process (where the OS exposes it)
@@ -158,7 +168,7 @@ export function sessionsRouter(d: AppDeps): Router {
   r.get("/api/history", auth, (_req, res) => res.json(d.history.list()));
 
   r.post("/api/history", auth, wrap((req, res) => {
-    const { command, sessionId } = req.body || {};
+    const { command, sessionId, typedIn } = req.body || {};
     if (!command || typeof command !== "string") throw new HttpError(400, "Invalid");
     const trimmed = command.trim();
     if (!trimmed) { res.json({ ok: true }); return; }
@@ -166,7 +176,12 @@ export function sessionsRouter(d: AppDeps): Router {
     // Update session tool detection
     if (sessionId != null) {
       const s = d.sessions.get(parseInt(sessionId, 10));
-      if (s) { d.sessions.noteCommand(s, trimmed); d.stateStore.save(); }
+      if (s) { d.sessions.noteCommand(s, trimmed); d.sessions.noteTyped(s, trimmed); d.stateStore.save(); }
+    }
+    // Typed in a terminal: only shown as what that session is working on (no tool detection — it may be a prompt).
+    if (typedIn != null && sessionId == null) {
+      const s = d.sessions.get(parseInt(typedIn, 10));
+      if (s) d.sessions.noteTyped(s, trimmed);
     }
     res.json({ ok: true });
   }));

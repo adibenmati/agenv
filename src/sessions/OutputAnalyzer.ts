@@ -3,6 +3,7 @@ import * as path from "path";
 import type { SessionStatus } from "../core/types";
 import type { Session } from "./Session";
 import type { SessionBus } from "./events";
+import { lastTitle, parseTitle, recordActivity } from "./activity";
 
 // ---------------------------------------------------------------------------
 // Status detection — pattern matching on PTY output
@@ -181,6 +182,20 @@ export class OutputAnalyzer {
     const osc7 = raw.match(OSC7_CWD);
     if (osc7) {
       try { this.setCwd(s, decodeURIComponent(osc7[1])); } catch {}
+    }
+
+    // The task an agent writes in the terminal title (Claude Code: "◐ Fix the login bug").
+    const title = lastTitle(raw);
+    if (title !== null && title !== s.title) {
+      s.title = title;
+      const task = parseTitle(title);
+      if (task) {
+        if (recordActivity(s, task.text, "task", task.busy)) this.bus.emit("changed", s);
+      } else if (s.activity && s.activity.source === "task" && s.activity.busy) {
+        // The agent exited (the shell took the title back) — its task is no longer running.
+        s.activity.busy = false;
+        this.bus.emit("changed", s);
+      }
     }
 
     const plain = raw.replace(STRIP_ANSI, "");

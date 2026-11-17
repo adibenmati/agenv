@@ -79,7 +79,7 @@ function normalize(v, ctx, key) {
 }
 
 // Fields added after the TypeScript migration: the old server cannot have them, so their presence is not a difference.
-const ADDED_SINCE = new Set(["model", "effort"]);
+const ADDED_SINCE = new Set(["model", "effort", "activity"]);
 
 function diff(a, b, at, out) {
   if (JSON.stringify(a) === JSON.stringify(b)) return;

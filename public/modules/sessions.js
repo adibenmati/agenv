@@ -3,6 +3,7 @@
 // agent badges, costs, durations, expandable details, and context menus.
 
 import { api, esc, ago, short, fname, askText, askSessionsMessage, askModelEffort } from "./util.js";
+import { renderActivityLine, showSessionInfo } from "./sessioninfo.js";
 
 let panelEl = null;
 let _onOpenSession = null;    // (sessionId, meta, opts?) => {}
@@ -113,6 +114,10 @@ export function init(opts) {
   refresh();
 
   panelEl.addEventListener("click", handleClick);
+  panelEl.addEventListener("keydown", (e) => {
+    const line = e.target.closest && e.target.closest("[data-act='session-info']");
+    if (line && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); openInfo(parseInt(line.dataset.sid, 10)); }
+  });
   panelEl.addEventListener("dblclick", handleDblClick);
   panelEl.addEventListener("input", handleInput);
   panelEl.addEventListener("contextmenu", handleContextMenu);
@@ -452,6 +457,7 @@ function renderSessionCard(s, groupColor) {
   if (s.clients > 0) h += `<span class="sp-viewers" title="${s.clients} connected">${s.clients}&#128065;</span>`;
   h += `</div>`;
   h += `<div class="sp-path">${esc(short(s.cwd))}</div>`;
+  h += renderActivityLine(s);
   h += `<div class="sp-meta">`;
   if (toolClass) h += `<span class="sp-badge ${esc(toolClass)}">${esc(s.tool)}</span>`;
   if (s.model || s.effort) h += `<span class="sp-badge sp-model" title="Model and effort used when agenv starts this session's Claude">${esc([s.model, s.effort].filter(Boolean).join(" \u00b7 "))}</span>`;
@@ -570,6 +576,14 @@ function handleClick(e) {
     return;
   }
 
+  // The "working on" line → the session's info panel (the rest of the card opens the session)
+  const infoLine = e.target.closest("[data-act='session-info']");
+  if (infoLine) {
+    e.stopPropagation();
+    openInfo(parseInt(infoLine.dataset.sid, 10));
+    return;
+  }
+
   // Session-level action buttons
   const actionBtn = e.target.closest(".sp-s-btn, .sp-d-btn");
   if (actionBtn) {
@@ -623,6 +637,14 @@ function handleClick(e) {
     else if (act === "import-sessions") { importSessions(); }
     else if (act === "new-group") { askNewGroup(""); }
   }
+}
+
+/** The info panel for one session: what it is working on, recent activity, latest output. */
+function openInfo(sid) {
+  showSessionInfo(sid, () => sessions.find((x) => x.id === sid), (id) => {
+    const meta = sessions.find((x) => x.id === id);
+    if (_onOpenSession) _onOpenSession(id, meta);
+  });
 }
 
 function handleDblClick(e) {
@@ -705,6 +727,7 @@ function handleContextMenu(e) {
 
     const items = [
       { label: "Open", action: "open", handler() { if (_onOpenSession) _onOpenSession(sid, s); } },
+      { label: "Details…", action: "details", handler() { openInfo(sid); } },
     ];
     items.push({ label: s.claudeSessionId ? "Resume Claude Conversation" : "Continue Agent", action: "continue", handler() { if (_onOpenSession) _onOpenSession(sid, s, { continueAgent: true }); } });
     if (s.claudeSessionId) items.push({ label: "Copy Claude Session ID", action: "copy-claude", handler() { navigator.clipboard.writeText(s.claudeSessionId).catch(() => {}); } });
