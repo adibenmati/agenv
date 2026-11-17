@@ -387,6 +387,39 @@ input:not([type=checkbox]):not([type=radio]):not([type=range]),textarea,[content
 .sp-info{flex:1;min-width:0}
 .sp-name{font-size:11px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .sp-path{font-size:9px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
+/* what a session is working on: scrolls left to right while it works, click for details (sessioninfo.js) */
+.sp-activity{position:relative;height:15px;margin-top:3px;border-radius:3px;overflow:hidden;cursor:pointer;background:rgba(127,127,127,.07);font-size:10px;line-height:15px;color:var(--text2)}
+.sp-activity:hover,.sp-activity:focus-visible{background:rgba(88,166,255,.14);outline:none}
+.sp-act-text{position:absolute;top:0;left:5px;right:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;unicode-bidi:plaintext}
+.sp-activity.working{color:var(--green);background:rgba(63,185,80,.08)}
+.sp-activity.working .sp-act-text{right:auto;overflow:visible;text-overflow:clip;animation-name:sp-marquee;animation-timing-function:linear;animation-iteration-count:infinite}
+.sp-activity.working:hover .sp-act-text{animation-play-state:paused}
+@keyframes sp-marquee{from{left:0;transform:translateX(-100%)}to{left:100%;transform:translateX(0)}}
+@media (prefers-reduced-motion:reduce){.sp-activity.working .sp-act-text{animation:none;right:5px;overflow:hidden;text-overflow:ellipsis}}
+.si-overlay{position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;padding:16px}
+.si-box{background:var(--bg2);border:1px solid var(--border);border-radius:10px;box-shadow:0 16px 48px rgba(0,0,0,.6);width:520px;max-width:100%;max-height:85vh;overflow-y:auto;padding:14px 16px;font-size:12px;color:var(--text)}
+.si-head{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+.si-head .sp-status{position:static;flex-shrink:0}
+.si-name{font-weight:600;font-size:13px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.si-x{background:none;border:none;color:var(--text2);font-size:18px;cursor:pointer;line-height:1;padding:0 4px}
+.si-x:hover{color:var(--text)}
+.si-label{font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:var(--text3);margin:12px 0 4px}
+.si-now{border:1px solid var(--border);border-radius:8px;padding:8px 10px;background:var(--bg)}
+.si-now .si-label{margin-top:0}
+.si-now.working{border-color:var(--green)}
+.si-now.working .si-now-text{color:var(--green)}
+.si-now-text{font-size:13px;line-height:1.4;word-break:break-word;unicode-bidi:plaintext}
+.si-sub{font-size:10px;color:var(--text2);margin-top:3px}
+.si-facts{display:grid;grid-template-columns:auto 1fr;gap:3px 12px;margin-top:10px;font-size:11px}
+.si-k{color:var(--text3)}
+.si-v{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--font)}
+.si-hist{list-style:none;margin:0;padding:0;font-size:11px}
+.si-hist li{display:flex;gap:6px;padding:2px 0;border-bottom:1px solid rgba(127,127,127,.12)}
+.si-hist-t{color:var(--text3);width:56px;flex-shrink:0}
+.si-hist-i{color:var(--accent);width:10px;flex-shrink:0}
+.si-hist-x{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;unicode-bidi:plaintext}
+.si-out{margin:0;max-height:220px;overflow:auto;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 8px;font-family:var(--font);font-size:10.5px;line-height:1.35;white-space:pre-wrap;word-break:break-all;color:var(--text2)}
+.si-actions{display:flex;justify-content:flex-end;margin-top:12px}
 .sp-meta{display:flex;align-items:center;gap:4px;margin-top:2px;flex-wrap:wrap}
 .sp-badge{font-size:8px;font-weight:700;padding:1px 5px;border-radius:3px;text-transform:uppercase;letter-spacing:.3px}
 .sp-badge.sp-model{background:rgba(88,166,255,.15);color:#79c0ff;text-transform:none}

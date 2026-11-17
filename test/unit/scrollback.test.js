@@ -55,7 +55,7 @@ describe("Session", () => {
   it("toListItem has the GET /api/sessions shape", () => {
     const s = mk({ name: "n", group: "g" }); s.claudeRunning = true;
     const item = s.toListItem(2);
-    assert.deepEqual(Object.keys(item).sort(), ["analytics", "claudeRunning", "claudeSessionId", "clients", "created", "cwd", "effort", "group", "id", "lastActivity", "lastCommand", "launchCommand", "live", "model", "name", "note", "status", "tool"]);
-    assert.equal(item.clients, 2); assert.equal(item.claudeRunning, true); assert.equal(item.live, false); assert.equal(item.tool, "terminal");
+    assert.deepEqual(Object.keys(item).sort(), ["activity", "analytics", "claudeRunning", "claudeSessionId", "clients", "created", "cwd", "effort", "group", "id", "lastActivity", "lastCommand", "launchCommand", "live", "model", "name", "note", "status", "tool"]);
+    assert.equal(item.clients, 2); assert.equal(item.claudeRunning, true); assert.equal(item.live, false); assert.equal(item.tool, "terminal"); assert.equal(item.activity, null);
   });
 });

@@ -1,6 +1,7 @@
 import type { Analytics, PersistedSession, SessionStatus } from "../core/types";
 import type { IPty } from "./pty";
 import { Scrollback } from "./Scrollback";
+import type { Activity } from "./activity";
 
 export interface SessionInit {
   id: number;
@@ -46,6 +47,11 @@ export class Session {
   model: string;
   effort: string;
   status: SessionStatus = "idle";
+  /** What it is working on now (see activity.ts), and the last few things it worked on. */
+  activity: Activity | null = null;
+  activityLog: Activity[] = [];
+  /** The last terminal title the program set. */
+  title = "";
   created: number;
   lastActivity: number;
   analytics: Analytics;
@@ -106,6 +112,7 @@ export class Session {
       note: this.note || "", analytics: this.analytics || {},
       claudeSessionId: this.claudeSessionId || null, claudeRunning: !!this.claudeRunning,
       model: this.model || "", effort: this.effort || "",
+      activity: this.activity ? { ...this.activity } : null,
       // false = restored tab whose shell hasn't been started yet
       live: !!this.live,
     };

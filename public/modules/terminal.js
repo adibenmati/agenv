@@ -20,7 +20,7 @@ async function loadHistory() {
   } catch {}
 }
 
-function addToHistory(cmd) {
+function addToHistory(cmd, sessionId) {
   if (!cmd || cmd.length < 2) return;
   // Avoid duplicates at the end
   if (_commandHistory.length > 0 && _commandHistory[_commandHistory.length - 1] === cmd) return;
@@ -29,7 +29,8 @@ function addToHistory(cmd) {
   fetch(api("/api/history"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ command: cmd }),
+    // typedIn: the session it was typed in, shown as what that session is working on.
+    body: JSON.stringify({ command: cmd, typedIn: sessionId }),
   }).catch(() => {});
 }
 
@@ -514,7 +515,7 @@ function bufferInput(entry, data) {
       // Enter — fire command callback with accumulated buffer
       const cmd = entry.inputBuffer.trim();
       if (cmd) {
-        addToHistory(cmd);
+        addToHistory(cmd, entry.sessionId);
         if (_onCommand) _onCommand(entry.paneId, cmd);
       }
       entry.inputBuffer = "";
@@ -701,6 +702,26 @@ export function fitAllTerminals() {
 
 export function getTerminal(paneId) {
   return paneTerminals.get(paneId) || null;
+}
+
+/**
+ * The last `n` non-empty lines on the screen of a session that is open in a pane, as the terminal shows them, or
+ * null when the session is not open here.
+ */
+export function getScreenLines(sessionId, n = 20) {
+  for (const entry of paneTerminals.values()) {
+    if (entry.sessionId !== sessionId || !entry.term) continue;
+    const buf = entry.term.buffer.active;
+    const lines = [];
+    const bottom = buf.baseY + entry.term.rows - 1;
+    for (let y = bottom; y >= 0 && y > bottom - 500 && lines.length < n; y--) {
+      const line = buf.getLine(y);
+      const text = line ? line.translateToString(true) : "";
+      if (text.trim()) lines.unshift(text);
+    }
+    return lines;
+  }
+  return null;
 }
 
 export function getAllPaneIds() {

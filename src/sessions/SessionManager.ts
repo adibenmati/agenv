@@ -9,6 +9,7 @@ import { Scrollback } from "./Scrollback";
 import { Session } from "./Session";
 import { parseShell } from "./shell";
 import { detectTool } from "./tools";
+import { recordActivity } from "./activity";
 
 /** Sent to clients when a shell is restarted so they start from a clean screen. */
 const CLEAR_SCREEN = "\x1b[2J\x1b[H";
@@ -160,6 +161,7 @@ export class SessionManager {
           const cmd = s.pendingCommand;
           s.pty.write(cmd + "\r");
           s.lastCommand = cmd;
+          recordActivity(s, cmd, "input", null);
           const tool = detectTool(cmd);
           if (tool) s.detectedTool = tool;
           s.pendingCommand = null;
@@ -258,6 +260,14 @@ export class SessionManager {
     s.cols = Math.max(1, Math.min(Math.floor(Number(cols)) || 80, 500));
     s.rows = Math.max(1, Math.min(Math.floor(Number(rows)) || 24, 200));
     try { if (s.pty) s.pty.resize(s.cols, s.rows); } catch {}
+  }
+
+  /** Something typed into the terminal and sent (a shell command, or a prompt to an agent): shown as what the session is working on. */
+  noteTyped(s: Session, text: string): void {
+    const t = text.trim();
+    if (!t) return;
+    s.lastActivity = Date.now();
+    if (recordActivity(s, t, "input", null)) this.o.bus.emit("changed", s);
   }
 
   /**
